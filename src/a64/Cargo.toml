@@ -1,0 +1,23 @@
+[package]
+name = "v86-a64"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+# Standalone for now so the x86 build (root Cargo.toml) is untouched.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "a64run"
+path = "src/bin/a64run.rs"
+
+[profile.dev]
+opt-level = 2
+overflow-checks = false
+
+[profile.release]
+opt-level = 3
+debug = 1

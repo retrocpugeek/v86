@@ -28,3 +28,6 @@ src/rust/gen/jit0f.rs
 bios/seabios
 bench-results
 .devcontainer/devcontainer-lock.json
+
+# aarch64 port (native crate)
+src/a64/target/
