@@ -5,6 +5,7 @@
 //
 //   A64_KERNEL=.../images/Image A64_ROOTFS=.../images/rootfs.ext4 tests/a64/boot.mjs
 //
+// A64_CMDLINE overrides the kernel command line (e.g. to add rootfstype=squashfs).
 // With A64_NET=fetch, a virtio-net device backed by v86's fetch network
 // adapter is added and the test checks that the guest gets a DHCP lease.
 //
@@ -37,7 +38,7 @@ const emulator = new V86({
     kernel: { url: kernel },
     hda: { url: rootfs, async: false },
     memory_size: 128 * 1024 * 1024,
-    cmdline: "rootwait root=/dev/vda console=ttyAMA0",
+    cmdline: process.env.A64_CMDLINE || "rootwait root=/dev/vda console=ttyAMA0",
     autostart: true,
     disable_keyboard: true,
     disable_mouse: true,

@@ -327,7 +327,7 @@ impl Cpu {
             return Ok(());
         }
         if opc >= 0x18 {
-            return undef(); // FP vector ops
+            return self.fp_three_same(i, scalar);
         }
         let esz = 8 << size;
         if scalar {
@@ -610,6 +610,106 @@ impl Cpu {
         Ok(())
     }
 
+    /// FP forms of the three-same group (opcode 0x18..0x1f), vector and scalar.
+    fn fp_three_same(&mut self, i: u32, scalar: bool) -> Res<()> {
+        let q = bit(i, 30);
+        let u = bit(i, 29);
+        let a_bit = bit(i, 23);
+        let dbl = bit(i, 22);
+        let opc = bits(i, 15, 11);
+        let (rd, rn, rm) = (i & 31, bits(i, 9, 5), bits(i, 20, 16));
+        if dbl && !q && !scalar {
+            return undef();
+        }
+        let esz = if dbl { 64 } else { 32 };
+        let lanes = if scalar { 1 } else if q { 128 / esz } else { 64 / esz };
+        let (va, vb, vd) = (self.vr(rn), self.vr(rm), self.vr(rd));
+        let get = |v: u128, k: u32| -> f64 {
+            let x = lane(v, k, esz);
+            if dbl { f64_of(x) } else { f32_of(x) as f64 }
+        };
+        let put = |x: f64| -> u64 { if dbl { x.to_bits() } else { (x as f32).to_bits() as u64 } };
+        // Round to the element precision for single-precision arithmetic.
+        let rnd = |x: f64| -> f64 { if dbl { x } else { x as f32 as f64 } };
+        let m = ones(esz);
+        let mask = |c: bool| if c { m } else { 0 };
+        let fused = |a: f64, b: f64, c: f64| -> f64 {
+            if dbl { a.mul_add(b, c) } else { (a as f32).mul_add(b as f32, c as f32) as f64 }
+        };
+
+        let pairwise = u && matches!(opc, 0x18 | 0x1a | 0x1e) && !(opc == 0x1a && a_bit);
+        if pairwise {
+            if scalar {
+                return undef();
+            }
+            let op = |x: f64, y: f64| -> f64 {
+                match (opc, a_bit) {
+                    (0x18, false) => fmaxnm(x, y),
+                    (0x18, true) => fminnm(x, y),
+                    (0x1a, _) => rnd(x + y),
+                    (0x1e, false) => fmax_arm(x, y),
+                    _ => fmin_arm(x, y),
+                }
+            };
+            let half = lanes / 2;
+            let mut r = 0u128;
+            for k in 0..lanes {
+                let (src, j) = if k < half { (va, 2 * k) } else { (vb, 2 * (k - half)) };
+                set_lane(&mut r, k, esz, put(op(get(src, j), get(src, j + 1))));
+            }
+            self.vd(rd, r, q);
+            return Ok(());
+        }
+
+        let mut r = 0u128;
+        for k in 0..lanes {
+            let (x, y, acc) = (get(va, k), get(vb, k), get(vd, k));
+            let v = match (u, a_bit, opc) {
+                (false, false, 0x18) => put(fmaxnm(x, y)),
+                (false, true, 0x18) => put(fminnm(x, y)),
+                (false, false, 0x19) => put(fused(x, y, acc)),
+                (false, true, 0x19) => put(fused(-x, y, acc)),
+                (false, false, 0x1a) => put(rnd(x + y)),
+                (false, true, 0x1a) => put(rnd(x - y)),
+                (false, false, 0x1b) => {
+                    // FMULX: 0 * inf = 2 (with the product's sign)
+                    let p = if (x == 0.0 && y.is_infinite()) || (x.is_infinite() && y == 0.0) {
+                        if x.is_sign_negative() != y.is_sign_negative() { -2.0 } else { 2.0 }
+                    } else {
+                        rnd(x * y)
+                    };
+                    put(p)
+                }
+                (false, false, 0x1c) => mask(x == y),
+                (false, false, 0x1e) => put(fmax_arm(x, y)),
+                (false, true, 0x1e) => put(fmin_arm(x, y)),
+                (false, false, 0x1f) => put(fused(-x, y, 2.0)),
+                (false, true, 0x1f) => put(fused(-x, y, 3.0) / 2.0),
+                (true, false, 0x1b) => put(rnd(x * y)),
+                (true, false, 0x1c) => mask(x >= y),
+                (true, true, 0x1c) => mask(x > y),
+                (true, false, 0x1d) => mask(x.abs() >= y.abs()),
+                (true, true, 0x1d) => mask(x.abs() > y.abs()),
+                (true, false, 0x1f) => put(rnd(x / y)),
+                (true, true, 0x1a) => put(rnd((x - y).abs())),
+                _ => return undef(),
+            };
+            set_lane(&mut r, k, esz, v);
+        }
+        if scalar {
+            // Only some of these exist as scalars; the rest are unallocated.
+            let ok = matches!((u, a_bit, opc), (false, false, 0x1b | 0x1c | 0x1f) | (false, true, 0x1f)
+                | (true, _, 0x1c | 0x1d) | (true, true, 0x1a));
+            if !ok {
+                return undef();
+            }
+            self.v[rd as usize] = r & ones(esz) as u128;
+        } else {
+            self.vd(rd, r, q);
+        }
+        Ok(())
+    }
+
     /// FP forms of the two-register-misc group (vector and scalar).
     /// Ok(None) = not an FP op handled here.
     fn fp_misc(&mut self, i: u32, scalar: bool) -> Res<Option<u128>> {
@@ -725,8 +825,30 @@ impl Cpu {
     }
 
     fn scalar_pairwise(&mut self, i: u32) -> Res<()> {
+        if bit(i, 29) {
+            // FP pairwise on the two lanes of Vn: FMAXNMP/FMINNMP, FADDP, FMAXP/FMINP.
+            let dbl = bit(i, 22);
+            let min = bit(i, 23);
+            let a = self.vr(bits(i, 9, 5));
+            let esz = if dbl { 64 } else { 32 };
+            let get = |k: u32| {
+                let x = lane(a, k, esz);
+                if dbl { f64_of(x) } else { f32_of(x) as f64 }
+            };
+            let (x, y) = (get(0), get(1));
+            let r = match (bits(i, 16, 12), min) {
+                (0x0c, false) => fmaxnm(x, y),
+                (0x0c, true) => fminnm(x, y),
+                (0x0d, false) => if dbl { x + y } else { (x as f32 + y as f32) as f64 },
+                (0x0f, false) => fmax_arm(x, y),
+                (0x0f, true) => fmin_arm(x, y),
+                _ => return undef(),
+            };
+            self.fp_set(i & 31, r, dbl);
+            return Ok(());
+        }
         // ADDP (scalar): Dd = Vn.D[0] + Vn.D[1]
-        if bit(i, 29) || bits(i, 23, 22) != 3 || bits(i, 16, 12) != 0x1b {
+        if bits(i, 23, 22) != 3 || bits(i, 16, 12) != 0x1b {
             return undef();
         }
         let a = self.vr(bits(i, 9, 5));
@@ -1348,6 +1470,7 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::Cpu;
 
     #[test]
     fn expand_imm() {
@@ -1355,6 +1478,33 @@ mod tests {
         assert_eq!(vfp_expand_imm(0x70, false), 1.0f32.to_bits() as u64);
         assert_eq!(vfp_expand_imm(0x00, true), 2.0f64.to_bits());
         assert_eq!(adv_simd_expand_imm(true, 0xe, 0x81), Some(0xff00_0000_0000_00ff));
+    }
+
+    fn cpu() -> Cpu {
+        let mut c = Cpu::new(crate::bus::Bus::new(0x4000_0000, 0x1000));
+        c.sr.cpacr_el1 = 3 << 20; // FP/SIMD enabled
+        c
+    }
+
+    #[test]
+    fn fp_three_same() {
+        let mut c = cpu();
+        // fabd d30, d30, d15 (from iperf3)
+        c.v[30] = 1.5f64.to_bits() as u128;
+        c.v[15] = 4.0f64.to_bits() as u128;
+        c.exec(0x7eef_d7de).unwrap();
+        assert_eq!(f64::from_bits(c.v[30] as u64), 2.5);
+        // fadd v0.4s, v1.4s, v2.4s
+        c.v[1] = [1.0f32, 2.0, 3.0, 4.0].iter().enumerate().map(|(k, f)| (f.to_bits() as u128) << (32 * k)).sum();
+        c.v[2] = [0.5f32, 0.5, 0.5, 0.5].iter().enumerate().map(|(k, f)| (f.to_bits() as u128) << (32 * k)).sum();
+        c.exec(0x4e22_d420).unwrap();
+        assert_eq!(f32::from_bits((c.v[0] >> 96) as u32), 4.5);
+        // fmla v0.2d, v1.2d, v2.2d: v0 += v1 * v2
+        c.v[0] = 1.0f64.to_bits() as u128 | (1.0f64.to_bits() as u128) << 64;
+        c.v[1] = 2.0f64.to_bits() as u128 | (3.0f64.to_bits() as u128) << 64;
+        c.v[2] = 10.0f64.to_bits() as u128 | (10.0f64.to_bits() as u128) << 64;
+        c.exec(0x4e62_cc20).unwrap();
+        assert_eq!(f64::from_bits((c.v[0] >> 64) as u64), 31.0);
     }
 
     #[test]
