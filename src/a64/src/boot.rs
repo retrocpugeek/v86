@@ -20,14 +20,22 @@ pub fn image_text_offset(image: &[u8]) -> Result<u64, String> {
     Ok(u64::from_le_bytes(image[8..16].try_into().unwrap()))
 }
 
+/// Where the DTB goes: QEMU uses the 64 MB mark when RAM allows (above the
+/// kernel), otherwise the top of RAM.
+pub fn dtb_addr(ram_size: u64) -> u64 {
+    if ram_size >= 128 << 20 {
+        RAM_BASE + (64 << 20)
+    } else {
+        (RAM_BASE + ram_size - 0x20_0000) & !0xfff
+    }
+}
+
 /// Load kernel and DTB and install QEMU's boot stub at the start of RAM:
 ///   ldr x0, dtb; mov x1..x3, xzr; ldr x4, entry; br x4
 pub fn load(cpu: &mut Cpu, image: &[u8], dtb: &[u8]) -> Result<BootInfo, String> {
     let text_offset = image_text_offset(image)?;
-    let ram_size = cpu.bus.ram.len() as u64;
     let entry = RAM_BASE + KERNEL_OFFSET + text_offset;
-    // QEMU puts the DTB at the 64 MB mark when RAM allows (above the kernel).
-    let dtb_addr = if ram_size >= 128 << 20 { RAM_BASE + (64 << 20) } else { (RAM_BASE + ram_size - 0x20_0000) & !0xfff };
+    let dtb_addr = dtb_addr(cpu.bus.ram.len() as u64);
     if entry + image.len() as u64 > dtb_addr {
         return Err("kernel image overlaps the DTB".into());
     }

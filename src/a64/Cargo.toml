@@ -9,6 +9,8 @@ edition = "2021"
 
 [lib]
 path = "src/lib.rs"
+# cdylib produces the browser build (v86-a64.wasm); rlib is used by a64run.
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "a64run"

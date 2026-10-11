@@ -53,6 +53,9 @@ export function V86(options)
     this.cpu_is_running = false;
     this.cpu_exception_hook = function(n) {};
 
+    /** "x86" (default) or "aarch64" */
+    const arch = options.arch || "x86";
+
     const bus = Bus.create();
     this.bus = bus[0];
     this.emulator_bus = bus[1];
@@ -107,6 +110,10 @@ export function V86(options)
         "jit_clear_all_funcs": () => cpu.jit_clear_all_funcs(),
 
         "__indirect_function_table": wasm_table,
+
+        // aarch64 (v86-a64.wasm): device space is handled in JS
+        "a64_mmio_read": function(addr, size) { return cpu.mmio_read(addr, size); },
+        "a64_mmio_write": function(addr, size, value) { cpu.mmio_write(addr, size, value); },
     };
 
     let wasm_fn = options.wasm_fn;
@@ -118,7 +125,7 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
                 if(options.wasm_path)
@@ -177,9 +184,12 @@ export function V86(options)
     wasm_fn({ "env": wasm_shared_funcs })
         .then((exports) => {
             wasm_memory = exports.memory;
-            exports["rust_init"]();
+            if(arch !== "aarch64")
+            {
+                exports["rust_init"]();
+            }
 
-            const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
+            const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table, arch });
             cpu = emulator.cpu;
 
             this.continue_init(emulator, options);
@@ -274,6 +284,8 @@ V86.prototype.continue_init = async function(emulator, options)
     // Enable unconditionally, so that state images don't miss hardware
     // TODO: Should be properly fixed in restore_state
     settings.net_device = Object.assign({ type: "ne2k" }, options.net_device);
+    // aarch64 only adds a (virtio) network device when networking is configured
+    settings.network_enabled = !!(relay_url || options.net_device);
 
     const screen_options = options.screen || {};
     if(options.screen_container)
@@ -393,6 +405,12 @@ V86.prototype.continue_init = async function(emulator, options)
             case "bzimage":
                 settings.bzimage = buffer.buffer;
                 break;
+            case "kernel":
+                settings.kernel = buffer.buffer;
+                break;
+            case "dtb":
+                settings.dtb = buffer.buffer;
+                break;
             case "initrd":
                 settings.initrd = buffer.buffer;
                 break;
@@ -434,7 +452,8 @@ V86.prototype.continue_init = async function(emulator, options)
 
         if(name === "bios" || name === "vga_bios" ||
             name === "initial_state" || name === "multiboot" ||
-            name === "bzimage" || name === "initrd")
+            name === "bzimage" || name === "initrd" ||
+            name === "kernel" || name === "dtb")
         {
             // Ignore async for these because they must be available before boot.
             // This should make result.buffer available after the object is loaded
@@ -480,6 +499,8 @@ V86.prototype.continue_init = async function(emulator, options)
     add_file("multiboot", options.multiboot);
     add_file("bzimage", options.bzimage);
     add_file("initrd", options.initrd);
+    add_file("kernel", options.kernel);
+    add_file("dtb", options.dtb);
 
     if(options.filesystem && options.filesystem.handle9p)
     {

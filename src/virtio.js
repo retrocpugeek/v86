@@ -308,11 +308,185 @@ export function VirtIO(cpu, options)
     {
         capabilities.push(this.create_device_specific_capability(options.device_specific));
     }
-    this.init_capabilities(capabilities);
-
-    cpu.devices.pci.register_device(this);
+    if(cpu.virtio_mmio_register)
+    {
+        // virtio-mmio transport (aarch64 machine): the CPU assigns a slot and
+        // interrupt line; the same capability fields back the MMIO registers.
+        this.init_mmio(capabilities, options.notification);
+        this.mmio_set_irq = cpu.virtio_mmio_register(this);
+    }
+    else
+    {
+        this.init_capabilities(capabilities);
+        cpu.devices.pci.register_device(this);
+    }
     this.reset();
 }
+
+// virtio-mmio (version 2) register offsets.
+const VIRTIO_MMIO_MAGIC = 0x74726976;
+const VIRTIO_MMIO_VENDOR = 0x1AF4;
+
+/**
+ * Set up the virtio-mmio register view over the capability structs.
+ * @param {!Array<VirtIO_CapabilityInfo>} capabilities
+ * @param {VirtIO_NotificationCapabilityOptions} notification
+ */
+VirtIO.prototype.init_mmio = function(capabilities, notification)
+{
+    /** @type {!Object<string, {bytes: number, name: string, read: function():number, write: function(number)}>} */
+    this.mmio_common = {};
+    for(const field of capabilities[0].struct)
+    {
+        this.mmio_common[field.name] = field;
+    }
+    this.mmio_notification = notification;
+    const device = capabilities.find(cap => cap.type === VIRTIO_PCI_CAP_DEVICE_CFG);
+    this.mmio_config = device ? device.struct : [];
+};
+
+/**
+ * Read `size` bytes at `offset` of the device-specific config space, which
+ * is the concatenation of the struct's fields.
+ * @param {number} offset
+ * @param {number} size
+ * @return {number}
+ */
+VirtIO.prototype.mmio_config_read = function(offset, size)
+{
+    let result = 0;
+    let field_offset = 0;
+    for(const field of this.mmio_config)
+    {
+        const end = field_offset + field.bytes;
+        if(end > offset && field_offset < offset + size)
+        {
+            const value = field.read();
+            for(let b = Math.max(offset, field_offset); b < Math.min(end, offset + size); b++)
+            {
+                const byte = (value >>> ((b - field_offset) << 3)) & 0xFF;
+                result |= byte << ((b - offset) << 3);
+            }
+        }
+        field_offset = end;
+    }
+    return result >>> 0;
+};
+
+/**
+ * @param {number} offset
+ * @param {number} size
+ * @param {number} value
+ */
+VirtIO.prototype.mmio_config_write = function(offset, size, value)
+{
+    let field_offset = 0;
+    for(const field of this.mmio_config)
+    {
+        const end = field_offset + field.bytes;
+        if(end > offset && field_offset < offset + size)
+        {
+            // Read-modify-write the bytes of this field covered by the access.
+            let v = field.read();
+            for(let b = Math.max(offset, field_offset); b < Math.min(end, offset + size); b++)
+            {
+                const shift = (b - field_offset) << 3;
+                v = (v & ~(0xFF << shift)) | (((value >>> ((b - offset) << 3)) & 0xFF) << shift);
+            }
+            field.write(v >>> 0);
+        }
+        field_offset = end;
+    }
+};
+
+/**
+ * @param {number} offset
+ * @param {number} size
+ * @return {number}
+ */
+VirtIO.prototype.mmio_read = function(offset, size)
+{
+    if(offset >= 0x100)
+    {
+        return this.mmio_config_read(offset - 0x100, size);
+    }
+    const f = this.mmio_common;
+    switch(offset)
+    {
+        case 0x000: return VIRTIO_MMIO_MAGIC;
+        case 0x004: return 2;
+        case 0x008: return this.device_id >= 0x1040 ? this.device_id - 0x1040 : this.device_id;
+        case 0x00C: return VIRTIO_MMIO_VENDOR;
+        case 0x010: return f["device_feature"].read() >>> 0;
+        case 0x034: return this.queue_selected ? this.queue_selected.size_supported : 0;
+        case 0x044: return f["queue_enable"].read();
+        case 0x060: return this.isr_status;
+        case 0x070: return f["device_status"].read();
+        case 0x080: return f["queue_desc (low dword)"].read() >>> 0;
+        case 0x090: return f["queue_avail (low dword)"].read() >>> 0;
+        case 0x0A0: return f["queue_used (low dword)"].read() >>> 0;
+        case 0x0FC: return this.config_generation;
+    }
+    return 0;
+};
+
+/**
+ * @param {number} offset
+ * @param {number} size
+ * @param {number} value
+ */
+VirtIO.prototype.mmio_write = function(offset, size, value)
+{
+    if(offset >= 0x100)
+    {
+        this.mmio_config_write(offset - 0x100, size, value);
+        return;
+    }
+    const f = this.mmio_common;
+    switch(offset)
+    {
+        case 0x014: f["device_feature_select"].write(value); break;
+        case 0x020: f["driver_feature"].write(value); break;
+        case 0x024: f["driver_feature_select"].write(value); break;
+        case 0x030: f["queue_select"].write(value); break;
+        case 0x038: f["queue_size"].write(value); break;
+        case 0x044:
+            if(value === 1)
+            {
+                f["queue_enable"].write(1);
+            }
+            else if(this.queue_selected)
+            {
+                this.queue_selected.enabled = false;
+            }
+            break;
+        case 0x050:
+        {
+            const queue = this.queues[value];
+            if(queue)
+            {
+                const n = this.mmio_notification;
+                const handler = n.handlers[n.single_handler ? 0 : queue.notify_offset];
+                handler && handler(value);
+            }
+            break;
+        }
+        case 0x064:
+            this.isr_status &= ~value;
+            if(!this.isr_status)
+            {
+                this.mmio_set_irq(false);
+            }
+            break;
+        case 0x070: f["device_status"].write(value & 0xFF); break;
+        case 0x080: f["queue_desc (low dword)"].write(value); break;
+        case 0x084: f["queue_desc (high dword)"].write(value); break;
+        case 0x090: f["queue_avail (low dword)"].write(value); break;
+        case 0x094: f["queue_avail (high dword)"].write(value); break;
+        case 0x0A0: f["queue_used (low dword)"].write(value); break;
+        case 0x0A4: f["queue_used (high dword)"].write(value); break;
+    }
+};
 
 /**
  * @param {VirtIO_CommonCapabilityOptions} options
@@ -1030,14 +1204,28 @@ VirtIO.prototype.raise_irq = function(type)
 {
     dbg_log("Raise irq " + h(type), LOG_VIRTIO);
     this.isr_status |= type;
-    this.pci.raise_irq(this.pci_id);
+    if(this.mmio_set_irq)
+    {
+        this.mmio_set_irq(true);
+    }
+    else
+    {
+        this.pci.raise_irq(this.pci_id);
+    }
 };
 
 VirtIO.prototype.lower_irq = function()
 {
     dbg_log("Lower irq ", LOG_VIRTIO);
     this.isr_status = 0;
-    this.pci.lower_irq(this.pci_id);
+    if(this.mmio_set_irq)
+    {
+        this.mmio_set_irq(false);
+    }
+    else
+    {
+        this.pci.lower_irq(this.pci_id);
+    }
 };
 
 /**

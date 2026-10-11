@@ -16,3 +16,5 @@ pub mod exec_sys;
 pub mod gic;
 pub mod mmu;
 pub mod sysregs;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;

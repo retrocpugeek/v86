@@ -74,6 +74,10 @@ pub struct Cpu {
     pub auto_irq: bool,
     /// icount at the first return to EL0 (diagnostics).
     pub first_el0: Option<u64>,
+    /// Follow host time (browser): idle time is waited out by the host rather
+    /// than skipped, and sync_host_ns() pulls virtual time up to the host clock.
+    pub realtime: bool,
+    host_base_ns: Option<u64>,
 }
 
 impl Cpu {
@@ -106,6 +110,8 @@ impl Cpu {
             log_undef: true,
             auto_irq: true,
             first_el0: None,
+            realtime: false,
+            host_base_ns: None,
         }
     }
 
@@ -304,7 +310,7 @@ impl Cpu {
         while self.waiting {
             if self.bus.gic.irq_out {
                 self.waiting = false;
-            } else if self.next_timer_ns != u64::MAX {
+            } else if self.next_timer_ns != u64::MAX && !self.realtime {
                 // Skip idle time straight to the next timer deadline.
                 self.warp_ns += self.next_timer_ns.saturating_sub(self.now_ns());
                 self.timer_update();
@@ -313,6 +319,22 @@ impl Cpu {
             }
         }
         None
+    }
+
+    /// Advance virtual time to at least the host clock (realtime mode). Virtual
+    /// time also advances by ns_per_insn per instruction between calls.
+    pub fn sync_host_ns(&mut self, host_ns: u64) {
+        let now = self.now_ns();
+        let base = *self.host_base_ns.get_or_insert(host_ns.saturating_sub(now));
+        let target = host_ns.saturating_sub(base);
+        if target > now {
+            self.warp_ns += target - now;
+        }
+    }
+
+    /// Nanoseconds until the next armed timer fires, if any.
+    pub fn ns_until_timer(&self) -> Option<u64> {
+        (self.next_timer_ns != u64::MAX).then(|| self.next_timer_ns.saturating_sub(self.now_ns()))
     }
 
     /// Run up to `budget` steps (instructions, interrupts or faults).

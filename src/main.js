@@ -1,4 +1,5 @@
 import { CPU } from "./cpu.js";
+import { A64CPU } from "./a64_cpu.js";
 import { save_state, restore_state } from "./state.js";
 export { V86 } from "./browser/starter.js";
 
@@ -20,8 +21,12 @@ export function v86(bus, wasm)
     this.tick_counter = 0;
     this.worker = null;
 
+    const stop_idling = () => { this.idle && this.next_tick(0); };
+
     /** @type {CPU} */
-    this.cpu = new CPU(bus, wasm, () => { this.idle && this.next_tick(0); });
+    this.cpu = wasm.arch === "aarch64" ?
+        /** @type {?} */ (new A64CPU(bus, wasm, stop_idling)) :
+        new CPU(bus, wasm, stop_idling);
 
     this.bus = bus;
 

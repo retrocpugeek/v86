@@ -4,8 +4,46 @@ An ARMv8.0-A (AArch64 only, EL0/EL1) system emulator core, modelled on QEMU's
 `virt` machine with `-cpu cortex-a53`. The goal is to boot a stock buildroot
 `qemu_aarch64_virt_defconfig` kernel and rootfs in v86.
 
-It's a standalone crate for now; the x86 build is unaffected. Only the native
-runner exists so far (no wasm build or browser integration yet).
+It's a standalone crate; the x86 build is unaffected. It builds both as a
+native runner (`a64run`, for development and lockstep testing) and as
+`build/v86-a64.wasm`, which v86 uses for `new V86({ arch: "aarch64", ... })`.
+
+## In v86
+
+```sh
+make build/v86-a64.wasm build/libv86.js
+```
+
+```js
+new V86({
+    arch: "aarch64",
+    wasm_path: "build/v86-a64.wasm",
+    memory_size: 128 * 1024 * 1024,
+    kernel: { url: "Image" },                       // arm64 Image
+    hda: { url: "rootfs.ext4", async: false },       // virtio-blk, /dev/vda
+    cmdline: "rootwait root=/dev/vda console=ttyAMA0",
+    net_device: { relay_url: "fetch", type: "virtio" }, // optional
+    serial_container: document.getElementById("serial"),
+    autostart: true,
+});
+```
+
+The wasm core holds the CPU, MMU, GIC and timers. Device space is forwarded to
+JS (`src/a64_cpu.js`): PL011 on `serial0` (`src/pl011.js`), PL031
+(`src/pl031.js`), and virtio-mmio slots. v86's existing virtio devices
+(virtio-net, virtio-console, 9p) run on the virtio-mmio transport added to
+`src/virtio.js`, and `src/virtio_blk.js` serves `hda`. The device tree is
+generated from the configured devices (`src/fdt.js`); `dtb` overrides it.
+Guest time follows the host clock, and idle time is waited out rather than skipped.
+State save/restore isn't supported yet.
+
+Tests (they need the buildroot images):
+
+```sh
+A64_KERNEL=.../Image A64_ROOTFS=.../rootfs.ext4 tests/a64/boot.mjs   # node, V86 API
+A64_NET=fetch A64_KERNEL=... A64_ROOTFS=... tests/a64/boot.mjs       # plus virtio-net/DHCP
+tests/a64/browser.mjs     # examples/aarch64.html in headless Chrome (images in images/aarch64/)
+```
 
 ## Layout
 

@@ -351,8 +351,17 @@ export interface V86Options {
     /**
      * Path to v86 wasm artifact
      * @default "build/v86.wasm" or "build/v86-debug.wasm" when debug mode enabled
+     * ("build/v86-a64.wasm" for arch "aarch64")
      */
     wasm_path?: string;
+
+    /**
+     * Guest architecture. "aarch64" (experimental) emulates a QEMU "virt"-like
+     * machine with a Cortex-A53, booting an arm64 Linux `kernel` with a
+     * PL011 serial console (serial0) and `hda` attached as virtio-blk.
+     * @default "x86"
+     */
+    arch?: "x86" | "aarch64";
 
     /**
      * The memory size in bytes, should be a power of 2.
@@ -431,6 +440,16 @@ export interface V86Options {
      * A Linux kernel image to boot (only bzimage format)
      */
     bzimage?: V86Image;
+
+    /**
+     * arch "aarch64" only: an arm64 Linux kernel (`Image` format)
+     */
+    kernel?: V86Image;
+
+    /**
+     * arch "aarch64" only: a device tree blob to use instead of the generated one
+     */
+    dtb?: V86Image;
 
     /**
      * Kernel boot cmdline

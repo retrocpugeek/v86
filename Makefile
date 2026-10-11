@@ -83,7 +83,8 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   acpi.js iso9660.js \
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   bus.js log.js cpu.js \
-	   elf.js kernel.js
+	   elf.js kernel.js \
+	   a64_cpu.js pl011.js pl031.js virtio_blk.js fdt.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
@@ -213,6 +214,15 @@ build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86.wasm
 	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86.wasm -o build/v86.wasm
 	BLOCK_SIZE=K ls -l build/v86.wasm
+
+# AArch64 core (src/a64), a separate crate with its own target directory.
+A64_RUST_FILES=$(shell find src/a64/src -name '*.rs') src/a64/Cargo.toml
+build/v86-a64.wasm: $(A64_RUST_FILES)
+	mkdir -p build/
+	cd src/a64 && CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --release --lib --target wasm32-unknown-unknown
+	cp src/a64/target/wasm32-unknown-unknown/release/v86_a64.wasm build/v86-a64.wasm
+	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86-a64.wasm -o build/v86-a64.wasm
+	BLOCK_SIZE=K ls -l build/v86-a64.wasm
 
 build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
