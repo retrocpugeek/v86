@@ -11,9 +11,17 @@
 //   Image         the kernel (output/images/Image)
 //   rootfs.ext4   the root filesystem, attached as virtio-blk (/dev/vda)
 // and build/v86-a64.wasm (make build/v86-a64.wasm build/libv86.js).
+//
+// Networking is a virtio-net device. By default it uses the "fetch" adapter,
+// which gives the guest DHCP and DNS, and turns its HTTP requests into
+// fetch() calls from the page (so CORS applies). http://<port>.external/
+// reaches localhost:<port> on the host. Pass ?relay=wisps://... (or any
+// relay_url v86 accepts) to use a different network relay.
 
 window.onload = function()
 {
+    var relay = new URLSearchParams(location.search).get("relay") || "fetch";
+
     var emulator = window.emulator = new V86({
         arch: "aarch64",
         wasm_path: "../build/v86-a64.wasm",
@@ -26,6 +34,10 @@ window.onload = function()
             async: false,
         },
         cmdline: "rootwait root=/dev/vda console=ttyAMA0",
+        net_device: {
+            type: "virtio",
+            relay_url: relay,
+        },
         serial_container: document.getElementById("serial"),
         autostart: true,
         disable_keyboard: true,
@@ -42,10 +54,14 @@ window.onload = function()
     });
     emulator.add_listener("emulator-ready", function()
     {
-        document.getElementById("status").textContent = "Running (log in as root)";
+        document.getElementById("status").textContent = "Running (log in as root, network: " + relay + ")";
     });
 };
 </script>
 
 <p id="status">Loading ...</p>
+<p>Try: <code>wget -qO- http://<span id="port"></span>.external/examples/aarch64.html | head</code>
+(<code>&lt;port&gt;.external</code> is fetched from <code>localhost</code>, so open this page via
+<code>http://localhost:&lt;port&gt;/</code> rather than 127.0.0.1)</p>
+<script>document.getElementById("port").textContent = location.port || "80";</script>
 <textarea id="serial" cols="100" rows="40" spellcheck="false"></textarea>

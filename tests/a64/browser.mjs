@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Runs examples/aarch64.html in headless Chrome and checks that it boots to a
-// login prompt, logs in and runs a command, via the DevTools protocol.
+// login prompt, gets a DHCP lease over virtio-net, logs in, runs a command and
+// fetches a page from the test web server through the guest's network.
 //
 //   tests/a64/browser.mjs
 //
@@ -83,15 +84,21 @@ async function main()
 
     await send("Runtime.enable");
     const start = Date.now();
-    await send("Page.navigate", { url: `http://127.0.0.1:${HTTP_PORT}/examples/aarch64.html` });
+    // localhost (not 127.0.0.1): <port>.external is fetched from localhost, which
+    // must be same-origin since the test server sends no CORS headers.
+    await send("Page.navigate", { url: `http://localhost:${HTTP_PORT}/examples/aarch64.html` });
 
+    await wait_for("udhcpc: lease of");
     await wait_for("login:");
     console.log(`[browser] login prompt after ${((Date.now() - start) / 1000).toFixed(1)}s`);
     await evaluate("emulator.serial0_send('root\\n')");
     await wait_for("# ");
     await evaluate("emulator.serial0_send('uname -m; echo browser-$((6*7))\\n')");
-    const out = await wait_for("browser-42");
+    let out = await wait_for("browser-42");
     console.log(out.split("\n").slice(-6).join("\n"));
+    await evaluate(`emulator.serial0_send('wget -qO- http://${HTTP_PORT}.external/examples/aarch64.html | grep -c "aarch64 example" | sed s/^/wget-ok-/\\n')`);
+    out = await wait_for("wget-ok-1");
+    console.log(out.split("\n").slice(-3).join("\n"));
     console.log(`[browser] PASS in ${((Date.now() - start) / 1000).toFixed(1)}s`);
 }
 
