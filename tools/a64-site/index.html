@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v86 arm64 Linux</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="libv86.js"></script>
+<style>
+:root { color-scheme: dark; --bg: #111; --fg: #ddd; --muted: #888; --accent: #6cf; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 12px; }
+h1 { font-size: 18px; margin: 0; }
+#status { color: var(--muted); }
+select { background: #222; color: var(--fg); border: 1px solid #444; padding: 2px 4px; }
+#terminal { display: inline-block; padding: 4px; background: #000; max-width: 100%; overflow-x: auto; }
+footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
+a { color: var(--accent); }
+code { color: var(--fg); }
+</style>
+
+<header>
+  <h1>v86 arm64 Linux</h1>
+  <label>Image <select id="build"></select></label>
+  <span id="status">Loading …</span>
+</header>
+<div id="terminal"></div>
+<footer>
+  Buildroot arm64 Linux running on v86's AArch64 core (ARMv8.0, QEMU <code>virt</code>-like machine), entirely in your browser.
+  Log in as <code>root</code>. Disk changes stay in this tab.
+  Networking uses the <code>fetch</code> adapter: <code>wget</code> works for sites that allow CORS
+  (<code>?relay=wisps://…</code> selects a different relay).
+  <a href="https://github.com/retrocpugeek/v86/tree/aarch64-port">Source</a>
+</footer>
+
+<script>
+"use strict";
+
+(async function()
+{
+    const params = new URLSearchParams(location.search);
+    const status = document.getElementById("status");
+    const select = document.getElementById("build");
+
+    const manifest = await (await fetch("images/manifest.json", { cache: "no-cache" })).json();
+    const build = manifest.builds.find(b => b.id === params.get("build")) || manifest.builds[0];
+
+    for(const b of manifest.builds)
+    {
+        select.add(new Option(b.label, b.id, false, b === build));
+    }
+    select.onchange = () =>
+    {
+        params.set("build", select.value);
+        location.search = params.toString();
+    };
+
+    const base = "images/" + build.id + "/";
+    const relay = params.get("relay") || "fetch";
+
+    const emulator = window.emulator = new V86({
+        arch: "aarch64",
+        wasm_path: "v86-a64.wasm",
+        memory_size: (build.memory_mb || 128) * 1024 * 1024,
+        kernel: { url: base + build.kernel },
+        hda: {
+            url: base + "rootfs/" + build.rootfs.ext,
+            size: build.rootfs.size,
+            fixed_chunk_size: build.rootfs.chunk_size,
+            use_parts: true,
+            async: true,
+        },
+        cmdline: build.cmdline,
+        net_device: { type: "virtio", relay_url: relay },
+        serial_console: { type: "xtermjs", container: document.getElementById("terminal") },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+
+    emulator.add_listener("download-progress", e =>
+    {
+        if(e.lengthComputable && e.file_name.endsWith(build.kernel))
+        {
+            status.textContent = "Downloading kernel: " + Math.round(e.loaded / e.total * 100) + "%";
+        }
+    });
+    emulator.add_listener("emulator-ready", () =>
+    {
+        status.textContent = "Booting (log in as root)";
+    });
+})().catch(e =>
+{
+    document.getElementById("status").textContent = "Error: " + e.message;
+    throw e;
+});
+</script>

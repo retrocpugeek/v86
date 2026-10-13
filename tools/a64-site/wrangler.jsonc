@@ -1,0 +1,11 @@
+// Static hosting for v86's aarch64 machine on Cloudflare Workers (free tier:
+// static asset requests are free; 25 MiB per file, 20,000 files).
+// Build with tools/a64-site/build.sh and add-image.sh first.
+{
+  "name": "v86-arm",
+  "compatibility_date": "2026-07-01",
+  "assets": {
+    "directory": "../../build/a64-site",
+    "not_found_handling": "404-page"
+  }
+}

@@ -5,6 +5,9 @@
 //
 //   A64_KERNEL=.../images/Image A64_ROOTFS=.../images/rootfs.ext4 tests/a64/boot.mjs
 //
+// With A64_ROOTFS_CHUNK=<bytes>, A64_ROOTFS names split parts (tools/split-image.py,
+// <dir>/<start>-<end>.ext4 for A64_ROOTFS=<dir>/.ext4) loaded on demand, and
+// A64_ROOTFS_SIZE gives the image size.
 // A64_CMDLINE overrides the kernel command line (e.g. to add rootfstype=squashfs).
 // With A64_NET=fetch, a virtio-net device backed by v86's fetch network
 // adapter is added and the test checks that the guest gets a DHCP lease.
@@ -36,7 +39,9 @@ const emulator = new V86({
     arch: "aarch64",
     wasm_path: __dirname + "/../../build/v86-a64.wasm",
     kernel: { url: kernel },
-    hda: { url: rootfs, async: false },
+    hda: process.env.A64_ROOTFS_CHUNK ?
+        { url: rootfs, async: true, use_parts: true, fixed_chunk_size: +process.env.A64_ROOTFS_CHUNK, size: +process.env.A64_ROOTFS_SIZE } :
+        { url: rootfs, async: false },
     memory_size: 128 * 1024 * 1024,
     cmdline: process.env.A64_CMDLINE || "rootwait root=/dev/vda console=ttyAMA0",
     autostart: true,
