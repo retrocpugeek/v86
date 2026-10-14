@@ -206,6 +206,7 @@ fn interactive(cpu: &mut Cpu, rx: Arc<Mutex<VecDeque<u8>>>, steps: u64) {
     if let Some(i) = cpu.first_el0 {
         eprintln!("a64run: first EL0 entry at icount {i}");
     }
+    eprintln!("a64run: {} decoded code pages", cpu.dcache.pages());
 }
 
 /// One `-d cpu` record from QEMU.

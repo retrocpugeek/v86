@@ -9,7 +9,7 @@ fn width(sf: bool) -> u32 { if sf { 64 } else { 32 } }
 
 /// Shift for the shifted-register forms (type 3 = ROR).
 #[inline(always)]
-fn shift_reg(v: u64, ty: u32, amount: u32, sf: bool) -> u64 {
+pub(crate) fn shift_reg(v: u64, ty: u32, amount: u32, sf: bool) -> u64 {
     let w = width(sf);
     let v = v & ones(w);
     let r = match ty {

@@ -2,6 +2,7 @@
 
 use crate::bits::ones;
 use crate::cpu::Cpu;
+use crate::decode::{decode, Op};
 use crate::exc::{ec, fsc, Exception, Res};
 
 const TLB_SIZE: usize = 4096;
@@ -356,6 +357,27 @@ impl Cpu {
         self.fetch_slow(va)
     }
 
+    /// Fetch and decode, through the decoded-instruction cache.
+    #[inline(always)]
+    pub fn fetch_op(&mut self, va: u64) -> Res<Op> {
+        if va & !0xffc != self.tlb.fetch_page {
+            // Fills the fetch cache if the page is RAM
+            let insn = self.fetch_slow(va)?;
+            if va & !0xffc != self.tlb.fetch_page {
+                return Ok(decode(insn));
+            }
+        }
+        let off = (va & 0xffc) as usize;
+        let insn = self.bus.read_ram(self.tlb.fetch_ram | off, 4) as u32;
+        // Safety: dcur is the decoded page (PAGE_OPS entries) for fetch_page;
+        // fetch_slow sets them together.
+        let slot = unsafe { &mut *self.dcur.add(off >> 2) };
+        if slot.insn != insn {
+            *slot = decode(insn);
+        }
+        Ok(*slot)
+    }
+
     #[inline(never)]
     fn fetch_slow(&mut self, va: u64) -> Res<u32> {
         if va & 3 != 0 {
@@ -365,6 +387,7 @@ impl Cpu {
         if let Some(off) = self.bus.ram_offset(pa & !0xfff, 0x1000) {
             self.tlb.fetch_page = va & !0xfff;
             self.tlb.fetch_ram = off;
+            self.dcur = self.dcache.page(off >> 12);
         }
         Ok(self.bus.read(pa, 4) as u32)
     }

@@ -7,6 +7,7 @@ pub mod bits;
 pub mod boot;
 pub mod bus;
 pub mod cpu;
+pub mod decode;
 pub mod dev;
 pub mod exc;
 pub mod exec_crypto;

@@ -1,6 +1,7 @@
 //! CPU state, the step loop, exception entry/return and the generic timers.
 
 use crate::bus::Bus;
+use crate::decode::{DCache, Op};
 use crate::exc::{undef, ec, Exception, Res};
 use crate::gic::{PPI_PTIMER, PPI_VTIMER};
 use crate::mmu::Tlb;
@@ -83,6 +84,10 @@ pub struct Cpu {
     /// Ends run()'s current batch of steps: set when the timer deadline,
     /// WFI state or power state may have changed.
     pub stop_batch: bool,
+    pub dcache: DCache,
+    /// Decoded page for the instruction fetch cache's page (Tlb::fetch_page);
+    /// set together with it in fetch_slow.
+    pub(crate) dcur: *mut Op,
 }
 
 impl Cpu {
@@ -118,6 +123,8 @@ impl Cpu {
             realtime: false,
             host_base_ns: None,
             stop_batch: false,
+            dcache: DCache::default(),
+            dcur: std::ptr::null_mut(),
         }
     }
 
@@ -282,8 +289,8 @@ impl Cpu {
             self.take_exception(Exception::new(ec::ILLEGAL_STATE, 0), pc);
             return;
         }
-        let insn = match self.fetch(pc) {
-            Ok(i) => i,
+        let op = match self.fetch_op(pc) {
+            Ok(op) => op,
             Err(e) => {
                 self.take_exception(e, pc);
                 return;
@@ -294,8 +301,9 @@ impl Cpu {
         // counter read sees itself). QEMU refunds it only for memory aborts
         // (state restored from the TB); UNDEF, traps, SVC and BRK still count.
         self.icount += 1;
-        if let Err(e) = self.exec(insn) {
+        if let Err(e) = (op.f)(self, &op) {
             if e.ec == ec::UNKNOWN && self.log_undef {
+                let insn = op.insn;
                 eprintln!("a64: undefined insn {insn:08x} at {pc:#x} (EL{})", self.el);
             }
             if e.ec == ec::DABT_LOWER || e.ec == ec::DABT_CUR {

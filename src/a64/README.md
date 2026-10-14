@@ -51,6 +51,7 @@ tests/a64/browser.mjs     # examples/aarch64.html in headless Chrome (images in 
 |---|---|
 | `cpu.rs` | State, step/run loop, exception entry/ERET, generic timers |
 | `mmu.rs` | VMSAv8-64 stage 1 walk (4 KB granule, TBI), ASID-tagged TLB, memory accessors |
+| `decode.rs` | Decoded-instruction cache: per-page decoded ops with handlers for the common integer forms (others go through `exec`) |
 | `sysregs.rs` | MRS/MSR, EL0 trap rules; ID values captured from QEMU (`tools/a64-ref/idprobe`) |
 | `exec_int.rs` | Integer data processing, branches |
 | `exec_ldst.rs` | Loads/stores, pairs, exclusives, acquire/release |
