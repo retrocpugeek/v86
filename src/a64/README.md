@@ -52,7 +52,7 @@ tests/a64/browser.mjs     # examples/aarch64.html in headless Chrome (images in 
 | `cpu.rs` | State, step/run loop, exception entry/ERET, generic timers |
 | `mmu.rs` | VMSAv8-64 stage 1 walk (4 KB granule, TBI), ASID-tagged TLB, memory accessors |
 | `decode.rs` | Decoded-instruction cache: per-page decoded ops with handlers for the common integer forms (others go through `exec`) |
-| `jit.rs` | Browser build: compiles hot blocks of those forms to WebAssembly (see below) |
+| `jit.rs` | Browser build: compiles hot code to WebAssembly a page at a time (see below) |
 | `sysregs.rs` | MRS/MSR, EL0 trap rules; ID values captured from QEMU (`tools/a64-ref/idprobe`) |
 | `exec_int.rs` | Integer data processing, branches |
 | `exec_ldst.rs` | Loads/stores, pairs, exclusives, acquire/release |
@@ -77,20 +77,31 @@ and powers off (`--qemu` runs the same thing on QEMU).
 
 ## JIT (browser build)
 
-`jit.rs` compiles hot blocks (straight-line code within a page, entered at a
-branch target) to small WebAssembly modules, which JS compiles and adds to the
-core's function table (`A64CPU.jit_compile`). Compiled code works on the `Cpu`
-struct in linear memory, looks loads and stores up in the TLB inline (anything
-but RAM goes through `jit_read`/`jit_write` and ends the block after the
-instruction), and checks on entry that the instruction words in RAM are still
-the ones it was compiled from. `?jit=0` on the site turns it off.
+`jit.rs` compiles hot code to WebAssembly a page at a time. Once a branch
+target has been entered 100 times, its page is compiled into one function
+that holds all the page's hot entry points and the code reachable from them
+within the page. It dispatches on pc in a loop, so loops, calls and returns
+within the page stay in compiled code. A new hot entry point recompiles the
+page. JS compiles the module and adds it to the core's function table
+(`A64CPU.jit_compile`).
 
-The native build has no JIT. Its self-test runs random blocks compiled and
-interpreted from the same random state (with the MMU off, and on with random
-TLB permissions) and compares the results:
+Compiled code works on the `Cpu` struct in linear memory and looks loads and
+stores up in the TLB inline. Accesses to anything but RAM go through
+`jit_read`/`jit_write` and return to the run loop after the instruction, so
+device interrupts are seen at the same point as when interpreting. The first
+time a call runs a block, it checks that the block's instruction words in RAM
+are still the ones it was compiled from, so writes to code and DMA need no
+tracking. Instructions it doesn't compile, and rare cases of those it does
+(a Q-register access outside the TLB's RAM entries, for example), are left
+to the interpreter. `?jit=0` on the site turns it off.
+
+The native build has no JIT. Its self-test runs random code, mostly
+branching within itself, compiled and interpreted from the same random state
+(with the MMU off, and on with random TLB permissions) and compares the
+results:
 
 ```sh
-make build/v86-a64.wasm && node tools/a64-ref/jit-test.mjs [blocks] [seed]
+make build/v86-a64.wasm && node tools/a64-ref/jit-test.mjs [iterations] [seed]
 ```
 
 ## Lockstep against QEMU

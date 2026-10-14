@@ -15,6 +15,7 @@ use crate::bits::*;
 use crate::cpu::Cpu;
 use crate::exc::Res;
 use crate::exec_int::{extend_reg, shift_reg};
+use crate::jit::JitPage;
 
 pub type Handler = fn(&mut Cpu, &Op) -> Res<()>;
 
@@ -40,10 +41,10 @@ const MAX_PAGES: usize = 2048;
 pub struct DCache {
     pages: Vec<Option<Box<[Op]>>>,
     count: usize,
-    /// JIT state of a block starting at each slot (see jit.rs), allocated for
-    /// a page when its first block start is counted.
-    jit: Vec<Option<Box<[u32]>>>,
-    /// Function table slots of compiled blocks that were dropped.
+    /// JIT state of the pages (see jit.rs), allocated for a page when its
+    /// first block start is counted.
+    jit: Vec<Option<Box<JitPage>>>,
+    /// Function table slots of compiled regions that were dropped.
     pub jit_free: Vec<u32>,
 }
 
@@ -59,10 +60,8 @@ impl DCache {
             if self.count == MAX_PAGES {
                 self.pages.iter_mut().for_each(|p| *p = None);
                 for p in self.jit.iter_mut() {
-                    for &j in p.iter().flat_map(|p| p.iter()) {
-                        if crate::jit::is_installed(j) {
-                            self.jit_free.push(crate::jit::func_index(j));
-                        }
+                    if let Some(jp) = p {
+                        jp.drop_region(&mut self.jit_free);
                     }
                     *p = None;
                 }
@@ -87,23 +86,35 @@ impl DCache {
         if self.jit.len() <= page {
             self.jit.resize_with(page + 1, || None);
         }
-        self.jit[page].get_or_insert_with(|| vec![0; PAGE_OPS].into_boxed_slice()).as_mut_ptr()
+        self.jit[page].get_or_insert_with(JitPage::new).state.as_mut_ptr()
     }
 
-    /// JIT state for slot `slot` of decoded RAM page `page`.
-    pub fn jit_state(&mut self, page: usize, slot: usize) -> &mut u32 {
-        // Safety: jit_page has PAGE_OPS entries
-        unsafe { &mut *self.jit_page(page).add(slot) }
+    /// JIT state of RAM page `page`, if it has any.
+    pub fn jit_meta(&mut self, page: usize) -> Option<&mut JitPage> { self.jit.get_mut(page)?.as_deref_mut() }
+
+    /// Install compiled region `index` for RAM page `page` at block starts `slots`.
+    pub fn jit_install(&mut self, page: usize, index: u32, slots: &[usize]) {
+        match self.jit.get_mut(page).and_then(|j| j.as_mut()) {
+            Some(jp) => jp.install(index, slots, &mut self.jit_free),
+            None => self.jit_free.push(index),
+        }
+    }
+
+    /// Drop the compiled region of RAM page `page`.
+    pub fn jit_drop(&mut self, page: usize) {
+        if let Some(jp) = self.jit.get_mut(page).and_then(|j| j.as_mut()) {
+            jp.drop_region(&mut self.jit_free);
+        }
     }
 
     /// Replace slot `n` of RAM page `page` (`slot`), whose instruction word changed.
     #[cold]
     pub fn redecode(&mut self, page: usize, n: usize, slot: &mut Op, insn: u32) {
-        if let Some(j) = self.jit.get_mut(page).and_then(|p| p.as_mut()) {
-            if crate::jit::is_installed(j[n]) {
-                self.jit_free.push(crate::jit::func_index(j[n]));
+        if let Some(jp) = self.jit.get_mut(page).and_then(|p| p.as_mut()) {
+            if crate::jit::is_installed(jp.state[n]) {
+                jp.drop_region(&mut self.jit_free);
             }
-            j[n] = 0;
+            jp.state[n] = 0;
         }
         *slot = decode(insn);
     }
@@ -164,7 +175,37 @@ pub enum Form {
     /// ext: 0 zero-extend, 1 sign-extend to 64 bits, 2 sign-extend to 32 bits.
     Ld { size: u32, ext: u32, mode: u32 },
     St { size: u32, mode: u32 },
+    /// DMB, DSB, ISB (no-ops here, but ISB ends compiled code).
+    Barrier { isb: u32 },
+
+    // Forms only the JIT handles (the interpreter runs them through exec)
+    /// MRS of a register in a field of Cpu (see jit.rs).
+    Mrs { reg: u32 },
+    DcZva,
+    /// SMADDL, SMSUBL, UMADDL, UMSUBL
+    MaddL { unsigned: u32, sub: u32 },
+    /// CCMN, CCMP (sub = 1); op.d = condition, op.imm = NZCV.
+    Ccmp { sf: u32, sub: u32, imm: u32 },
+    /// REV16 (opc 1), REV32 / 32-bit REV (2), REV (3)
+    Rev { sf: u32, opc: u32 },
+    Clz { sf: u32 },
+    /// LDR / STR of a Q register, and LDP / STP (pair = 1).
+    LdQ { mode: u32, pair: u32 },
+    StQ { mode: u32, pair: u32 },
+    /// LDAR, STLR
+    LdAcq { size: u32 },
+    StRel { size: u32 },
+    /// LDXR / LDAXR, STXR / STLXR (op.c = status register)
+    LdEx { size: u32 },
+    StEx { size: u32 },
 }
+
+// Mrs registers
+pub const MRS_TPIDR_EL1: u32 = 0;
+pub const MRS_TPIDR_EL0: u32 = 1;
+pub const MRS_TPIDRRO_EL0: u32 = 2;
+pub const MRS_SP_EL0: u32 = 3;
+pub const MRS_DAIF: u32 = 4;
 
 pub fn decode(i: u32) -> Op {
     let (form, mut op) = decode_op(i);
@@ -174,7 +215,8 @@ pub fn decode(i: u32) -> Op {
     op
 }
 
-/// The instruction's form, if it has a handler of its own, and its operands.
+/// The instruction's form, if it has a handler of its own or the JIT compiles
+/// it (see Form), and its operands.
 pub fn decode_op(i: u32) -> (Option<Form>, Op) {
     let mut op =
         Op { insn: i, a: (i & 31) as u8, b: bits(i, 9, 5) as u8, c: bits(i, 20, 16) as u8, d: 0, f: generic, imm: 0 };
@@ -211,6 +253,9 @@ fn handler(form: Form) -> Handler {
         Stp { size, mode } => pick!(stp; size => [2, 3]; mode => [0, 1, 2]),
         Ld { size, ext, mode } => pick!(ld; size => [0, 1, 2, 3]; ext => [0, 1, 2]; mode => [0, 1, 2, 3]),
         St { size, mode } => pick!(st; size => [0, 1, 2, 3]; mode => [0, 1, 2, 3]),
+        Barrier { .. } => nop,
+        Mrs { .. } | DcZva | MaddL { .. } | Ccmp { .. } | Rev { .. } | Clz { .. } | LdQ { .. } | StQ { .. } => generic,
+        LdAcq { .. } | StRel { .. } | LdEx { .. } | StEx { .. } => generic,
     }
 }
 
@@ -318,6 +363,29 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Form> {
         // Hints other than WFE/WFI: NOP, YIELD, SEV, PAuth/BTI, ...
         return Some(Nop);
     }
+    if i & 0xffff_f01f == 0xd503_301f && bits(i, 7, 5) != 2 {
+        // DSB, DMB, ISB (CLREX is op2 = 2)
+        return Some(Barrier { isb: (bits(i, 7, 5) == 6) as u32 });
+    }
+    if i & 0xffff_ffe0 == 0xd50b_7420 {
+        return Some(DcZva);
+    }
+    if i & 0xfff0_0000 == 0xd530_0000 {
+        // MRS
+        let reg = match (i >> 5) & 0x7fff {
+            0x4684 => MRS_TPIDR_EL1, // 3, 0, 13, 0, 4
+            0x5e82 => MRS_TPIDR_EL0, // 3, 3, 13, 0, 2
+            0x5e83 => MRS_TPIDRRO_EL0,
+            0x4208 => MRS_SP_EL0, // 3, 0, 4, 1, 0
+            0x5a11 => MRS_DAIF,   // 3, 3, 4, 2, 1
+            _ => return None,
+        };
+        return Some(Mrs { reg });
+    }
+    if i & 0xffc0_0000 == 0xf980_0000 || i & 0xffe0_0c00 == 0xf880_0000 || i & 0xff00_0000 == 0xd800_0000 {
+        // PRFM (immediate, literal), PRFUM
+        return Some(Nop);
+    }
     // ---- data processing (register) ----
     if i & 0x1f00_0000 == 0x0a00_0000 {
         // Logical (shifted register)
@@ -364,6 +432,60 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Form> {
         // LSLV / LSRV / ASRV / RORV
         op.d = bits(i, 11, 10) as u8;
         return Some(Shiftv { sf });
+    }
+    if i & 0xff60_0000 == 0x9b20_0000 {
+        // SMADDL / SMSUBL / UMADDL / UMSUBL
+        op.d = bits(i, 14, 10) as u8;
+        return Some(MaddL { unsigned: bits(i, 23, 23), sub: bits(i, 15, 15) });
+    }
+    if i & 0x3fe0_0410 == 0x3a40_0000 {
+        // CCMN / CCMP
+        op.d = bits(i, 15, 12) as u8;
+        op.imm = (i & 0xf) as u64;
+        return Some(Ccmp { sf, sub: bits(i, 30, 30), imm: bits(i, 11, 11) });
+    }
+    if i & 0x7fff_f000 == 0x5ac0_0000 {
+        let opc = bits(i, 11, 10);
+        if opc == 0 || (opc == 3 && sf == 0) {
+            return None; // RBIT
+        }
+        return Some(Rev { sf, opc });
+    }
+    if i & 0x7fff_fc00 == 0x5ac0_1000 {
+        return Some(Clz { sf });
+    }
+    // ---- Q register loads and stores ----
+    if i & 0xff80_0000 == 0x3d80_0000 {
+        // LDR / STR (unsigned offset)
+        op.imm = (bits(i, 21, 10) as u64) << 4;
+        return Some(if bit(i, 22) { LdQ { mode: OFF, pair: 0 } } else { StQ { mode: OFF, pair: 0 } });
+    }
+    if i & 0xffa0_0000 == 0x3c80_0000 && bits(i, 11, 10) != 2 {
+        // LDUR / STUR, pre- and post-indexed
+        op.imm = sext(bits(i, 20, 12) as u64, 9) as u64;
+        let mode = [OFF, POST, OFF, PRE][bits(i, 11, 10) as usize];
+        return Some(if bit(i, 22) { LdQ { mode, pair: 0 } } else { StQ { mode, pair: 0 } });
+    }
+    if i & 0xfe00_0000 == 0xac00_0000 {
+        // LDP / STP / LDNP / STNP
+        op.c = bits(i, 14, 10) as u8;
+        op.imm = (sext(bits(i, 21, 15) as u64, 7) << 4) as u64;
+        let mode = match bits(i, 24, 23) {
+            0 | 2 => OFF,
+            1 => POST,
+            _ => PRE,
+        };
+        return Some(if bit(i, 22) { LdQ { mode, pair: 1 } } else { StQ { mode, pair: 1 } });
+    }
+    // ---- load-acquire, store-release, exclusives ----
+    if i & 0x3f20_8000 == 0x0800_8000 || i & 0x3fa0_0000 == 0x0800_0000 {
+        let size = bits(i, 31, 30);
+        return Some(match (bit(i, 23), bit(i, 22)) {
+            (true, true) => LdAcq { size },
+            (true, false) => StRel { size },
+            (false, true) => LdEx { size },
+            (false, false) => StEx { size },
+        });
     }
     // ---- loads and stores (general-purpose registers) ----
     if i & 0x3e00_0000 == 0x2800_0000 {

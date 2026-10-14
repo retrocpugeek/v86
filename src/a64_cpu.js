@@ -516,10 +516,10 @@ A64CPU.prototype.jit_compile = function(ptr, len, index, cookie)
     return 0;
 };
 
-/** @return {Array<number>} JIT counters: compiled, entered, stale, failed */
+/** @return {Array<number>} JIT counters: compiled, entered, stale, failed, instructions */
 A64CPU.prototype.jit_stats = function()
 {
-    return [0, 1, 2, 3].map(n => this.wasm["a64_jit_stat"](n));
+    return [0, 1, 2, 3, 4].map(n => this.wasm["a64_jit_stat"](n));
 };
 
 /** @return {number} instructions executed since boot */

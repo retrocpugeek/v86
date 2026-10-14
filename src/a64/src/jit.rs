@@ -1,63 +1,64 @@
-//! JIT: compiles hot blocks of instructions to WebAssembly (browser build).
+//! JIT: compiles hot code to WebAssembly (browser build), a page at a time.
 //!
-//! A block starts at a branch target (or after an exception, an interrupt or
-//! an instruction without a handler of its own) and runs straight through
-//! the page: it ends at an unconditional branch, before an instruction it
-//! can't compile, or at the end of the page. Conditional branches inside it
-//! leave the block when taken.
+//! The run loop counts entries to block starts (branch targets, and where
+//! execution resumes after an exception, an interrupt or an instruction
+//! without a handler of its own) in the decoded-instruction cache
+//! (DCache::jit_page). When one gets hot, the code of its page is compiled
+//! into one function (a region): its blocks are the hot block starts of the
+//! page and everything reachable from them within the page, split into basic
+//! blocks. The function dispatches on pc in a loop, so branches within the
+//! page, including indirect ones (returns), stay in compiled code. A block
+//! start that gets hot later recompiles the page.
 //!
-//! Block starts count their entries in the decoded-instruction cache (DCache::jit_state)
-//! and are compiled once hot. The generated function is handed to the host
-//! (JS), which compiles it, puts it into the function table and reports back
-//! through jit_done. The run loop then calls it instead of interpreting.
+//! The generated function is handed to the host (JS), which compiles it,
+//! puts it into the function table and reports back through jit_done. The
+//! run loop then calls it at installed block starts instead of interpreting.
 //!
 //! Compiled code
-//! - first checks that the instruction words in RAM are still the ones it was
-//!   compiled from (so writes to code and DMA need no tracking), and that the
-//!   stack pointer selection matches, if it uses SP;
-//! - works on the Cpu struct in linear memory directly (it gets its address);
-//! - does loads and stores through jit_read/jit_write, which set jit_flag to
-//!   1 on a fault (the block exits at that instruction, which takes the
-//!   exception) and to 2 for anything but plain RAM (the block exits after the
-//!   instruction, so the run loop sees interrupts raised by devices);
-//! - returns one of the STATUS_* values, with pc and icount updated as if the
-//!   instructions had been interpreted.
+//! - checks, the first time it runs a block in a call, that the block's
+//!   instruction words in RAM are still the ones it was compiled from (so
+//!   writes to code and DMA need no tracking: code can't change while it
+//!   runs, and changed code needs an ISB, which ends compiled code, to be
+//!   seen anyway), and checks on entry that the exception level and stack
+//!   pointer selection are the ones it was compiled for;
+//! - works on the Cpu struct in linear memory directly (it gets its address),
+//!   with pc and icount in locals;
+//! - stops before a block that would take icount past its `end` argument;
+//! - does loads and stores of RAM mapped in the TLB inline, and others
+//!   through jit_read/jit_write, which set jit_flag to 1 on a fault (it
+//!   returns at that instruction, which takes the exception) and to 2 for
+//!   anything but plain RAM (it returns after the instruction, so the run
+//!   loop sees interrupts raised by devices);
+//! - returns one of the STATUS_* values, with pc and icount updated as if
+//!   the instructions had been interpreted.
 
 use std::collections::HashMap;
 use std::mem::offset_of;
 
 use crate::cpu::Cpu;
-use crate::decode::{decode_op, Form, Op, OFF, POST, PRE};
+use crate::decode::*;
 use crate::exc::{ec, Exception};
 
-/// Block entries before a block is compiled.
+/// Block entries before a block start is compiled.
 pub const DEFAULT_THRESHOLD: u32 = 100;
-/// Most instructions in a block (up to 1023 fit in the JIT state).
-const MAX_BLOCK: usize = 256;
-/// Most compiled blocks at a time (function table entries).
+/// Most compiled regions at a time (function table entries).
 const MAX_FUNCS: u32 = 1 << 16;
+const PAGE_SLOTS: usize = 1024;
 
 // JIT state of a block start: an entry counter, or one of these.
 const INSTALLED: u32 = 0x8000_0000;
-pub const COMPILING: u32 = 0xffff_fffe;
 pub const NEVER: u32 = 0xffff_ffff;
 
 #[inline(always)]
 pub fn is_installed(j: u32) -> bool { j & 0xc000_0000 == INSTALLED }
 
 #[inline(always)]
-fn pack(index: u32, len: u32) -> u32 { INSTALLED | len << 20 | index }
-
-#[inline(always)]
 pub fn func_index(j: u32) -> u32 { j & 0xf_ffff }
 
-#[inline(always)]
-fn block_len(j: u32) -> u32 { (j >> 20) & 0x3ff }
-
-// Return values of compiled blocks
+// Return values of compiled code
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_EXCEPTION: u32 = 1;
-/// The code in RAM changed: the block must be dropped.
+/// The code in RAM changed: the region must be dropped.
 pub const STATUS_STALE: u32 = 2;
 /// Compiled for the other exception level or stack pointer: interpret this time.
 pub const STATUS_WRONG_MODE: u32 = 3;
@@ -67,12 +68,45 @@ pub const STATUS_WRONG_MODE: u32 = 3;
 /// will call Cpu::jit_done(cookie, ..) later, 2 if it failed.
 pub type CompileFn = fn(&[u8], u32, u32) -> u32;
 
+/// JIT state of a decoded RAM page.
+pub struct JitPage {
+    /// Per slot: entry counter, NEVER, or INSTALLED | region function index.
+    pub state: [u32; PAGE_SLOTS],
+    /// Function index of the installed region.
+    region: Option<u32>,
+    /// Cookie of the region being compiled.
+    pub(crate) pending: Option<u32>,
+}
+
+impl JitPage {
+    pub fn new() -> Box<JitPage> { Box::new(JitPage { state: [0; PAGE_SLOTS], region: None, pending: None }) }
+
+    /// Uninstall the region (its block starts count again from 0).
+    pub fn drop_region(&mut self, free: &mut Vec<u32>) {
+        if let Some(index) = self.region.take() {
+            free.push(index);
+            for j in self.state.iter_mut() {
+                if is_installed(*j) {
+                    *j = 0;
+                }
+            }
+        }
+    }
+
+    /// Install region `index` at block starts `slots`, replacing the old one.
+    pub fn install(&mut self, index: u32, slots: &[usize], free: &mut Vec<u32>) {
+        self.drop_region(free);
+        for &s in slots {
+            self.state[s] = INSTALLED | index;
+        }
+        self.region = Some(index);
+    }
+}
+
 struct Pending {
     page: usize,
-    slot: usize,
-    insn: u32,
     index: u32,
-    len: u32,
+    slots: Vec<usize>,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -81,6 +115,8 @@ pub struct JitStats {
     pub entered: u64,
     pub stale: u64,
     pub failed: u64,
+    /// Instructions run compiled
+    pub insns: u64,
 }
 
 pub struct Jit {
@@ -111,9 +147,9 @@ impl Default for Jit {
 }
 
 impl Cpu {
-    /// Called at a block start: runs the compiled block at pc if there is one
-    /// and it fits in `limit` steps, and returns the steps used. Otherwise
-    /// counts the entry (compiling the block once it's hot) and returns None:
+    /// Called at a block start: runs compiled code at pc if there is some,
+    /// for at most `limit` steps, and returns the steps used. Otherwise
+    /// counts the entry (compiling the page once it's hot) and returns None:
     /// the caller interprets.
     #[inline(always)]
     pub fn jit_enter(&mut self, limit: u64) -> Option<u64> {
@@ -124,21 +160,24 @@ impl Cpu {
         let n = ((pc & 0xffc) >> 2) as usize;
         // Safety: djit is the JIT state of fetch_page (set with it in fetch_slow)
         let j = unsafe { *self.djit.add(n) };
-        if !is_installed(j) || block_len(j) as u64 > limit {
+        if !is_installed(j) {
             self.jit_count(n);
             return None;
         }
         let icount = self.icount;
-        let status = self.jit_call(self.jit.table_base + func_index(j));
+        let status = self.jit_call(self.jit.table_base + func_index(j), icount + limit);
         self.jit_flag = 0;
+        let used = self.icount - icount;
         match status {
-            STATUS_OK => {
+            STATUS_OK if used != 0 => {
                 self.jit.stats.entered += 1;
+                self.jit.stats.insns += used;
                 self.block_start = true;
-                Some(self.icount - icount)
+                Some(used)
             }
             STATUS_EXCEPTION => {
                 self.jit.stats.entered += 1;
+                self.jit.stats.insns += self.icount - icount;
                 let e = self.jit_exc;
                 // Memory aborts don't count the instruction (see step())
                 if e.ec != ec::DABT_LOWER && e.ec != ec::DABT_CUR {
@@ -152,9 +191,10 @@ impl Cpu {
             }
             STATUS_STALE => {
                 self.jit.stats.stale += 1;
-                self.dcache.jit_free.push(func_index(j));
-                unsafe { *self.djit.add(n) = 0 };
-                None
+                let page = self.tlb.fetch_ram >> 12;
+                self.dcache.jit_drop(page);
+                self.block_start = true;
+                (used != 0).then_some(used)
             }
             _ => None,
         }
@@ -174,47 +214,58 @@ impl Cpu {
         self.jit_enter(limit)
     }
 
-    /// Count an entry to the block at slot n of the fetch page; compile it
-    /// once it's hot.
+    /// Count an entry to the block at slot n of the fetch page; compile the
+    /// page once it's hot.
     #[inline(never)]
     fn jit_count(&mut self, n: usize) {
         // Safety: as in jit_enter
         let j = unsafe { &mut *self.djit.add(n) };
         if *j < self.jit.threshold {
             *j += 1;
-        } else if *j < COMPILING && !is_installed(*j) {
+        } else if *j != NEVER {
             self.jit_compile(n);
         }
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn jit_call(&mut self, table_index: u32) -> u32 {
+    fn jit_call(&mut self, table_index: u32, end: u64) -> u32 {
         // Safety: a function pointer is a function table index in wasm32, and
         // the host installed a function of this type there (jit_done).
-        let f: extern "C" fn(*mut Cpu) -> u32 = unsafe { std::mem::transmute(table_index as usize) };
-        f(self as *mut Cpu)
+        let f: extern "C" fn(*mut Cpu, u64) -> u32 = unsafe { std::mem::transmute(table_index as usize) };
+        f(self as *mut Cpu, end)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn jit_call(&mut self, _: u32) -> u32 { unreachable!("compiled code only runs in the browser build") }
+    fn jit_call(&mut self, _: u32, _: u64) -> u32 { unreachable!("compiled code only runs in the browser build") }
 
-    /// Compile the block starting at `slot` of the current fetch page.
+    /// Compile the fetch page, whose block start at `slot` got hot.
     fn jit_compile(&mut self, slot: usize) {
         let ram = self.tlb.fetch_ram;
-        let mut block = Vec::new();
-        for k in slot..1024 {
-            let insn = self.bus.read_ram(ram | k << 2, 4) as u32;
-            let (Some(form), op) = decode_op(insn) else { break };
-            block.push((form, op));
-            if matches!(form, Form::B | Form::Bl | Form::Br | Form::Blr) || block.len() == MAX_BLOCK {
-                break;
-            }
+        let page = ram >> 12;
+        let threshold = self.jit.threshold;
+        let jp = self.dcache.jit_meta(page).expect("fetch page has JIT state");
+        if jp.pending.is_some() {
+            // Picked up when the page is compiled again
+            return;
+        }
+        let mut words = [0u32; PAGE_SLOTS];
+        for (k, w) in words.iter_mut().enumerate() {
+            *w = self.bus.read_ram(ram | k << 2, 4) as u32;
         }
         let set = |c: &mut Cpu, v: u32| unsafe { *c.djit.add(slot) = v };
         let Some(compile) = self.jit.compile else { return set(self, NEVER) };
-        if block.is_empty() {
+        if decode_op(words[slot]).0.is_none() {
             return set(self, NEVER);
         }
+        // Entries: the installed block starts and those that are getting hot
+        let jp = self.dcache.jit_meta(page).unwrap();
+        let entries: Vec<usize> = (0..PAGE_SLOTS)
+            .filter(|&s| {
+                let j = jp.state[s];
+                s == slot || is_installed(j) || (j != NEVER && j != 0 && j >= threshold / 2)
+            })
+            .collect();
+        let blocks = build_region(&words, &entries);
         let Some(index) = self.dcache.jit_free.pop().or_else(|| {
             (self.jit.next_func < MAX_FUNCS).then(|| {
                 self.jit.next_func += 1;
@@ -224,23 +275,22 @@ impl Cpu {
             return set(self, NEVER);
         };
         let target = Target {
-            code_addr: (self.bus.ram.as_ptr() as usize + (ram | slot << 2)) as u32,
+            code_addr: (self.bus.ram.as_ptr() as usize + ram) as u32,
             ram_addr: self.bus.ram.as_ptr() as u32,
             tlb_addr: self.tlb.entries_addr() as u32,
             el: self.el,
             sp_el1: self.el != 0 && self.spsel != 0,
         };
-        let code = codegen(&block, &target);
+        let code = codegen(&blocks, &target);
+        let slots: Vec<usize> = blocks.iter().map(|b| b.slot).collect();
         let cookie = self.jit.next_cookie;
         self.jit.next_cookie = self.jit.next_cookie.wrapping_add(1);
-        let len = block.len() as u32;
         self.jit.stats.compiled += 1;
         match compile(&code, self.jit.table_base + index, cookie) {
-            1 => set(self, pack(index, len)),
+            1 => self.dcache.jit_install(page, index, &slots),
             0 => {
-                set(self, COMPILING);
-                let insn = block[0].1.insn;
-                self.jit.pending.insert(cookie, Pending { page: ram >> 12, slot, insn, index, len });
+                self.dcache.jit_meta(page).unwrap().pending = Some(cookie);
+                self.jit.pending.insert(cookie, Pending { page, index, slots });
             }
             _ => {
                 self.jit.stats.failed += 1;
@@ -250,23 +300,24 @@ impl Cpu {
         }
     }
 
-    /// The host finished compiling (ok) or failed to compile a block.
+    /// The host finished compiling (ok) or failed to compile a region.
     pub fn jit_done(&mut self, cookie: u32, ok: bool) {
         let Some(p) = self.jit.pending.remove(&cookie) else { return };
         if !ok {
             self.jit.stats.failed += 1;
         }
-        if self.dcache.slot(p.page, p.slot).is_some_and(|op| op.insn == p.insn) {
-            let j = self.dcache.jit_state(p.page, p.slot);
-            if *j == COMPILING {
-                if ok {
-                    *j = pack(p.index, p.len);
-                    return;
-                }
-                *j = NEVER;
+        let install = match self.dcache.jit_meta(p.page) {
+            Some(jp) if jp.pending == Some(cookie) => {
+                jp.pending = None;
+                ok
             }
+            _ => false,
+        };
+        if install {
+            self.dcache.jit_install(p.page, p.index, &p.slots);
+        } else {
+            self.dcache.jit_free.push(p.index);
         }
-        self.dcache.jit_free.push(p.index);
     }
 
     /// Load for compiled code: see the module comment.
@@ -331,9 +382,93 @@ impl Cpu {
     }
 }
 
+// ---- regions ----
+
+/// A basic block of a region: instructions from `slot` up to a branch (the
+/// last instruction), or to where another block starts, an instruction that
+/// can't be compiled or the end of the page.
+pub struct RBlock {
+    pub slot: usize,
+    pub ops: Vec<(Form, Op)>,
+}
+
+/// Branches, and ISB (compiled code returns after it).
+fn ends_block(f: Form) -> bool {
+    matches!(
+        f,
+        Form::B | Form::Bl | Form::Br | Form::Blr | Form::BCond | Form::Cbz { .. } | Form::Tbz { .. } | Form::Barrier { isb: 1 }
+    )
+}
+
+/// The slot a direct branch at `slot` goes to, if it's in the page.
+fn branch_slot(f: Form, op: &Op, slot: usize) -> Option<usize> {
+    if !matches!(f, Form::B | Form::Bl | Form::BCond | Form::Cbz { .. } | Form::Tbz { .. }) {
+        return None;
+    }
+    let t = (4 * slot as i64).wrapping_add(op.imm as i64);
+    (0..0x1000).contains(&t).then_some(t as usize / 4)
+}
+
+/// The basic blocks reachable within the page (`words`) from `entries`.
+pub fn build_region(words: &[u32; PAGE_SLOTS], entries: &[usize]) -> Vec<RBlock> {
+    let mut leader = [false; PAGE_SLOTS];
+    let mut work: Vec<usize> = Vec::new();
+    let add = |s: usize, leader: &mut [bool; PAGE_SLOTS], work: &mut Vec<usize>| {
+        if s < PAGE_SLOTS && !leader[s] {
+            leader[s] = true;
+            work.push(s);
+        }
+    };
+    for &s in entries {
+        add(s, &mut leader, &mut work);
+    }
+    while let Some(s) = work.pop() {
+        let mut k = s;
+        while k < PAGE_SLOTS {
+            let (Some(form), op) = decode_op(words[k]) else { break };
+            if ends_block(form) {
+                if let Some(t) = branch_slot(form, &op, k) {
+                    add(t, &mut leader, &mut work);
+                }
+                // Not-taken path, or where a call returns to
+                if !matches!(form, Form::B | Form::Br) {
+                    add(k + 1, &mut leader, &mut work);
+                }
+                break;
+            }
+            k += 1;
+            if k < PAGE_SLOTS && leader[k] {
+                break;
+            }
+        }
+    }
+    let mut blocks = Vec::new();
+    for s in (0..PAGE_SLOTS).filter(|&s| leader[s]) {
+        let mut ops = Vec::new();
+        let mut k = s;
+        while k < PAGE_SLOTS && (k == s || !leader[k]) {
+            let (Some(form), op) = decode_op(words[k]) else { break };
+            ops.push((form, op));
+            k += 1;
+            if ends_block(form) {
+                break;
+            }
+        }
+        if !ops.is_empty() {
+            blocks.push(RBlock { slot: s, ops });
+        }
+    }
+    blocks
+}
+
 // ---- code generation ----
 
 // Opcodes
+const UNREACHABLE: u8 = 0x00;
+const BLOCK: u8 = 0x02;
+const LOOP: u8 = 0x03;
+const BR: u8 = 0x0c;
+const BR_TABLE: u8 = 0x0e;
 const BLOCK_EMPTY: u8 = 0x40;
 const IF: u8 = 0x04;
 const END: u8 = 0x0b;
@@ -369,6 +504,7 @@ const I32_LT_U: u8 = 0x49;
 const I32_GE_U: u8 = 0x4f;
 const I64_EQZ: u8 = 0x50;
 const I64_LT_U: u8 = 0x54;
+const I64_GT_U: u8 = 0x56;
 const I64_GE_U: u8 = 0x5a;
 const I32_AND: u8 = 0x71;
 const I32_OR: u8 = 0x72;
@@ -385,6 +521,8 @@ const I64_OR: u8 = 0x84;
 const I64_XOR: u8 = 0x85;
 const I64_SHL: u8 = 0x86;
 const I64_SHR_S: u8 = 0x87;
+const I32_CLZ: u8 = 0x67;
+const I64_CLZ: u8 = 0x79;
 const I64_SHR_U: u8 = 0x88;
 const I64_ROTR: u8 = 0x8a;
 const I32_WRAP_I64: u8 = 0xa7;
@@ -397,26 +535,35 @@ const I64_EXTEND32_S: u8 = 0xc4;
 const FN_READ: u32 = 0;
 const FN_WRITE: u32 = 1;
 
-// Locals: the parameter, then i64s, then i32s
+// Locals: the parameters, then i32s, then i64s
 const CPU: u32 = 0;
-const PC0: u32 = 1;
-const A: u32 = 2;
-const B: u32 = 3;
-const R: u32 = 4;
-const T: u32 = 5;
-const WB: u32 = 6;
-const V: u32 = 7;
-/// Address of a load or store
-const VA: u32 = 8;
-/// Value of a load (slow path)
-const MV: u32 = 9;
-const NUM_I64: u32 = 9;
-const N32: u32 = 10;
+/// icount to stop at
+const ICOUNT_END: u32 = 1;
+const N32: u32 = 2;
 /// TLB entry address
-const E32: u32 = 11;
+const E32: u32 = 3;
 /// jit_flag after the slow path of a load or store (0 if none was taken)
-const F32: u32 = 12;
-const NUM_I32: u32 = 3;
+const F32: u32 = 4;
+/// Slot of the block to run next (dispatch) or of pc (exit)
+const SLOT: u32 = 5;
+const NUM_I32: u32 = 4;
+/// pc & !0xfff
+const PAGE: u32 = 6;
+/// icount at the start of the current block
+const ICOUNT: u32 = 7;
+const A: u32 = 8;
+const B: u32 = 9;
+const R: u32 = 10;
+const T: u32 = 11;
+const WB: u32 = 12;
+const V: u32 = 13;
+/// Address of a load or store
+const VA: u32 = 14;
+/// Value of a load (slow path)
+const MV: u32 = 15;
+/// Bit sets of blocks checked against RAM in this call
+const VALID: u32 = 16;
+const NUM_I64: u32 = 10;
 
 const OFF_X: u32 = offset_of!(Cpu, x) as u32;
 const OFF_PC: u32 = offset_of!(Cpu, pc) as u32;
@@ -428,6 +575,15 @@ const OFF_SPSEL: u32 = offset_of!(Cpu, spsel) as u32;
 const OFF_SP_EL0: u32 = offset_of!(Cpu, sp_el0) as u32;
 const OFF_SP_EL1: u32 = offset_of!(Cpu, sp_el1) as u32;
 const OFF_SCTLR: u32 = (offset_of!(Cpu, sr) + offset_of!(crate::sysregs::SysRegs, sctlr_el1)) as u32;
+const OFF_V: u32 = offset_of!(Cpu, v) as u32;
+const OFF_DAIF: u32 = offset_of!(Cpu, daif) as u32;
+const OFF_EXCL_ADDR: u32 = offset_of!(Cpu, excl_addr) as u32;
+const OFF_EXCL_SIZE: u32 = offset_of!(Cpu, excl_size) as u32;
+const fn off_sr(f: usize) -> u32 { (offset_of!(Cpu, sr) + f) as u32 }
+const OFF_CPACR: u32 = off_sr(offset_of!(crate::sysregs::SysRegs, cpacr_el1));
+const OFF_TPIDR_EL1: u32 = off_sr(offset_of!(crate::sysregs::SysRegs, tpidr_el1));
+const OFF_TPIDR_EL0: u32 = off_sr(offset_of!(crate::sysregs::SysRegs, tpidr_el0));
+const OFF_TPIDRRO_EL0: u32 = off_sr(offset_of!(crate::sysregs::SysRegs, tpidrro_el0));
 const OFF_TLB_ASID: u32 = (offset_of!(Cpu, tlb) + offset_of!(crate::mmu::Tlb, asid)) as u32;
 
 #[derive(Default)]
@@ -514,12 +670,12 @@ impl Asm {
 
 /// What the generated code is built for.
 pub struct Target {
-    /// Address of the block's first instruction in linear memory.
+    /// Address of the page's code in linear memory.
     pub code_addr: u32,
     /// Address of guest RAM and of the TLB entries in linear memory.
     pub ram_addr: u32,
     pub tlb_addr: u32,
-    /// Exception level and stack pointer (SP_EL1 or SP_EL0) the block runs
+    /// Exception level and stack pointer (SP_EL1 or SP_EL0) the code runs
     /// with; checked on entry.
     pub el: u32,
     pub sp_el1: bool,
@@ -530,7 +686,13 @@ struct Gen<'t> {
     t: &'t Target,
     sp_off: u32,
     uses_sp: bool,
-    uses_mem: bool,
+    uses_el: bool,
+    /// Blocks in the region, the current one and its first slot
+    nblocks: usize,
+    bi: usize,
+    slot0: usize,
+    /// Control structures open in the current block's code
+    nest: u32,
 }
 
 impl Gen<'_> {
@@ -574,66 +736,190 @@ impl Gen<'_> {
         }
     }
 
+    fn if_(&mut self) {
+        self.a.if_();
+        self.nest += 1;
+    }
+
+    fn end(&mut self) {
+        self.a.op(END);
+        self.nest -= 1;
+    }
+
+    /// Branch to the dispatch loop (SLOT says where to).
+    fn br_top(&mut self) {
+        self.a.op(BR);
+        self.a.uleb((self.nblocks - self.bi) as u64 + self.nest as u64);
+    }
+
+    /// Branch to the exit with pc at SLOT.
+    fn br_exit(&mut self) {
+        self.a.op(BR);
+        self.a.uleb((self.nblocks - 1 - self.bi) as u64 + self.nest as u64);
+    }
+
+    /// Push the address of instruction k of the block.
     fn pc_k(&mut self, k: usize) {
-        self.a.get(PC0);
-        if k != 0 {
-            self.a.i64c(4 * k as u64);
-            self.a.op(I64_ADD);
-        }
+        self.a.get(PAGE);
+        self.a.i64c(4 * (self.slot0 + k) as u64);
+        self.a.op(I64_ADD);
     }
 
     fn add_icount(&mut self, n: usize) {
-        self.a.get(CPU);
-        self.a.load64(OFF_ICOUNT);
+        self.a.get(ICOUNT);
         self.a.i64c(n as u64);
+        self.a.op(I64_ADD);
+        self.a.set(ICOUNT);
+    }
+
+    /// Return `status` with icount = ICOUNT + n and pc as pushed by `pc`.
+    fn ret(&mut self, pc: impl FnOnce(&mut Self), n: usize, status: u32) {
+        self.a.get(CPU);
+        pc(self);
+        self.a.mem(I64_STORE, 3, OFF_PC);
+        self.a.get(CPU);
+        self.a.get(ICOUNT);
+        if n != 0 {
+            self.a.i64c(n as u64);
+            self.a.op(I64_ADD);
+        }
+        self.a.mem(I64_STORE, 3, OFF_ICOUNT);
+        self.a.i32c(status as i32);
+        self.a.op(RETURN);
+    }
+
+    /// Go on at instruction k + offset (bytes) after `count` instructions of
+    /// the block: in this region if it's in the page, else return.
+    fn goto(&mut self, k: usize, offset: u64, count: usize) {
+        let target = (4 * (self.slot0 + k) as u64).wrapping_add(offset);
+        if target < 0x1000 {
+            self.add_icount(count);
+            self.a.i32c(target as i32 / 4);
+            self.a.set(SLOT);
+            self.br_top();
+        } else {
+            self.ret(
+                |g| {
+                    g.a.get(PAGE);
+                    g.a.i64c(target);
+                    g.a.op(I64_ADD);
+                },
+                count,
+                STATUS_OK,
+            );
+        }
+    }
+
+    /// Go on at local `pc` after `count` instructions of the block.
+    fn goto_local(&mut self, pc: u32, count: usize) {
+        self.add_icount(count);
+        // Aligned and in this page: dispatch
+        self.a.get(pc);
+        self.a.i64c(!0xffc);
+        self.a.op(I64_AND);
+        self.a.get(PAGE);
+        self.a.op(I64_EQ);
+        self.if_();
+        self.a.get(pc);
+        self.a.op(I32_WRAP_I64);
+        self.a.i32c(0xfff);
+        self.a.op(I32_AND);
+        self.a.i32c(2);
+        self.a.op(I32_SHR_U);
+        self.a.set(SLOT);
+        self.br_top();
+        self.end();
+        self.ret(|g| g.a.get(pc), 0, STATUS_OK);
+    }
+
+    /// Return at instruction k, which the interpreter runs.
+    fn punt(&mut self, k: usize) { self.ret(|g| g.pc_k(k), k, STATUS_OK) }
+
+    /// Punt (at instruction k) unless the condition on the stack holds.
+    fn punt_unless(&mut self, k: usize) {
+        self.a.op(I32_EQZ);
+        self.if_();
+        self.punt(k);
+        self.end();
+    }
+
+    /// Punt unless FP/SIMD instructions are enabled (Cpu::check_fp).
+    fn fp_check(&mut self, k: usize) {
+        self.uses_el = true;
+        self.a.load64(OFF_CPACR);
+        self.a.i64c(20);
+        self.a.op(I64_SHR_U);
+        self.a.op(I32_WRAP_I64);
+        self.a.i32c(3);
+        self.a.op(I32_AND);
+        if self.t.el == 0 {
+            self.a.i32c(3);
+            self.a.op(I32_EQ);
+        } else {
+            self.a.i32c(1);
+            self.a.op(I32_AND);
+        }
+        self.punt_unless(k);
+    }
+
+    /// Punt unless T is aligned to `bytes`.
+    fn align_check(&mut self, k: usize, bytes: u32) {
+        if bytes > 1 {
+            self.a.get(T);
+            self.a.op(I32_WRAP_I64);
+            self.a.i32c(bytes as i32 - 1);
+            self.a.op(I32_AND);
+            self.a.op(I32_EQZ);
+            self.punt_unless(k);
+        }
+    }
+
+    /// Byte swap within each `n`-bit unit of R.
+    fn swap(&mut self, n: u64, m: u64) {
+        let a = &mut self.a;
+        a.get(R);
+        a.i64c(n);
+        a.op(I64_SHR_U);
+        a.i64c(m);
+        a.op(I64_AND);
+        a.get(R);
+        a.i64c(m);
+        a.op(I64_AND);
+        a.i64c(n);
+        a.op(I64_SHL);
+        a.op(I64_OR);
+        a.set(R);
+    }
+
+    /// Before a call to jit_read/jit_write at instruction k: icount as the
+    /// interpreter has it (devices may read the time).
+    fn sync_icount(&mut self, k: usize) {
+        self.a.get(CPU);
+        self.a.get(ICOUNT);
+        self.a.i64c(k as u64 + 1);
         self.a.op(I64_ADD);
         self.a.mem(I64_STORE, 3, OFF_ICOUNT);
     }
 
-    /// Leave the block after `count` instructions, with pc = local `pc`.
-    fn exit_local(&mut self, pc: u32, count: usize) {
-        self.a.store64_local(OFF_PC, pc);
-        self.add_icount(count);
-        self.a.i32c(STATUS_OK as i32);
-        self.a.op(RETURN);
-    }
-
-    /// Leave the block after instruction k, with pc = its address + offset.
-    fn exit_rel(&mut self, k: usize, offset: u64) {
-        self.a.get(CPU);
-        self.pc_k(k);
-        self.a.i64c(offset);
-        self.a.op(I64_ADD);
-        self.a.mem(I64_STORE, 3, OFF_PC);
-        self.add_icount(k + 1);
-        self.a.i32c(STATUS_OK as i32);
-        self.a.op(RETURN);
-    }
-
     /// After a call to jit_read/jit_write: F32 = jit_flag, and on a fault,
-    /// leave with pc at instruction k (which takes the exception).
+    /// return at instruction k (which takes the exception).
     fn check_fault(&mut self, k: usize) {
         self.a.load32(OFF_FLAG);
         self.a.op(LOCAL_TEE);
         self.a.uleb(F32 as u64);
         self.a.i32c(1);
         self.a.op(I32_EQ);
-        self.a.if_();
-        self.a.get(CPU);
-        self.pc_k(k);
-        self.a.mem(I64_STORE, 3, OFF_PC);
-        self.add_icount(k);
-        self.a.i32c(STATUS_EXCEPTION as i32);
-        self.a.op(RETURN);
-        self.a.op(END);
+        self.if_();
+        self.ret(|g| g.pc_k(k), k, STATUS_EXCEPTION);
+        self.end();
     }
 
-    /// At the end of a load or store: if it wasn't plain RAM, leave after it.
+    /// At the end of a load or store: if it wasn't plain RAM, return after it.
     fn check_device(&mut self, k: usize) {
         self.a.get(F32);
-        self.a.if_();
-        self.exit_rel(k, 4);
-        self.a.op(END);
+        self.if_();
+        self.ret(|g| g.pc_k(k + 1), k + 1, STATUS_OK);
+        self.end();
     }
 
     /// Push 1 if condition `cond` holds, else 0.
@@ -909,7 +1195,7 @@ impl Gen<'_> {
 
     /// Start of a load or store instruction.
     fn mem_start(&mut self) {
-        self.uses_mem = true;
+        self.uses_el = true;
         self.a.i32c(0);
         self.a.set(F32);
     }
@@ -1007,11 +1293,12 @@ impl Gen<'_> {
     }
 
     /// Push the value at T + offset (bytes wide, zero-extended); on a fault
-    /// leave the block at instruction k.
+    /// return at instruction k.
     fn load(&mut self, k: usize, offset: u64, bytes: u32) {
         self.tlb_hit(offset, bytes, false);
         self.a.op(IF);
         self.a.op(0x7e); // i64 result
+        self.nest += 1;
         self.ram_ptr();
         let op = match bytes {
             1 => I64_LOAD8_U,
@@ -1021,6 +1308,7 @@ impl Gen<'_> {
         };
         self.a.mem(op, 0, self.t.ram_addr);
         self.a.op(ELSE);
+        self.sync_icount(k);
         self.a.get(CPU);
         self.a.get(VA);
         self.a.i32c(bytes as i32);
@@ -1029,14 +1317,14 @@ impl Gen<'_> {
         self.a.set(MV);
         self.check_fault(k);
         self.a.get(MV);
-        self.a.op(END);
+        self.end();
     }
 
-    /// Store local v (bytes wide) to T + offset; on a fault leave the block
+    /// Store local v (bytes wide) to T + offset; on a fault return
     /// at instruction k.
     fn store(&mut self, k: usize, offset: u64, bytes: u32, v: u32) {
         self.tlb_hit(offset, bytes, true);
-        self.a.if_();
+        self.if_();
         self.ram_ptr();
         self.a.get(v);
         let op = match bytes {
@@ -1047,6 +1335,7 @@ impl Gen<'_> {
         };
         self.a.mem(op, 0, self.t.ram_addr);
         self.a.op(ELSE);
+        self.sync_icount(k);
         self.a.get(CPU);
         self.a.get(VA);
         self.a.i32c(bytes as i32);
@@ -1054,7 +1343,7 @@ impl Gen<'_> {
         self.a.op(CALL);
         self.a.uleb(FN_WRITE as u64);
         self.check_fault(k);
-        self.a.op(END);
+        self.end();
     }
 
     fn sext(&mut self, size: u32) {
@@ -1176,7 +1465,7 @@ impl Gen<'_> {
                 self.set_x(op.a, R);
             }
             Form::B => {
-                self.exit_rel(k, op.imm);
+                self.goto(k, op.imm, k + 1);
                 return false;
             }
             Form::Bl => {
@@ -1185,14 +1474,14 @@ impl Gen<'_> {
                 self.a.i64c(4);
                 self.a.op(I64_ADD);
                 self.a.mem(I64_STORE, 3, OFF_X + 8 * 30);
-                self.exit_rel(k, op.imm);
+                self.goto(k, op.imm, k + 1);
                 return false;
             }
             Form::BCond => {
                 self.cond(op.d as u32);
-                self.a.if_();
-                self.exit_rel(k, op.imm);
-                self.a.op(END);
+                self.if_();
+                self.goto(k, op.imm, k + 1);
+                self.end();
             }
             Form::Cbz { sf, nz } => {
                 self.x(op.a);
@@ -1201,9 +1490,9 @@ impl Gen<'_> {
                 if nz != 0 {
                     self.a.op(I32_EQZ);
                 }
-                self.a.if_();
-                self.exit_rel(k, op.imm);
-                self.a.op(END);
+                self.if_();
+                self.goto(k, op.imm, k + 1);
+                self.end();
             }
             Form::Tbz { nz } => {
                 self.x(op.a);
@@ -1215,9 +1504,9 @@ impl Gen<'_> {
                 if nz != 0 {
                     self.a.op(I32_EQZ);
                 }
-                self.a.if_();
-                self.exit_rel(k, op.imm);
-                self.a.op(END);
+                self.if_();
+                self.goto(k, op.imm, k + 1);
+                self.end();
             }
             Form::Br | Form::Blr => {
                 self.x(op.b);
@@ -1229,7 +1518,7 @@ impl Gen<'_> {
                     self.a.op(I64_ADD);
                     self.a.mem(I64_STORE, 3, OFF_X + 8 * 30);
                 }
-                self.exit_local(T, k + 1);
+                self.goto_local(T, k + 1);
                 return false;
             }
             Form::Nop => {}
@@ -1393,45 +1682,296 @@ impl Gen<'_> {
                 self.writeback(op, mode);
                 self.check_device(k);
             }
+            Form::Barrier { isb } => {
+                if isb != 0 {
+                    // Changed code is seen after an ISB: return
+                    self.ret(|g| g.pc_k(k + 1), k + 1, STATUS_OK);
+                    return false;
+                }
+            }
+            Form::Mrs { reg } => {
+                self.uses_el = true;
+                if self.t.el == 0 && !matches!(reg, MRS_TPIDR_EL0 | MRS_TPIDRRO_EL0) {
+                    // EL0 access rules: left to the interpreter
+                    self.punt(k);
+                    return false;
+                }
+                match reg {
+                    MRS_DAIF => {
+                        self.a.load32(OFF_DAIF);
+                        self.a.op(I64_EXTEND_I32_U);
+                    }
+                    MRS_SP_EL0 => self.a.load64(OFF_SP_EL0),
+                    MRS_TPIDR_EL1 => self.a.load64(OFF_TPIDR_EL1),
+                    MRS_TPIDR_EL0 => self.a.load64(OFF_TPIDR_EL0),
+                    _ => self.a.load64(OFF_TPIDRRO_EL0),
+                }
+                self.a.set(R);
+                self.set_x(op.a, R);
+            }
+            Form::DcZva => {
+                self.uses_el = true;
+                if self.t.el == 0 {
+                    self.punt(k);
+                    return false;
+                }
+                self.x(op.a);
+                self.a.i64c(!63);
+                self.a.op(I64_AND);
+                self.a.set(T);
+                // Anything but RAM in the TLB: left to the interpreter
+                self.tlb_hit(0, 64, true);
+                self.punt_unless(k);
+                for j in 0..8 {
+                    self.ram_ptr();
+                    self.a.i64c(0);
+                    self.a.mem(I64_STORE, 0, self.t.ram_addr + 8 * j);
+                }
+            }
+            Form::MaddL { unsigned, sub } => {
+                self.x(op.d);
+                for r in [op.b, op.c] {
+                    self.x(r);
+                    if unsigned != 0 {
+                        self.mask(0);
+                    } else {
+                        self.a.op(I64_EXTEND32_S);
+                    }
+                }
+                self.a.op(I64_MUL);
+                self.a.op(if sub != 0 { I64_SUB } else { I64_ADD });
+                self.a.set(R);
+                self.set_x(op.a, R);
+            }
+            Form::Ccmp { sf, sub, imm } => {
+                self.cond(op.d as u32);
+                self.if_();
+                self.x(op.b);
+                self.a.set(A);
+                if imm != 0 {
+                    self.a.i64c(op.c as u64);
+                } else {
+                    self.x(op.c);
+                }
+                self.a.set(B);
+                self.addsub(sf, sub);
+                self.flags_addsub(sf, sub);
+                self.a.op(ELSE);
+                self.a.get(CPU);
+                self.a.i32c(((op.imm as u32) << 28) as i32);
+                self.a.mem(I32_STORE, 2, OFF_NZCV);
+                self.end();
+            }
+            Form::Rev { sf, opc } => {
+                self.x(op.b);
+                self.mask(sf);
+                self.a.set(R);
+                self.swap(8, 0x00ff_00ff_00ff_00ff);
+                if opc >= 2 {
+                    self.swap(16, 0x0000_ffff_0000_ffff);
+                }
+                if opc == 3 {
+                    self.a.get(R);
+                    self.a.i64c(32);
+                    self.a.op(I64_ROTR);
+                    self.a.set(R);
+                }
+                self.set_x(op.a, R);
+            }
+            Form::Clz { sf } => {
+                self.x(op.b);
+                if sf != 0 {
+                    self.a.op(I64_CLZ);
+                } else {
+                    self.a.op(I32_WRAP_I64);
+                    self.a.op(I32_CLZ);
+                    self.a.op(I64_EXTEND_I32_U);
+                }
+                self.a.set(R);
+                self.set_x(op.a, R);
+            }
+            Form::LdQ { mode, pair } | Form::StQ { mode, pair } => {
+                let load = matches!(form, Form::LdQ { .. });
+                self.fp_check(k);
+                self.address(op, mode);
+                // Anything but RAM in the TLB: left to the interpreter
+                self.tlb_hit(0, 16 << pair, !load);
+                self.punt_unless(k);
+                let regs: &[u8] = if pair != 0 { &[op.a, op.c] } else { &[op.a] };
+                if load {
+                    let tmp = [V, B, MV, R];
+                    for (j, &l) in tmp[..2 * regs.len()].iter().enumerate() {
+                        self.ram_ptr();
+                        self.a.mem(I64_LOAD, 0, self.t.ram_addr + 8 * j as u32);
+                        self.a.set(l);
+                    }
+                    self.writeback(op, mode);
+                    for (n, &r) in regs.iter().enumerate() {
+                        for h in 0..2 {
+                            self.a.store64_local(OFF_V + 16 * r as u32 + 8 * h, tmp[2 * n + h as usize]);
+                        }
+                    }
+                } else {
+                    for (n, &r) in regs.iter().enumerate() {
+                        for h in 0..2 {
+                            self.ram_ptr();
+                            self.a.load64(OFF_V + 16 * r as u32 + 8 * h);
+                            self.a.mem(I64_STORE, 0, self.t.ram_addr + 16 * n as u32 + 8 * h);
+                        }
+                    }
+                    self.writeback(op, mode);
+                }
+            }
+            Form::LdAcq { size } | Form::LdEx { size } => {
+                self.mem_start();
+                self.xs(op.b);
+                self.a.set(T);
+                self.align_check(k, 1 << size);
+                self.load(k, 0, 1 << size);
+                self.a.set(V);
+                self.set_x(op.a, V);
+                if matches!(form, Form::LdEx { .. }) {
+                    self.a.store64_local(OFF_EXCL_ADDR, T);
+                    self.a.get(CPU);
+                    self.a.i32c(1 << size);
+                    self.a.mem(I32_STORE, 2, OFF_EXCL_SIZE);
+                }
+                self.check_device(k);
+            }
+            Form::StRel { size } => {
+                self.mem_start();
+                self.xs(op.b);
+                self.a.set(T);
+                self.align_check(k, 1 << size);
+                self.x(op.a);
+                self.a.set(V);
+                self.store(k, 0, 1 << size, V);
+                self.check_device(k);
+            }
+            Form::StEx { size } => {
+                self.mem_start();
+                self.xs(op.b);
+                self.a.set(T);
+                self.align_check(k, 1 << size);
+                // N32 = the monitor is set for this access; it's cleared either way
+                self.a.load32(OFF_EXCL_SIZE);
+                self.a.i32c(1 << size);
+                self.a.op(I32_EQ);
+                self.a.load64(OFF_EXCL_ADDR);
+                self.a.get(T);
+                self.a.op(I64_EQ);
+                self.a.op(I32_AND);
+                self.a.set(N32);
+                self.a.get(CPU);
+                self.a.i32c(0);
+                self.a.mem(I32_STORE, 2, OFF_EXCL_SIZE);
+                self.a.get(N32);
+                self.if_();
+                self.x(op.a);
+                self.a.set(V);
+                self.store(k, 0, 1 << size, V);
+                self.end();
+                self.a.get(N32);
+                self.a.op(I32_EQZ);
+                self.a.op(I64_EXTEND_I32_U);
+                self.a.set(R);
+                self.set_x(op.c, R);
+                self.check_device(k);
+            }
         }
         true
     }
 }
 
-/// A WebAssembly module exporting "f": (cpu: i32) -> i32, which runs the
-/// block. It imports "e"."m" (the memory), "e"."r" (jit_read) and "e"."w"
-/// (jit_write).
-pub fn codegen(block: &[(Form, Op)], t: &Target) -> Vec<u8> {
-    let mut g =
-        Gen { a: Asm::default(), t, sp_off: if t.sp_el1 { OFF_SP_EL1 } else { OFF_SP_EL0 }, uses_sp: false, uses_mem: false };
-    g.a.load64(OFF_PC);
-    g.a.set(PC0);
-    let mut open = true;
-    for (k, (form, op)) in block.iter().enumerate() {
-        if !g.insn(k, *form, op) {
-            open = false;
-            break;
+/// A WebAssembly module exporting "f": (cpu: i32, end: i64) -> i32, which
+/// runs the region from cpu.pc. It imports "e"."m" (the memory), "e"."r"
+/// (jit_read) and "e"."w" (jit_write).
+///
+/// The body is a dispatch loop over the blocks:
+///
+/// ```text
+/// loop                              ;; br_top
+///   block                           ;; br_exit
+///     block (one per region block)
+///       br_table SLOT               ;; to a block's code, else the exit
+///     end  code of block 0  (falls into block 1, if it's next)
+///     end  code of block 1
+///     ...
+///   end  return at pc = page + 4 * SLOT
+/// end
+/// ```
+pub fn codegen(blocks: &[RBlock], t: &Target) -> Vec<u8> {
+    let nblocks = blocks.len();
+    let mut g = Gen {
+        a: Asm::default(),
+        t,
+        sp_off: if t.sp_el1 { OFF_SP_EL1 } else { OFF_SP_EL0 },
+        uses_sp: false,
+        uses_el: false,
+        nblocks,
+        bi: 0,
+        slot0: 0,
+        nest: 0,
+    };
+    let mut codes = Vec::new();
+    for (bi, b) in blocks.iter().enumerate() {
+        g.bi = bi;
+        g.slot0 = b.slot;
+        g.nest = 0;
+        let len = b.ops.len();
+        // Stop before the block if it would go past ICOUNT_END
+        g.a.get(ICOUNT);
+        g.a.i64c(len as u64);
+        g.a.op(I64_ADD);
+        g.a.get(ICOUNT_END);
+        g.a.op(I64_GT_U);
+        g.if_();
+        g.a.i32c(b.slot as i32);
+        g.a.set(SLOT);
+        g.br_exit();
+        g.end();
+        // The first time in this call: are the instructions still the same?
+        let (valid, bit) = (VALID + (bi / 64) as u32, 1u64 << (bi % 64));
+        g.a.get(valid);
+        g.a.i64c(bit);
+        g.a.op(I64_AND);
+        g.a.op(I64_EQZ);
+        g.if_();
+        for (k, (_, op)) in b.ops.iter().enumerate() {
+            g.a.i32c((t.code_addr + 4 * (b.slot + k) as u32) as i32);
+            g.a.mem(I32_LOAD, 2, 0);
+            g.a.i32c(op.insn as i32);
+            g.a.op(I32_NE);
+            g.if_();
+            g.ret(|g| g.pc_k(0), 0, STATUS_STALE);
+            g.end();
         }
+        g.a.get(valid);
+        g.a.i64c(bit);
+        g.a.op(I64_OR);
+        g.a.set(valid);
+        g.end();
+        let mut open = true;
+        for (k, (form, op)) in b.ops.iter().enumerate() {
+            if !g.insn(k, *form, op) {
+                open = false;
+                break;
+            }
+        }
+        if open {
+            if blocks.get(bi + 1).is_some_and(|n| n.slot == b.slot + len) {
+                // Fall into the next block
+                g.add_icount(len);
+            } else {
+                g.goto(len - 1, 4, len);
+            }
+        }
+        debug_assert_eq!(g.nest, 0);
+        codes.push(std::mem::take(&mut g.a.b));
     }
-    if open {
-        // Fell through the last instruction
-        let n = block.len();
-        g.exit_rel(n - 1, 4);
-    }
-    let body = g.a.b;
 
-    // Entry checks
     let mut f = Asm::default();
-    for (k, (_, op)) in block.iter().enumerate() {
-        f.i32c((t.code_addr + 4 * k as u32) as i32);
-        f.mem(I32_LOAD, 2, 0);
-        f.i32c(op.insn as i32);
-        f.op(I32_NE);
-        f.if_();
-        f.i32c(STATUS_STALE as i32);
-        f.op(RETURN);
-        f.op(END);
-    }
+    // Entry checks
     if g.uses_sp {
         // (el != 0 && spsel != 0) == sp_el1
         f.load32(OFF_EL);
@@ -1446,7 +1986,7 @@ pub fn codegen(block: &[(Form, Op)], t: &Target) -> Vec<u8> {
         f.op(RETURN);
         f.op(END);
     }
-    if g.uses_mem {
+    if g.uses_el {
         // Permission checks are for this EL
         f.load32(OFF_EL);
         f.i32c(t.el as i32);
@@ -1456,16 +1996,70 @@ pub fn codegen(block: &[(Form, Op)], t: &Target) -> Vec<u8> {
         f.op(RETURN);
         f.op(END);
     }
-    f.b.extend_from_slice(&body);
+    f.load64(OFF_PC);
+    f.i64c(!0xfff);
+    f.op(I64_AND);
+    f.set(PAGE);
+    f.load64(OFF_ICOUNT);
+    f.set(ICOUNT);
+    f.load64(OFF_PC);
+    f.op(I32_WRAP_I64);
+    f.i32c(0xfff);
+    f.op(I32_AND);
+    f.i32c(2);
+    f.op(I32_SHR_U);
+    f.set(SLOT);
+    f.op(LOOP);
+    f.op(BLOCK_EMPTY);
+    f.op(BLOCK);
+    f.op(BLOCK_EMPTY);
+    for _ in 0..nblocks {
+        f.op(BLOCK);
+        f.op(BLOCK_EMPTY);
+    }
+    let mut table = vec![nblocks; blocks.last().map_or(0, |b| b.slot + 1)];
+    for (bi, b) in blocks.iter().enumerate() {
+        table[b.slot] = bi;
+    }
+    f.get(SLOT);
+    f.op(BR_TABLE);
+    f.uleb(table.len() as u64);
+    for d in table {
+        f.uleb(d as u64);
+    }
+    f.uleb(nblocks as u64);
+    for code in codes {
+        f.op(END);
+        f.b.extend_from_slice(&code);
+    }
+    f.op(END);
+    // Exit: pc = page + 4 * SLOT
+    g.bi = nblocks - 1;
+    g.nest = 0;
+    g.ret(
+        |g| {
+            g.a.get(PAGE);
+            g.a.get(SLOT);
+            g.a.op(I64_EXTEND_I32_U);
+            g.a.i64c(2);
+            g.a.op(I64_SHL);
+            g.a.op(I64_ADD);
+        },
+        0,
+        STATUS_OK,
+    );
+    f.b.extend_from_slice(&g.a.b);
+    f.op(END);
+    f.op(UNREACHABLE);
     f.op(END);
 
     // Function body: locals, code
     let mut func = Asm::default();
     func.uleb(2);
-    func.uleb(NUM_I64 as u64);
-    func.op(0x7e);
     func.uleb(NUM_I32 as u64);
     func.op(0x7f);
+    func.uleb((NUM_I64 + nblocks.div_ceil(64) as u32) as u64);
+    func.op(0x7e);
     func.b.extend_from_slice(&f.b);
 
     let mut m = Asm::default();
@@ -1475,12 +2069,12 @@ pub fn codegen(block: &[(Form, Op)], t: &Target) -> Vec<u8> {
         m.uleb(content.len() as u64);
         m.b.extend_from_slice(content);
     };
-    // Types: 0 = block (i32) -> i32, 1 = read (i32, i64, i32) -> i64,
+    // Types: 0 = region (i32, i64) -> i32, 1 = read (i32, i64, i32) -> i64,
     // 2 = write (i32, i64, i32, i64) -> ()
     section(
         &mut m,
         1,
-        &[3, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 3, 0x7f, 0x7e, 0x7f, 1, 0x7e, 0x60, 4, 0x7f, 0x7e, 0x7f, 0x7e, 0],
+        &[3, 0x60, 2, 0x7f, 0x7e, 1, 0x7f, 0x60, 3, 0x7f, 0x7e, 0x7f, 1, 0x7e, 0x60, 4, 0x7f, 0x7e, 0x7f, 0x7e, 0],
     );
     // Imports: memory, read, write
     section(
@@ -1502,8 +2096,9 @@ pub fn codegen(block: &[(Form, Op)], t: &Target) -> Vec<u8> {
 }
 
 /// Self-test for the browser build (run by tools/a64-ref/jit-test.mjs):
-/// random blocks run compiled and interpreted from the same random state
-/// must end in the same state. `compile` must install synchronously. Returns
+/// random code (mostly branching within itself) run compiled and
+/// interpreted from the same random state for the same number of steps must
+/// end in the same state. `compile` must install synchronously. Returns
 /// a description of the first difference, or None.
 pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn) -> Option<String> {
     use crate::bus::Bus;
@@ -1516,20 +2111,69 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
         rng ^= rng >> 27;
         rng.wrapping_mul(0x2545_f491_4f6c_dd1d)
     };
+    let (mut skipped, mut not_run) = (0, 0);
     for iter in 0..iterations {
-        // A block of compilable instructions, mostly not branches
+        // Compilable instructions, mostly not unconditional branches
         let len = 1 + (next() % 24) as usize;
         let mut words = Vec::new();
+        // Registers indirect branches use
+        let mut br_regs = 0u32;
         while words.len() < len {
-            let w = next() as u32;
-            if let (Some(form), _) = decode_op(w) {
+            let mut w = next() as u32;
+            if w.is_multiple_of(8) {
+                // Forms random words are (almost) never
+                let r = next() as u32;
+                let (rt, rn, rs) = (r & 31, (r >> 5) % 31, (r >> 10) & 31);
+                let size = (r >> 30) << 30;
+                w = match next() % 13 {
+                    0 => [0xd61f_0000, 0xd63f_0000, 0xd65f_0000][(next() % 3) as usize] | rn << 5,
+                    1 => [0xd538_d080, 0xd53b_d040, 0xd53b_d060, 0xd538_4100, 0xd53b_4220][(next() % 5) as usize] | rt,
+                    2 => 0xd50b_7420 | rt,
+                    3 => [0xd503_3bbf, 0xd503_39bf, 0xd503_3f9f, 0xd503_3fdf][(next() % 4) as usize],
+                    4 => [0xdac0_0400, 0xdac0_0800, 0xdac0_0c00, 0x5ac0_0400, 0x5ac0_0800, 0xdac0_1000, 0x5ac0_1000]
+                        [(next() % 7) as usize]
+                        | rn << 5
+                        | rt,
+                    5 | 6 => [0x08df_fc00, 0x089f_fc00][(next() % 2) as usize] | size | rn << 5 | rt,
+                    7 | 8 => 0x085f_7c00 | (next() as u32 & 1) << 15 | size | rn << 5 | rt,
+                    9 | 10 => 0x0800_7c00 | (next() as u32 & 1) << 15 | size | rs << 16 | rn << 5 | rt,
+                    11 => 0xf980_0000 | (r & 0x3f_ffff),
+                    _ => {
+                        // Q register loads and stores with small offsets
+                        let (base, lsb) = [(0x3d80_0000, 10), (0x3dc0_0000, 10), (0xad00_0000, 15), (0xad40_0000, 15), (0x3c80_0c00, 12), (0x3cc0_0400, 12)]
+                            [(next() % 6) as usize];
+                        let rt2 = if base >> 24 == 0xad { rs << 10 } else { 0 };
+                        base | (r >> 12 & 7) << lsb | rt2 | rn << 5 | rt
+                    }
+                };
+            }
+            if let (Some(form), op) = decode_op(w) {
                 if matches!(form, Form::B | Form::Bl | Form::Br | Form::Blr) && next() % 8 != 0 {
                     continue;
+                }
+                if matches!(form, Form::Br | Form::Blr) {
+                    br_regs |= 1 << op.b;
                 }
                 words.push(w);
             }
         }
         let start = (next() % (1024 - len as u64)) as usize * 4;
+        // Most direct branches go to the code (or just past it)
+        for (k, w) in words.iter_mut().enumerate() {
+            let (Some(form), _) = decode_op(*w) else { continue };
+            let (bits, lsb) = match form {
+                Form::B | Form::Bl => (26, 0),
+                Form::BCond | Form::Cbz { .. } => (19, 5),
+                Form::Tbz { .. } => (14, 5),
+                _ => continue,
+            };
+            if next() % 4 != 0 {
+                let off = (next() % (len as u64 + 1)) as i64 - k as i64;
+                let mask = ((1u32 << bits) - 1) << lsb;
+                *w = (*w & !mask) | (((off as u32) << lsb) & mask);
+            }
+        }
+        let limit = 1 + next() % 2000;
         let mmu = next() % 2 == 0;
         let state_seed = next();
         let mk = || {
@@ -1542,9 +2186,10 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
             };
             let mut c = Box::new(Cpu::new(Bus::new(RAM_BASE, RAM_SIZE)));
             for i in 0..31 {
-                c.x[i] = match rn() % 4 {
+                c.x[i] = match if br_regs & 1 << i != 0 { 2 } else { rn() % 5 } {
                     0 => rn(),
                     1 => rn() % 64,
+                    2 => RAM_BASE + (start + 4 * (rn() % (len as u64 + 1)) as usize) as u64,
                     _ => RAM_BASE + 0x8000 + rn() % 0x4000,
                 };
             }
@@ -1552,6 +2197,19 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
             c.sp_el0 = RAM_BASE + 0xd000 + (rn() % 0x100) * 8;
             c.spsel = (rn() % 2) as u32;
             c.nzcv = (rn() as u32) & 0xf000_0000;
+            c.daif = (rn() as u32) & 0x3c0;
+            c.sr.tpidr_el1 = rn();
+            c.sr.tpidr_el0 = rn();
+            c.sr.tpidrro_el0 = rn();
+            c.sr.cpacr_el1 = (rn() % 4) << 20;
+            for v in c.v.iter_mut() {
+                *v = (rn() as u128) << 64 | rn() as u128;
+            }
+            if rn() % 2 == 0 {
+                // A monitor that may match a following store-exclusive
+                c.excl_addr = c.x[(rn() % 31) as usize];
+                c.excl_size = 1 << (rn() % 4);
+            }
             for b in c.bus.ram[0x1000..].iter_mut() {
                 *b = rn() as u8;
             }
@@ -1581,24 +2239,40 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
         };
         let mut a = mk();
         let mut b = mk();
+        let a_code = a.bus.ram[..0x1000].to_vec();
         a.jit.enabled = true;
         a.jit.threshold = 0;
         a.jit.compile = Some(compile);
         a.jit.table_base = table_base;
-        a.jit_enter(1000); // compiles
-        let used = a.jit_enter(1000);
-        if used.is_none() {
-            return Some(format!("iteration {iter}: block at {:#x} wasn't run compiled ({:08x?})", a.pc, words));
+        a.jit_enter(limit); // compiles
+        if a.jit.stats.failed != 0 {
+            return Some(format!("iteration {iter}: code at {:#x} failed to compile ({:08x?})", a.pc, words));
         }
-        // Interpret until b is where a is
-        for _ in 0..=len {
-            if b.pc == a.pc && b.icount == a.icount {
-                break;
+        let Some(used) = a.jit_enter(limit) else {
+            // Nothing run: the first block doesn't fit in the limit, or its
+            // first instruction is left to the interpreter
+            not_run += 1;
+            if a.icount != 0 || a.pc != b.pc || a.x != b.x {
+                return Some(format!("iteration {iter}: state changed without running ({:08x?})", words));
             }
+            continue;
+        };
+        if used > limit + 1 {
+            return Some(format!("iteration {iter}: {used} steps for a limit of {limit}"));
+        }
+        for _ in 0..used {
             b.step();
         }
-        let state = |c: &Cpu| (c.x, c.sp_el0, c.sp_el1, c.pc, c.nzcv, c.icount, c.sr.esr_el1, c.sr.far_el1, c.sr.elr_el1);
-        if state(&a) != state(&b) || a.bus.ram != b.bus.ram {
+        // Code that changes itself is only seen by compiled code after the
+        // next ISB (or exception): skip
+        if b.bus.ram[..0x1000] != a_code[..] {
+            skipped += 1;
+            continue;
+        }
+        let state = |c: &Cpu| {
+            (c.x, c.sp_el0, c.sp_el1, c.pc, c.nzcv, c.icount, c.sr.esr_el1, c.sr.far_el1, c.sr.elr_el1, c.excl_size, c.excl_addr)
+        };
+        if state(&a) != state(&b) || a.v != b.v || a.bus.ram != b.bus.ram {
             let mut d = format!("iteration {iter}: state differs after block {:08x?} at {:#x}\n", words, RAM_BASE + start as u64);
             for i in 0..31 {
                 if a.x[i] != b.x[i] {
@@ -1623,8 +2297,12 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                 b.sr.far_el1,
                 if a.bus.ram == b.bus.ram { "same" } else { "differs" }
             );
+            d += &format!("  excl {:#x}/{} {:#x}/{} v {}\n", a.excl_addr, a.excl_size, b.excl_addr, b.excl_size, if a.v == b.v { "same" } else { "differs" });
             return Some(d);
         }
+    }
+    if skipped + not_run > iterations / 4 {
+        return Some(format!("{skipped} of {iterations} iterations skipped, {not_run} not run compiled"));
     }
     None
 }

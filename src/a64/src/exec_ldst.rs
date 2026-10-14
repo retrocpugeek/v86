@@ -284,10 +284,10 @@ impl Cpu {
                         let a = self.read(va, elem, false)?;
                         self.set_xr(rt, a);
                     }
-                    self.excl = Some((va, total));
+                    (self.excl_addr, self.excl_size) = (va, total);
                 } else {
-                    let ok = self.excl == Some((va, total));
-                    self.excl = None;
+                    let ok = self.excl_size == total && self.excl_addr == va;
+                    self.excl_size = 0;
                     if ok {
                         if pair {
                             if elem == 8 {

@@ -60,8 +60,9 @@ pub struct Cpu {
     pub sr: SysRegs,
     pub bus: Bus,
     pub tlb: Tlb,
-    /// Exclusive monitor: (virtual address, size in bytes).
-    pub excl: Option<(u64, u32)>,
+    /// Exclusive monitor: virtual address and size in bytes (0: open).
+    pub excl_addr: u64,
+    pub excl_size: u32,
     /// Completed instructions. With `ns_per_insn` this drives virtual time.
     pub icount: u64,
     /// Virtual nanoseconds skipped while idle (WFI).
@@ -119,7 +120,8 @@ impl Cpu {
             sr: SysRegs::new(),
             bus,
             tlb: Tlb::new(),
-            excl: None,
+            excl_addr: 0,
+            excl_size: 0,
             icount: 0,
             warp_ns: 0,
             ns_per_insn: 1,
@@ -243,7 +245,7 @@ impl Cpu {
         self.nzcv = 0;
         self.daif = DAIF_D | DAIF_A | DAIF_I | DAIF_F;
         self.pc = self.sr.vbar_el1.wrapping_add(offset + vector);
-        self.excl = None;
+        self.excl_size = 0;
     }
 
     pub fn take_exception(&mut self, e: Exception, pc: u64) {
@@ -271,7 +273,7 @@ impl Cpu {
         self.pc = self.sr.elr_el1;
         self.nzcv = (spsr as u32) & 0xf000_0000;
         self.daif = (spsr as u32) & 0x3c0;
-        self.excl = None;
+        self.excl_size = 0;
         if m & 0x10 != 0 || (m >> 2) > 1 || m & 2 != 0 || (m >> 2 == 0 && m & 1 != 0) {
             // AArch32 or a non-existent EL: illegal exception return.
             self.il = true;

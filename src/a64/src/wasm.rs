@@ -194,12 +194,13 @@ pub extern "C" fn a64_jit_rd(cpu: *mut Cpu, va: u64, size: u32) -> u64 { unsafe 
 #[no_mangle]
 pub extern "C" fn a64_jit_wr(cpu: *mut Cpu, va: u64, size: u32, v: u64) { unsafe { (*cpu).jit_write(va, size, v) } }
 
-/// JIT counters: 0 = blocks compiled, 1 = compiled blocks run, 2 = dropped
-/// because the code changed, 3 = failed to compile.
+/// JIT counters: 0 = regions compiled, 1 = calls to compiled code, 2 =
+/// dropped because the code changed, 3 = failed to compile, 4 = instructions
+/// run compiled.
 #[no_mangle]
 pub extern "C" fn a64_jit_stat(n: u32) -> f64 {
     let s = cpu().jit.stats;
-    [s.compiled, s.entered, s.stale, s.failed].get(n as usize).map_or(0.0, |&v| v as f64)
+    [s.compiled, s.entered, s.stale, s.failed, s.insns].get(n as usize).map_or(0.0, |&v| v as f64)
 }
 
 static mut SELFTEST_MSG: String = String::new();

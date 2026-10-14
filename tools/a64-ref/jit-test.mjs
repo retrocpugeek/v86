@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// JIT self-test (src/a64/src/jit.rs selftest): random blocks run compiled and
-// interpreted from the same random state must end in the same state.
+// JIT self-test (src/a64/src/jit.rs selftest): random code run compiled and
+// interpreted from the same random state for the same number of steps must
+// end in the same state.
 //
 //   make build/v86-a64.wasm && node tools/a64-ref/jit-test.mjs [iterations] [seed]
 //
@@ -45,4 +46,4 @@ if(len)
     console.log("FAIL");
     process.exit(1);
 }
-console.log(`PASS: ${iterations} blocks (seed ${seed}) in ${Date.now() - t0} ms`);
+console.log(`PASS: ${iterations} runs (seed ${seed}) in ${Date.now() - t0} ms`);

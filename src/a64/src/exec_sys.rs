@@ -118,7 +118,7 @@ impl Cpu {
                     2 => self.hint((crm << 3) | op2),
                     3 => {
                         if op2 == 2 {
-                            self.excl = None; // CLREX
+                            self.excl_size = 0; // CLREX
                         }
                         Ok(())
                     }
