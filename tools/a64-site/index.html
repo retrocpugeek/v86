@@ -27,7 +27,7 @@ code { color: var(--fg); }
 <div id="terminal"></div>
 <footer>
   Buildroot arm64 Linux running on v86's AArch64 core (ARMv8.0, QEMU <code>virt</code>-like machine), entirely in your browser.
-  Log in as <code>root</code>. Disk changes stay in this tab.
+  Log in as <code>root</code> (OpenWrt: press Enter once the console is ready). Disk changes stay in this tab.
   Networking uses the <code>fetch</code> adapter: <code>wget</code> works for sites that allow CORS
   (<code>?relay=wisps://…</code> selects a different relay).
   <a href="https://github.com/retrocpugeek/v86/tree/aarch64-port">Source</a>
@@ -88,7 +88,7 @@ code { color: var(--fg); }
     });
     emulator.add_listener("emulator-ready", () =>
     {
-        status.textContent = "Booting (log in as root)";
+        status.textContent = "Booting";
     });
 })().catch(e =>
 {

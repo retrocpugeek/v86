@@ -233,6 +233,9 @@ impl Cpu {
         if bit(i, 31) {
             return undef();
         }
+        if let Some(r) = self.exec_crypto(i) {
+            return r;
+        }
         match bits(i, 28, 24) {
             0b01110 => {
                 if bit(i, 21) {

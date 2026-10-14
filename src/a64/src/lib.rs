@@ -9,6 +9,7 @@ pub mod bus;
 pub mod cpu;
 pub mod dev;
 pub mod exc;
+pub mod exec_crypto;
 pub mod exec_int;
 pub mod exec_ldst;
 pub mod exec_simd;

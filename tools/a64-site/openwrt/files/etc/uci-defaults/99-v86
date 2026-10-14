@@ -1,0 +1,16 @@
+# First-boot settings for running in v86's browser network adapters:
+# take the address from v86's DHCP server instead of serving 192.168.1.1, and
+# accept the private address v86's DNS hands out for every name.
+uci -q batch <<UCI
+set network.lan.proto='dhcp'
+delete network.lan.ipaddr
+delete network.lan.netmask
+delete network.lan.ip6assign
+set dhcp.lan.ignore='1'
+set dhcp.@dnsmasq[0].rebind_protection='0'
+set system.@system[0].hostname='OpenWrt-v86'
+commit network
+commit dhcp
+commit system
+UCI
+exit 0

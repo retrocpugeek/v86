@@ -55,6 +55,7 @@ tests/a64/browser.mjs     # examples/aarch64.html in headless Chrome (images in 
 | `exec_int.rs` | Integer data processing, branches |
 | `exec_ldst.rs` | Loads/stores, pairs, exclusives, acquire/release |
 | `exec_simd.rs` | AdvSIMD integer subset, scalar FP, structure loads/stores, PMULL |
+| `exec_crypto.rs` | AES, SHA1, SHA256 instructions |
 | `exec_sys.rs` | System instructions, cache/TLB maintenance, PSCI (HVC conduit) |
 | `gic.rs` | GICv2 distributor + CPU interface (uniprocessor) |
 | `dev/` | PL011, PL031, virtio-mmio (v2) + virtio-blk; native runner only |
