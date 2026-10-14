@@ -20,14 +20,22 @@ struct Entry {
     asid: u16,
     global: bool,
     perm: u8,
+    /// Offset of the page in Bus::ram, or NOT_RAM (device memory).
+    ram: u32,
 }
 
-const INVALID: Entry = Entry { vpn: u64::MAX, pa_page: 0, asid: 0, global: false, perm: 0 };
+const NOT_RAM: u32 = u32::MAX;
+const INVALID: Entry = Entry { vpn: u64::MAX, pa_page: 0, asid: 0, global: false, perm: 0, ram: NOT_RAM };
 
 pub struct Tlb {
     e: Box<[Entry; TLB_SIZE]>,
     /// ASID currently in use (from TTBR0/1 according to TCR.A1).
     pub asid: u16,
+    /// Instruction fetch cache: the page (VA) instructions were last fetched
+    /// from, if it's RAM, and its offset in Bus::ram. Valid until the TLB is
+    /// flushed or the ASID or exception level changes (invalidate_fetch).
+    fetch_page: u64,
+    fetch_ram: usize,
 }
 
 impl Default for Tlb {
@@ -35,9 +43,15 @@ impl Default for Tlb {
 }
 
 impl Tlb {
-    pub fn new() -> Tlb { Tlb { e: Box::new([INVALID; TLB_SIZE]), asid: 0 } }
+    pub fn new() -> Tlb { Tlb { e: Box::new([INVALID; TLB_SIZE]), asid: 0, fetch_page: u64::MAX, fetch_ram: 0 } }
 
-    pub fn flush(&mut self) { self.e.fill(INVALID); }
+    pub fn flush(&mut self) {
+        self.e.fill(INVALID);
+        self.invalidate_fetch();
+    }
+
+    #[inline(always)]
+    pub fn invalidate_fetch(&mut self) { self.fetch_page = u64::MAX; }
 
     /// Diagnostics: the entry that would serve `va`, as (pa_page, asid, global, perm).
     pub fn probe(&self, va: u64) -> Option<(u64, u16, bool, u8)> {
@@ -73,6 +87,7 @@ impl Cpu {
         let ttbr = if tcr >> 22 & 1 != 0 { self.sr.ttbr1_el1 } else { self.sr.ttbr0_el1 };
         let asid = (ttbr >> 48) as u16;
         self.tlb.asid = if tcr >> 36 & 1 != 0 { asid } else { asid & 0xff };
+        self.tlb.invalidate_fetch();
     }
 
     /// Table walk for `va`; Err holds the fault status code.
@@ -215,8 +230,9 @@ impl Cpu {
         match self.walk(va, acc) {
             Ok(w) => {
                 let vpn = va >> 12;
+                let ram = self.bus.ram_offset(w.pa, 0x1000).map_or(NOT_RAM, |off| off as u32);
                 self.tlb.e[Tlb::index(vpn)] =
-                    Entry { vpn, pa_page: w.pa, asid: self.tlb.asid, global: w.global, perm: w.perm };
+                    Entry { vpn, pa_page: w.pa, asid: self.tlb.asid, global: w.global, perm: w.perm, ram };
                 if w.perm & need == 0 {
                     return Err(self.abort(va, acc, fsc::PERMISSION + w.level, cm));
                 }
@@ -237,10 +253,34 @@ impl Cpu {
 
     // ---- data access ----
 
+    /// Offset in Bus::ram of `va` if the TLB has an entry for it that allows
+    /// `acc` and maps RAM: the fast path for loads and stores.
+    #[inline(always)]
+    fn ram_hit(&self, va: u64, acc: Acc, unpriv: bool) -> Option<usize> {
+        if !self.mmu_on() {
+            return None;
+        }
+        let vpn = va >> 12;
+        let e = &self.tlb.e[Tlb::index(vpn)];
+        if e.vpn == vpn
+            && (e.global || e.asid == self.tlb.asid)
+            && e.perm & self.needed_perm(acc, unpriv) != 0
+            && e.ram != NOT_RAM
+        {
+            Some(e.ram as usize | (va & 0xfff) as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Access of `size` bytes, which must not cross a page.
     #[inline(always)]
     pub fn read(&mut self, va: u64, size: u32, unpriv: bool) -> Res<u64> {
         if (va & 0xfff) + size as u64 > 0x1000 {
             return self.read_split(va, size, unpriv);
+        }
+        if let Some(off) = self.ram_hit(va, Acc::Read, unpriv) {
+            return Ok(self.bus.read_ram(off, size));
         }
         let pa = self.translate(va, Acc::Read, unpriv)?;
         Ok(self.bus.read(pa, size))
@@ -250,6 +290,10 @@ impl Cpu {
     pub fn write(&mut self, va: u64, size: u32, v: u64, unpriv: bool) -> Res<()> {
         if (va & 0xfff) + size as u64 > 0x1000 {
             return self.write_split(va, size, v, unpriv);
+        }
+        if let Some(off) = self.ram_hit(va, Acc::Write, unpriv) {
+            self.bus.write_ram(off, size, v);
+            return Ok(());
         }
         let pa = self.translate(va, Acc::Write, unpriv)?;
         self.bus.write(pa, size, v);
@@ -304,10 +348,24 @@ impl Cpu {
 
     #[inline(always)]
     pub fn fetch(&mut self, va: u64) -> Res<u32> {
+        // Same page as the last fetch (fetch_page has the low bits clear, so
+        // a misaligned va doesn't match)
+        if va & !0xffc == self.tlb.fetch_page {
+            return Ok(self.bus.read_ram(self.tlb.fetch_ram | (va & 0xffc) as usize, 4) as u32);
+        }
+        self.fetch_slow(va)
+    }
+
+    #[inline(never)]
+    fn fetch_slow(&mut self, va: u64) -> Res<u32> {
         if va & 3 != 0 {
             return Err(Exception { ec: ec::PC_ALIGN, iss: 0, far: Some(va), ret_next: false });
         }
         let pa = self.translate(va, Acc::Exec, false)?;
+        if let Some(off) = self.bus.ram_offset(pa & !0xfff, 0x1000) {
+            self.tlb.fetch_page = va & !0xfff;
+            self.tlb.fetch_ram = off;
+        }
         Ok(self.bus.read(pa, 4) as u32)
     }
 

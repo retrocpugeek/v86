@@ -54,11 +54,13 @@ impl Cpu {
             PSCI_CPU_SUSPEND => {
                 if !self.bus.gic.irq_out {
                     self.waiting = true;
+                    self.stop_batch = true;
                 }
                 0
             }
             PSCI_CPU_OFF => {
                 self.power = Power::Off;
+                self.stop_batch = true;
                 0
             }
             PSCI_CPU_ON => {
@@ -78,10 +80,12 @@ impl Cpu {
             PSCI_MIGRATE_INFO_TYPE => 2,
             PSCI_SYSTEM_OFF => {
                 self.power = Power::Off;
+                self.stop_batch = true;
                 0
             }
             PSCI_SYSTEM_RESET => {
                 self.power = Power::Reset;
+                self.stop_batch = true;
                 0
             }
             PSCI_FEATURES => {
@@ -152,6 +156,7 @@ impl Cpu {
                 }
                 if !self.bus.gic.irq_out {
                     self.waiting = true;
+                    self.stop_batch = true;
                 }
             }
             2 => {

@@ -80,6 +80,9 @@ pub struct Cpu {
     /// than skipped, and sync_host_ns() pulls virtual time up to the host clock.
     pub realtime: bool,
     host_base_ns: Option<u64>,
+    /// Ends run()'s current batch of steps: set when the timer deadline,
+    /// WFI state or power state may have changed.
+    pub stop_batch: bool,
 }
 
 impl Cpu {
@@ -114,6 +117,7 @@ impl Cpu {
             first_el0: None,
             realtime: false,
             host_base_ns: None,
+            stop_batch: false,
         }
     }
 
@@ -189,6 +193,7 @@ impl Cpu {
             }
         }
         self.next_timer_ns = next;
+        self.stop_batch = true;
     }
 
     pub fn timer_istatus(&self, ctl: u64, cval: u64) -> u64 {
@@ -208,6 +213,7 @@ impl Cpu {
         self.sr.spsr_el1 = self.pstate();
         self.sr.elr_el1 = ret;
         self.el = 1;
+        self.tlb.invalidate_fetch();
         self.spsel = 1;
         self.il = false;
         // QEMU writes PSTATE = DAIF | mode on entry, clearing NZCV (they're in SPSR).
@@ -251,6 +257,7 @@ impl Cpu {
         self.il = spsr & PSTATE_IL != 0;
         self.el = m >> 2;
         self.spsel = m & 1;
+        self.tlb.invalidate_fetch();
         if self.el == 0 && self.first_el0.is_none() {
             self.first_el0 = Some(self.icount);
         }
@@ -356,8 +363,18 @@ impl Cpu {
             if let Some(exit) = self.housekeeping() {
                 return exit;
             }
-            // next_timer_ns is re-read every step since a timer register write may move it.
-            while n < budget && self.now_ns() < self.next_timer_ns && !self.waiting && self.power == Power::On {
+            // Steps until the next timer deadline: icount (and with it
+            // virtual time) advances by at most one instruction per step, so
+            // this never runs past it. Anything that may move the deadline,
+            // or stop the CPU, sets stop_batch.
+            let mut limit = budget - n;
+            if self.next_timer_ns != u64::MAX && self.ns_per_insn != 0 {
+                let left = self.next_timer_ns.saturating_sub(self.now_ns());
+                limit = limit.min(left.div_ceil(self.ns_per_insn).max(1));
+            }
+            let end = n + limit;
+            self.stop_batch = false;
+            while n < end && !self.stop_batch {
                 self.step();
                 n += 1;
             }

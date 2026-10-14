@@ -74,6 +74,40 @@ impl Bus {
 
     pub fn is_ram(&self, pa: u64) -> bool { self.ram_offset(pa, 1).is_some() }
 
+    /// Read at an offset in RAM; `off + size` must be within RAM (callers get
+    /// `off` from a RAM page in the TLB and don't cross the page).
+    #[inline(always)]
+    pub fn read_ram(&self, off: usize, size: u32) -> u64 {
+        debug_assert!(matches!(size, 1 | 2 | 4 | 8));
+        assert!(off + size as usize <= self.ram.len());
+        // Safety: checked above
+        unsafe {
+            let p = self.ram.as_ptr().add(off);
+            match size {
+                1 => *p as u64,
+                2 => u16::from_le((p as *const u16).read_unaligned()) as u64,
+                4 => u32::from_le((p as *const u32).read_unaligned()) as u64,
+                _ => u64::from_le((p as *const u64).read_unaligned()),
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn write_ram(&mut self, off: usize, size: u32, value: u64) {
+        debug_assert!(matches!(size, 1 | 2 | 4 | 8));
+        assert!(off + size as usize <= self.ram.len());
+        // Safety: checked above
+        unsafe {
+            let p = self.ram.as_mut_ptr().add(off);
+            match size {
+                1 => *p = value as u8,
+                2 => (p as *mut u16).write_unaligned((value as u16).to_le()),
+                4 => (p as *mut u32).write_unaligned((value as u32).to_le()),
+                _ => (p as *mut u64).write_unaligned(value.to_le()),
+            }
+        }
+    }
+
     pub fn read(&mut self, pa: u64, size: u32) -> u64 {
         if let Some(off) = self.ram_offset(pa, size as u64) {
             return read_le(&self.ram[off..], size);
