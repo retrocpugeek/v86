@@ -28,8 +28,8 @@ code { color: var(--fg); }
 <footer>
   Buildroot arm64 Linux running on v86's AArch64 core (ARMv8.0, QEMU <code>virt</code>-like machine), entirely in your browser.
   Log in as <code>root</code> (OpenWrt: press Enter once the console is ready). Disk changes stay in this tab.
-  Networking uses the <code>fetch</code> adapter: <code>wget</code> works for sites that allow CORS
-  (<code>?relay=wisps://…</code> selects a different relay).
+  Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
+  isn't supported (<code>?relay=wisps://…</code> selects a full network relay).
   <a href="https://github.com/retrocpugeek/v86/tree/aarch64-port">Source</a>
 </footer>
 
@@ -56,7 +56,10 @@ code { color: var(--fg); }
     };
 
     const base = "images/" + build.id + "/";
+    // By default the guest's HTTP goes through this site's /proxy (worker.js);
+    // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
     const relay = params.get("relay") || "fetch";
+    const cors_proxy = params.has("relay") ? undefined : location.origin + "/proxy?url=";
 
     const emulator = window.emulator = new V86({
         arch: "aarch64",
@@ -71,7 +74,7 @@ code { color: var(--fg); }
             async: true,
         },
         cmdline: build.cmdline,
-        net_device: { type: "virtio", relay_url: relay },
+        net_device: { type: "virtio", relay_url: relay, cors_proxy },
         serial_console: { type: "xtermjs", container: document.getElementById("terminal") },
         autostart: true,
         disable_keyboard: true,
