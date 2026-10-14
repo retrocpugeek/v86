@@ -306,7 +306,6 @@ function setup_console_log(emulator, build)
 // sends it to the guest's port 80 over v86's virtual network (the "fetch"
 // adapter's TCP stack).
 
-const GUEST_HTTP_TIMEOUT = 120000;
 const FORWARD_HEADERS = new Set(["accept", "accept-language", "authorization", "content-type", "x-requested-with"]);
 const DROP_RESPONSE_HEADERS = new Set(["connection", "content-length", "keep-alive", "set-cookie", "transfer-encoding"]);
 
@@ -404,33 +403,112 @@ function guest_http(adapter, request)
     }
     if(guest_cookies.size) head.push("Cookie: " + [...guest_cookies].map(([k, v]) => k + "=" + v).join("; "));
     if(request.body) head.push("Content-Length: " + request.body.byteLength);
+    const data = [new TextEncoder().encode(head.join("\r\n") + "\r\n\r\n")];
+    if(request.body) data.push(new Uint8Array(request.body));
 
+    // v86's TCP stack doesn't retransmit, so a packet the guest drops (its
+    // receive ring is full when many requests arrive at once) stalls the
+    // connection: limit concurrent connections, and retry failed attempts
+    // (those that may have reached the server only for GET and HEAD).
+    const idempotent = request.method === "GET" || request.method === "HEAD";
+    return with_guest_connection_slot(async () =>
+    {
+        for(let attempt = 1; ; attempt++)
+        {
+            const result = await guest_http_attempt(adapter, data);
+            if(result.reply)
+            {
+                if(cacheable && result.reply.status === 200) guest_static_cache.set(request.path, result.reply);
+                return result.reply;
+            }
+            console.warn(`guest http: ${request.method} ${request.path}: ${result.error} (attempt ${attempt})`);
+            if(attempt === GUEST_HTTP_ATTEMPTS || result.sent && !idempotent)
+            {
+                return { error: result.error };
+            }
+            await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+        }
+    });
+}
+
+const GUEST_HTTP_ATTEMPTS = 3;
+const GUEST_CONNECT_TIMEOUT = 5000;
+const GUEST_IDLE_TIMEOUT = 30000;
+const GUEST_MAX_CONNECTIONS = 4;
+let guest_connections = 0;
+const guest_connection_queue = [];
+
+async function with_guest_connection_slot(f)
+{
+    if(guest_connections >= GUEST_MAX_CONNECTIONS)
+    {
+        await new Promise(resolve => guest_connection_queue.push(resolve));
+    }
+    else
+    {
+        guest_connections++;
+    }
+    try
+    {
+        return await f();
+    }
+    finally
+    {
+        // Hand the slot to the next waiting request, if any
+        const next = guest_connection_queue.shift();
+        if(next) next();
+        else guest_connections--;
+    }
+}
+
+// One connection to the guest's port 80: resolves to { reply } or
+// { error, sent } (sent: the request may have reached the server)
+function guest_http_attempt(adapter, data)
+{
     return new Promise(resolve =>
     {
         const chunks = [];
-        let done = false;
+        let done = false, sent = false;
         const conn = adapter.connect(80);
-        const timer = setTimeout(() => finish("The guest's web server didn't answer."), GUEST_HTTP_TIMEOUT);
+        let timer = setTimeout(() => fail("no connection to the guest's web server"), GUEST_CONNECT_TIMEOUT);
 
-        function finish(error)
+        function fail(error)
+        {
+            finish({ error, sent });
+        }
+        function finish(result)
         {
             if(done) return;
             done = true;
             clearTimeout(timer);
             conn.close();
-            const reply = error ? { error } : parse_response(concat(chunks));
-            if(cacheable && reply.status === 200) guest_static_cache.set(request.path, reply);
-            resolve(reply);
+            resolve(result);
+        }
+        function complete()
+        {
+            const reply = parse_response(concat(chunks));
+            if(reply.error) fail(reply.error);
+            else finish({ reply });
+        }
+        function wait_for_data()
+        {
+            clearTimeout(timer);
+            timer = setTimeout(() => fail("the guest's web server stopped answering"), GUEST_IDLE_TIMEOUT);
         }
 
         conn.on("connect", () =>
         {
-            conn.write(new TextEncoder().encode(head.join("\r\n") + "\r\n\r\n"));
-            if(request.body) conn.write(new Uint8Array(request.body));
+            sent = true;
+            wait_for_data();
+            for(const d of data) conn.write(d);
         });
-        conn.on("data", data => chunks.push(data.slice()));
-        conn.on("shutdown", () => finish());
-        conn.on("close", () => finish(chunks.length ? undefined : "The guest refused the connection."));
+        conn.on("data", d =>
+        {
+            chunks.push(d.slice());
+            wait_for_data();
+        });
+        conn.on("shutdown", complete);
+        conn.on("close", () => chunks.length ? complete() : fail("the guest refused the connection"));
     });
 }
 

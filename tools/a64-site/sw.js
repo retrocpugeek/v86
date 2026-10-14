@@ -9,7 +9,7 @@
 // (it does so when focused) serves the requests; as the worker's state is lost
 // when the browser stops it, otherwise the focused (or any) emulator page.
 
-const REPLY_TIMEOUT = 150000;
+const REPLY_TIMEOUT = 300000;
 let owner_id;
 
 self.addEventListener("install", () => self.skipWaiting());
