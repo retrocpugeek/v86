@@ -18,6 +18,8 @@ pub const PSTATE_IL: u64 = 1 << 20;
 
 /// Generic timer frequency; QEMU's virt machine uses 62.5 MHz.
 pub const CNTFRQ: u64 = 62_500_000;
+/// Largest step sync_host_ns() moves virtual time forward by.
+pub const MAX_WARP_NS: u64 = 1_000_000_000;
 /// Nanoseconds per counter tick (1e9 / CNTFRQ).
 pub const NS_PER_TICK: u64 = 16;
 
@@ -323,12 +325,22 @@ impl Cpu {
 
     /// Advance virtual time to at least the host clock (realtime mode). Virtual
     /// time also advances by ns_per_insn per instruction between calls.
+    ///
+    /// A jump of more than MAX_WARP_NS means the host didn't run us (browsers
+    /// freeze or throttle background tabs): virtual time then only moves by
+    /// MAX_WARP_NS and the rest is dropped, as if the machine was paused.
+    /// Otherwise the guest sees the whole gap pass in one timer tick and the
+    /// kernel reports RCU stalls and soft lockups.
     pub fn sync_host_ns(&mut self, host_ns: u64) {
         let now = self.now_ns();
-        let base = *self.host_base_ns.get_or_insert(host_ns.saturating_sub(now));
-        let target = host_ns.saturating_sub(base);
+        let base = self.host_base_ns.get_or_insert(host_ns.saturating_sub(now));
+        let target = host_ns.saturating_sub(*base);
         if target > now {
-            self.warp_ns += target - now;
+            let gap = target - now;
+            if gap > MAX_WARP_NS {
+                *base += gap - MAX_WARP_NS;
+            }
+            self.warp_ns += gap.min(MAX_WARP_NS);
         }
     }
 
@@ -362,5 +374,27 @@ impl Cpu {
             0b0111 | 0b1111 => self.exec_simd(insn),
             _ => undef(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_time_pause_is_not_passed_on() {
+        let mut c = Cpu::new(crate::bus::Bus::new(0x4000_0000, 0x1000));
+        c.realtime = true;
+        c.sync_host_ns(5_000_000_000);
+        let t0 = c.now_ns();
+        // Normal progress is followed
+        c.sync_host_ns(5_300_000_000);
+        assert_eq!(c.now_ns() - t0, 300_000_000);
+        // A 90 s pause (frozen tab) moves virtual time by at most MAX_WARP_NS
+        c.sync_host_ns(95_300_000_000);
+        assert_eq!(c.now_ns() - t0, 300_000_000 + MAX_WARP_NS);
+        // ... and following progress is relative to the new base
+        c.sync_host_ns(95_500_000_000);
+        assert_eq!(c.now_ns() - t0, 500_000_000 + MAX_WARP_NS);
     }
 }
