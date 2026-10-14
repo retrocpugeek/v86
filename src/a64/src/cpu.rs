@@ -96,6 +96,8 @@ pub struct Cpu {
     /// Set by jit_read/jit_write for compiled code (see jit.rs).
     pub jit_flag: u32,
     pub jit_exc: Exception,
+    /// Calls compiled code may still chain to another page's code (see jit.rs).
+    pub jit_hops: u32,
     /// The next instruction starts a block: the last one branched, raised an
     /// exception or had no handler of its own (see jit.rs).
     pub block_start: bool,
@@ -141,6 +143,7 @@ impl Cpu {
             djit: std::ptr::null_mut(),
             jit_flag: 0,
             jit_exc: Exception::undef(),
+            jit_hops: 0,
             block_start: true,
         }
     }

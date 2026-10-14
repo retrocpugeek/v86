@@ -75,10 +75,12 @@ export function A64CPU(bus, wasm, stop_idling)
 
     // JIT (src/a64/src/jit.rs): compiled blocks go into the core's function table
     this.jit_table = this.wasm["__indirect_function_table"];
-    this.jit_imports = { "m": this.wasm_memory, "r": this.wasm["a64_jit_rd"], "w": this.wasm["a64_jit_wr"] };
+    this.jit_imports = { "m": this.wasm_memory, "r": this.wasm["a64_jit_rd"], "w": this.wasm["a64_jit_wr"], "t": this.jit_table };
     /** Bumped when the core is recreated: compilations for the old one are dropped. */
     this.jit_generation = 0;
     this.jit_errors = 0;
+    /** @type {Uint8Array} pages with compiled code (see ram_written) */
+    this.jit_code_pages = null;
 }
 
 /**
@@ -200,14 +202,42 @@ A64CPU.prototype.read32s = function(addr)
     return m[o] | m[o + 1] << 8 | m[o + 2] << 16 | m[o + 3] << 24;
 };
 
+/**
+ * Before a write to RAM offsets o..o + len: tell the JIT if a page with
+ * compiled code is written (see Bus::code_pages in src/a64/src/bus.rs).
+ * @param {number} o
+ * @param {number} len
+ */
+A64CPU.prototype.ram_written = function(o, len)
+{
+    const pages = this.jit_code_pages;
+    if(!pages) return;
+    if(pages.buffer !== this.wasm_memory.buffer)
+    {
+        const code_pages = this.wasm["a64_jit_code_pages"]();
+        this.jit_code_pages = new Uint8Array(this.wasm_memory.buffer, code_pages, this.ram_size >> 12);
+        return this.ram_written(o, len);
+    }
+    for(let p = o >> 12; p <= (o + Math.max(len, 1) - 1) >> 12; p++)
+    {
+        if(pages[p])
+        {
+            this.wasm["a64_jit_written"](o, len);
+            return;
+        }
+    }
+};
+
 A64CPU.prototype.write8 = function(addr, value)
 {
+    this.ram_written(addr - RAM_BASE, 1);
     this.ram()[addr - RAM_BASE] = value;
 };
 
 A64CPU.prototype.write16 = function(addr, value)
 {
     const m = this.ram(), o = addr - RAM_BASE;
+    this.ram_written(o, 2);
     m[o] = value;
     m[o + 1] = value >> 8;
 };
@@ -215,6 +245,7 @@ A64CPU.prototype.write16 = function(addr, value)
 A64CPU.prototype.write32 = function(addr, value)
 {
     const m = this.ram(), o = addr - RAM_BASE;
+    this.ram_written(o, 4);
     m[o] = value;
     m[o + 1] = value >> 8;
     m[o + 2] = value >> 16;
@@ -238,6 +269,7 @@ A64CPU.prototype.read_blob = function(addr, length)
  */
 A64CPU.prototype.write_blob = function(blob, addr)
 {
+    this.ram_written(addr - RAM_BASE, blob.length);
     this.ram().set(blob, addr - RAM_BASE);
 };
 
@@ -293,9 +325,13 @@ A64CPU.prototype.reset_core = function(ram_mb)
     this.ram_size = ram_mb * 1024 * 1024;
     this.ram_ptr = this.wasm["a64_init"](ram_mb);
     this.jit_generation++;
+    this.jit_code_pages = null;
     if(this.jit_table && !(this.settings && this.settings.a64_jit === false))
     {
         this.wasm["a64_jit_enable"](this.jit_table.length, 0);
+        // (allocates, so the memory may grow: get the buffer after)
+        const code_pages = this.wasm["a64_jit_code_pages"]();
+        this.jit_code_pages = new Uint8Array(this.wasm_memory.buffer, code_pages, this.ram_size >> 12);
     }
     this.mem8 = null;
     this.irq_lines = null;

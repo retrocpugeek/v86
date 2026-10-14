@@ -22,7 +22,7 @@ const env = {
         try
         {
             const instance = new WebAssembly.Instance(new WebAssembly.Module(code),
-                { "e": { "m": ex.memory, "r": ex.a64_jit_rd, "w": ex.a64_jit_wr } });
+                { "e": { "m": ex.memory, "r": ex.a64_jit_rd, "w": ex.a64_jit_wr, "t": ex.__indirect_function_table } });
             const table = ex.__indirect_function_table;
             if(table.length <= index) table.grow(index + 1 - table.length);
             table.set(index, instance.exports.f);

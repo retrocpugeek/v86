@@ -81,19 +81,20 @@ and powers off (`--qemu` runs the same thing on QEMU).
 target has been entered 100 times, its page is compiled into one function
 that holds all the page's hot entry points and the code reachable from them
 within the page. It dispatches on pc in a loop, so loops, calls and returns
-within the page stay in compiled code. A new hot entry point recompiles the
+within the page stay in compiled code, and a branch to another page calls
+that page's compiled code directly. A new hot entry point recompiles the
 page. JS compiles the module and adds it to the core's function table
 (`A64CPU.jit_compile`).
 
 Compiled code works on the `Cpu` struct in linear memory and looks loads and
 stores up in the TLB inline. Accesses to anything but RAM go through
 `jit_read`/`jit_write` and return to the run loop after the instruction, so
-device interrupts are seen at the same point as when interpreting. The first
-time a call runs a block, it checks that the block's instruction words in RAM
-are still the ones it was compiled from, so writes to code and DMA need no
-tracking. Instructions it doesn't compile, and rare cases of those it does
-(a Q-register access outside the TLB's RAM entries, for example), are left
-to the interpreter. `?jit=0` on the site turns it off.
+device interrupts are seen at the same point as when interpreting. Pages
+with compiled code are flagged (`Bus::code_pages`): a write to one, from
+the CPU or from DMA in JS (`A64CPU.ram_written`), drops its compiled code.
+Instructions it doesn't compile, and rare cases of those it does (a
+Q-register access outside the TLB's RAM entries, for example), are left to
+the interpreter. `?jit=0` on the site turns it off.
 
 The native build has no JIT. Its self-test runs random code, mostly
 branching within itself, compiled and interpreted from the same random state

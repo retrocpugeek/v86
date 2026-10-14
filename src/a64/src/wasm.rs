@@ -184,6 +184,15 @@ pub extern "C" fn a64_jit_enable(table_base: u32, threshold: u32) {
 }
 
 /// The host finished compiling the module for `cookie` (ok = 1) or failed.
+/// Address of Bus::code_pages (one byte per RAM page; see jit.rs), for the
+/// JS write functions.
+#[no_mangle]
+pub extern "C" fn a64_jit_code_pages() -> u32 { cpu().jit_tables().0 as u32 }
+
+/// JS wrote to RAM offsets off..off + len (of a page flagged in code_pages).
+#[no_mangle]
+pub extern "C" fn a64_jit_written(off: u32, len: u32) { cpu().bus.written(off as usize, len as usize) }
+
 #[no_mangle]
 pub extern "C" fn a64_jit_done(cookie: u32, ok: u32) { cpu().jit_done(cookie, ok != 0) }
 

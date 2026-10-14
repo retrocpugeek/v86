@@ -7,20 +7,25 @@
 //! into one function (a region): its blocks are the hot block starts of the
 //! page and everything reachable from them within the page, split into basic
 //! blocks. The function dispatches on pc in a loop, so branches within the
-//! page, including indirect ones (returns), stay in compiled code. A block
-//! start that gets hot later recompiles the page.
+//! page, including indirect ones (returns), stay in compiled code. A branch
+//! to another page calls that page's compiled code, if the target is
+//! installed there (up to MAX_HOPS nested calls). A block start that gets hot
+//! later recompiles the page.
 //!
 //! The generated function is handed to the host (JS), which compiles it,
 //! puts it into the function table and reports back through jit_done. The
 //! run loop then calls it at installed block starts instead of interpreting.
 //!
+//! Pages with compiled code are flagged in Bus::code_pages. Every write to
+//! RAM checks the flag (Bus::written, compiled stores, and A64CPU's JS
+//! write functions for DMA); a write to a flagged page drops its compiled
+//! code before compiled code runs again (jit_enter). Code that changes while
+//! it runs is seen after it returns: changed code needs an ISB, which ends
+//! compiled code, to be seen anyway.
+//!
 //! Compiled code
-//! - checks, the first time it runs a block in a call, that the block's
-//!   instruction words in RAM are still the ones it was compiled from (so
-//!   writes to code and DMA need no tracking: code can't change while it
-//!   runs, and changed code needs an ISB, which ends compiled code, to be
-//!   seen anyway), and checks on entry that the exception level and stack
-//!   pointer selection are the ones it was compiled for;
+//! - checks on entry that the exception level and stack pointer selection
+//!   are the ones it was compiled for;
 //! - works on the Cpu struct in linear memory directly (it gets its address),
 //!   with pc and icount in locals;
 //! - stops before a block that would take icount past its `end` argument;
@@ -43,6 +48,9 @@ use crate::exc::{ec, Exception};
 pub const DEFAULT_THRESHOLD: u32 = 100;
 /// Most compiled regions at a time (function table entries).
 const MAX_FUNCS: u32 = 1 << 16;
+/// Most calls from compiled code to another page's compiled code before it
+/// returns to the run loop (each one nests a wasm call).
+const MAX_HOPS: u32 = 64;
 const PAGE_SLOTS: usize = 1024;
 
 // JIT state of a block start: an entry counter, or one of these.
@@ -58,8 +66,6 @@ pub fn func_index(j: u32) -> u32 { j & 0xf_ffff }
 // Return values of compiled code
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_EXCEPTION: u32 = 1;
-/// The code in RAM changed: the region must be dropped.
-pub const STATUS_STALE: u32 = 2;
 /// Compiled for the other exception level or stack pointer: interpret this time.
 pub const STATUS_WRONG_MODE: u32 = 3;
 
@@ -80,6 +86,8 @@ pub struct JitPage {
 
 impl JitPage {
     pub fn new() -> Box<JitPage> { Box::new(JitPage { state: [0; PAGE_SLOTS], region: None, pending: None }) }
+
+    pub fn has_region(&self) -> bool { self.region.is_some() }
 
     /// Uninstall the region (its block starts count again from 0).
     pub fn drop_region(&mut self, free: &mut Vec<u32>) {
@@ -113,6 +121,7 @@ struct Pending {
 pub struct JitStats {
     pub compiled: u64,
     pub entered: u64,
+    /// Regions dropped because their page was written
     pub stale: u64,
     pub failed: u64,
     /// Instructions run compiled
@@ -153,6 +162,9 @@ impl Cpu {
     /// the caller interprets.
     #[inline(always)]
     pub fn jit_enter(&mut self, limit: u64) -> Option<u64> {
+        if !self.bus.code_written.is_empty() {
+            self.jit_drop_written();
+        }
         let pc = self.pc;
         if pc & !0xffc != self.tlb.fetch_page || self.il || (self.auto_irq && self.irq_deliverable()) {
             return self.jit_enter_slow(limit);
@@ -165,6 +177,7 @@ impl Cpu {
             return None;
         }
         let icount = self.icount;
+        self.jit_hops = MAX_HOPS;
         let status = self.jit_call(self.jit.table_base + func_index(j), icount + limit);
         self.jit_flag = 0;
         let used = self.icount - icount;
@@ -189,15 +202,37 @@ impl Cpu {
                 self.block_start = true;
                 Some(self.icount - icount + 1)
             }
-            STATUS_STALE => {
-                self.jit.stats.stale += 1;
-                let page = self.tlb.fetch_ram >> 12;
-                self.dcache.jit_drop(page);
+            // WRONG_MODE, possibly after chaining to code compiled for another mode
+            _ => {
                 self.block_start = true;
                 (used != 0).then_some(used)
             }
-            _ => None,
         }
+    }
+
+    /// Drop the compiled code of pages that were written (Bus::code_pages).
+    #[inline(never)]
+    fn jit_drop_written(&mut self) {
+        for p in std::mem::take(&mut self.bus.code_written) {
+            if let Some(jp) = self.dcache.jit_meta(p as usize) {
+                // A region being compiled from the old code is dropped when done
+                jp.pending = None;
+                if jp.has_region() {
+                    self.jit.stats.stale += 1;
+                }
+            }
+            self.dcache.jit_drop(p as usize);
+        }
+    }
+
+    /// Allocate Bus::code_pages and DCache's table of JIT states; returns
+    /// their addresses.
+    pub fn jit_tables(&mut self) -> (usize, usize) {
+        let pages = self.bus.ram.len() >> 12;
+        if self.bus.code_pages.is_empty() {
+            self.bus.code_pages = vec![0; pages];
+        }
+        (self.bus.code_pages.as_ptr() as usize, self.dcache.jit_ptrs(pages))
     }
 
     /// jit_enter() when the fetch cache doesn't cover pc (a branch to another
@@ -248,6 +283,9 @@ impl Cpu {
             // Picked up when the page is compiled again
             return;
         }
+        let (code_pages, ptrs) = self.jit_tables();
+        // From here on, writes to the page are noticed
+        self.bus.code_pages[page] = 1;
         let mut words = [0u32; PAGE_SLOTS];
         for (k, w) in words.iter_mut().enumerate() {
             *w = self.bus.read_ram(ram | k << 2, 4) as u32;
@@ -280,6 +318,9 @@ impl Cpu {
             tlb_addr: self.tlb.entries_addr() as u32,
             el: self.el,
             sp_el1: self.el != 0 && self.spsel != 0,
+            ptrs_addr: ptrs as u32,
+            code_pages_addr: code_pages as u32,
+            table_base: self.jit.table_base,
         };
         let code = codegen(&blocks, &target);
         let slots: Vec<usize> = blocks.iter().map(|b| b.slot).collect();
@@ -474,6 +515,7 @@ const IF: u8 = 0x04;
 const END: u8 = 0x0b;
 const RETURN: u8 = 0x0f;
 const CALL: u8 = 0x10;
+const CALL_INDIRECT: u8 = 0x11;
 const SELECT: u8 = 0x1b;
 const LOCAL_GET: u8 = 0x20;
 const LOCAL_SET: u8 = 0x21;
@@ -489,6 +531,7 @@ const I64_STORE16: u8 = 0x3d;
 const I64_STORE32: u8 = 0x3e;
 const I32_LE_U: u8 = 0x4d;
 const I32_ADD: u8 = 0x6a;
+const I32_SUB: u8 = 0x6b;
 const I32_MUL: u8 = 0x6c;
 const I64_EQ: u8 = 0x51;
 const I32_LOAD: u8 = 0x28;
@@ -561,8 +604,6 @@ const V: u32 = 13;
 const VA: u32 = 14;
 /// Value of a load (slow path)
 const MV: u32 = 15;
-/// Bit sets of blocks checked against RAM in this call
-const VALID: u32 = 16;
 const NUM_I64: u32 = 10;
 
 const OFF_X: u32 = offset_of!(Cpu, x) as u32;
@@ -570,6 +611,7 @@ const OFF_PC: u32 = offset_of!(Cpu, pc) as u32;
 const OFF_NZCV: u32 = offset_of!(Cpu, nzcv) as u32;
 const OFF_ICOUNT: u32 = offset_of!(Cpu, icount) as u32;
 const OFF_FLAG: u32 = offset_of!(Cpu, jit_flag) as u32;
+const OFF_HOPS: u32 = offset_of!(Cpu, jit_hops) as u32;
 const OFF_EL: u32 = offset_of!(Cpu, el) as u32;
 const OFF_SPSEL: u32 = offset_of!(Cpu, spsel) as u32;
 const OFF_SP_EL0: u32 = offset_of!(Cpu, sp_el0) as u32;
@@ -679,6 +721,12 @@ pub struct Target {
     /// with; checked on entry.
     pub el: u32,
     pub sp_el1: bool,
+    /// Address of DCache's table of JitPage::state addresses per RAM page,
+    /// and the function table index of region 0 (to call other regions).
+    pub ptrs_addr: u32,
+    pub table_base: u32,
+    /// Address of Bus::code_pages.
+    pub code_pages_addr: u32,
 }
 
 struct Gen<'t> {
@@ -798,16 +846,102 @@ impl Gen<'_> {
             self.a.set(SLOT);
             self.br_top();
         } else {
-            self.ret(
-                |g| {
-                    g.a.get(PAGE);
-                    g.a.i64c(target);
-                    g.a.op(I64_ADD);
-                },
-                count,
-                STATUS_OK,
-            );
+            self.a.get(PAGE);
+            self.a.i64c(target);
+            self.a.op(I64_ADD);
+            self.a.set(T);
+            self.chain(count);
         }
+    }
+
+    /// Return after `count` instructions of the block with pc = T, calling
+    /// the compiled code at T (another page's) first if there is some.
+    fn chain(&mut self, count: usize) {
+        use crate::mmu::{layout as l, P_X0, P_X1};
+        self.ret_pc_icount(T, count);
+        // Hops left?
+        self.a.load32(OFF_HOPS);
+        self.a.op(LOCAL_TEE);
+        self.a.uleb(N32 as u64);
+        self.if_();
+        self.a.get(CPU);
+        self.a.get(N32);
+        self.a.i32c(1);
+        self.a.op(I32_SUB);
+        self.a.mem(I32_STORE, 2, OFF_HOPS);
+        // Aligned, and executable RAM in the TLB
+        self.tlb_hit_need(0, 4, if self.t.el == 0 { P_X0 } else { P_X1 });
+        self.a.get(T);
+        self.a.op(I32_WRAP_I64);
+        self.a.i32c(3);
+        self.a.op(I32_AND);
+        self.a.op(I32_EQZ);
+        self.a.op(I32_AND);
+        self.if_();
+        // N32 = the RAM page: has it compiled code that wasn't written to?
+        self.a.get(E32);
+        self.a.mem(I32_LOAD, 2, l::RAM);
+        self.a.i32c(12);
+        self.a.op(I32_SHR_U);
+        self.a.op(LOCAL_TEE);
+        self.a.uleb(N32 as u64);
+        self.a.mem(I32_LOAD8_U, 0, self.t.code_pages_addr);
+        self.if_();
+        // E32 = its JIT state
+        self.a.get(N32);
+        self.a.i32c(2);
+        self.a.op(I32_SHL);
+        self.a.mem(I32_LOAD, 2, self.t.ptrs_addr);
+        self.a.op(LOCAL_TEE);
+        self.a.uleb(E32 as u64);
+        self.if_();
+        // N32 = the slot's state: installed?
+        self.a.get(E32);
+        self.a.get(T);
+        self.a.op(I32_WRAP_I64);
+        self.a.i32c(0xffc);
+        self.a.op(I32_AND);
+        self.a.op(I32_ADD);
+        self.a.mem(I32_LOAD, 2, 0);
+        self.a.op(LOCAL_TEE);
+        self.a.uleb(N32 as u64);
+        self.a.i32c(0xc000_0000u32 as i32);
+        self.a.op(I32_AND);
+        self.a.i32c(INSTALLED as i32);
+        self.a.op(I32_EQ);
+        self.if_();
+        self.a.get(CPU);
+        self.a.get(ICOUNT_END);
+        self.a.get(N32);
+        self.a.i32c(0xf_ffff);
+        self.a.op(I32_AND);
+        self.a.i32c(self.t.table_base as i32);
+        self.a.op(I32_ADD);
+        self.a.op(CALL_INDIRECT);
+        self.a.uleb(0);
+        self.a.uleb(0);
+        self.a.op(RETURN);
+        self.end();
+        self.end();
+        self.end();
+        self.end();
+        self.end();
+        self.a.i32c(STATUS_OK as i32);
+        self.a.op(RETURN);
+    }
+
+    /// cpu.pc = local `pc`, cpu.icount = ICOUNT + n.
+    fn ret_pc_icount(&mut self, pc: u32, n: usize) {
+        self.a.get(CPU);
+        self.a.get(pc);
+        self.a.mem(I64_STORE, 3, OFF_PC);
+        self.a.get(CPU);
+        self.a.get(ICOUNT);
+        if n != 0 {
+            self.a.i64c(n as u64);
+            self.a.op(I64_ADD);
+        }
+        self.a.mem(I64_STORE, 3, OFF_ICOUNT);
     }
 
     /// Go on at local `pc` after `count` instructions of the block.
@@ -829,7 +963,8 @@ impl Gen<'_> {
         self.a.set(SLOT);
         self.br_top();
         self.end();
-        self.ret(|g| g.a.get(pc), 0, STATUS_OK);
+        debug_assert_eq!(pc, T);
+        self.chain(0);
     }
 
     /// Return at instruction k, which the interpreter runs.
@@ -1202,7 +1337,8 @@ impl Gen<'_> {
 
     /// VA = T + offset; push 1 if the TLB has a RAM entry for VA that allows
     /// the access and VA..VA+bytes doesn't cross a page (Cpu::ram_hit), with
-    /// E32 = the entry's address.
+    /// E32 = the entry's address. For a write, the page also mustn't have
+    /// compiled code (the slow path notes the write: Bus::written).
     fn tlb_hit(&mut self, offset: u64, bytes: u32, write: bool) {
         use crate::mmu::{layout as l, P_R0, P_R1, P_W0, P_W1};
         let need = match (write, self.t.el == 0) {
@@ -1211,6 +1347,26 @@ impl Gen<'_> {
             (true, false) => P_W1,
             (true, true) => P_W0,
         };
+        self.tlb_hit_need(offset, bytes, need);
+        if write {
+            // (RAM is -1 for anything but RAM: then this reads the byte
+            // before the table, with the result ignored)
+            self.a.get(E32);
+            self.a.mem(I32_LOAD, 2, l::RAM);
+            self.a.i32c(12);
+            self.a.op(I32_SHR_S);
+            self.a.i32c(self.t.code_pages_addr as i32);
+            self.a.op(I32_ADD);
+            self.a.mem(I32_LOAD8_U, 0, 0);
+            self.a.op(I32_EQZ);
+            self.a.op(I32_AND);
+        }
+    }
+
+    /// tlb_hit() for an access that needs permission `need` (P_*).
+    fn tlb_hit_need(&mut self, offset: u64, bytes: u32, need: u8) {
+        use crate::mmu::layout as l;
+        self.uses_el = true;
         let a = &mut self.a;
         a.get(T);
         if offset != 0 {
@@ -1885,7 +2041,8 @@ impl Gen<'_> {
 
 /// A WebAssembly module exporting "f": (cpu: i32, end: i64) -> i32, which
 /// runs the region from cpu.pc. It imports "e"."m" (the memory), "e"."r"
-/// (jit_read) and "e"."w" (jit_write).
+/// (jit_read), "e"."w" (jit_write) and "e"."t" (the function table, to call
+/// other regions).
 ///
 /// The body is a dispatch loop over the blocks:
 ///
@@ -1929,27 +2086,6 @@ pub fn codegen(blocks: &[RBlock], t: &Target) -> Vec<u8> {
         g.a.i32c(b.slot as i32);
         g.a.set(SLOT);
         g.br_exit();
-        g.end();
-        // The first time in this call: are the instructions still the same?
-        let (valid, bit) = (VALID + (bi / 64) as u32, 1u64 << (bi % 64));
-        g.a.get(valid);
-        g.a.i64c(bit);
-        g.a.op(I64_AND);
-        g.a.op(I64_EQZ);
-        g.if_();
-        for (k, (_, op)) in b.ops.iter().enumerate() {
-            g.a.i32c((t.code_addr + 4 * (b.slot + k) as u32) as i32);
-            g.a.mem(I32_LOAD, 2, 0);
-            g.a.i32c(op.insn as i32);
-            g.a.op(I32_NE);
-            g.if_();
-            g.ret(|g| g.pc_k(0), 0, STATUS_STALE);
-            g.end();
-        }
-        g.a.get(valid);
-        g.a.i64c(bit);
-        g.a.op(I64_OR);
-        g.a.set(valid);
         g.end();
         let mut open = true;
         for (k, (form, op)) in b.ops.iter().enumerate() {
@@ -2058,7 +2194,7 @@ pub fn codegen(blocks: &[RBlock], t: &Target) -> Vec<u8> {
     func.uleb(2);
     func.uleb(NUM_I32 as u64);
     func.op(0x7f);
-    func.uleb((NUM_I64 + nblocks.div_ceil(64) as u32) as u64);
+    func.uleb(NUM_I64 as u64);
     func.op(0x7e);
     func.b.extend_from_slice(&f.b);
 
@@ -2076,11 +2212,11 @@ pub fn codegen(blocks: &[RBlock], t: &Target) -> Vec<u8> {
         1,
         &[3, 0x60, 2, 0x7f, 0x7e, 1, 0x7f, 0x60, 3, 0x7f, 0x7e, 0x7f, 1, 0x7e, 0x60, 4, 0x7f, 0x7e, 0x7f, 0x7e, 0],
     );
-    // Imports: memory, read, write
+    // Imports: memory, read, write, the function table
     section(
         &mut m,
         2,
-        &[3, 1, b'e', 1, b'm', 2, 0, 0, 1, b'e', 1, b'r', 0, 1, 1, b'e', 1, b'w', 0, 2],
+        &[4, 1, b'e', 1, b'm', 2, 0, 0, 1, b'e', 1, b'r', 0, 1, 1, b'e', 1, b'w', 0, 2, 1, b'e', 1, b't', 1, 0x70, 0, 0],
     );
     // Functions: one of type 0
     section(&mut m, 3, &[1, 0]);
@@ -2113,53 +2249,63 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
     };
     let (mut skipped, mut not_run) = (0, 0);
     for iter in 0..iterations {
-        // Compilable instructions, mostly not unconditional branches
-        let len = 1 + (next() % 24) as usize;
-        let mut words = Vec::new();
-        // Registers indirect branches use
+        // Two runs of compilable instructions, mostly not unconditional
+        // branches: one in page 0 and one in page 1, branching within
+        // themselves and to each other
         let mut br_regs = 0u32;
-        while words.len() < len {
-            let mut w = next() as u32;
-            if w.is_multiple_of(8) {
-                // Forms random words are (almost) never
-                let r = next() as u32;
-                let (rt, rn, rs) = (r & 31, (r >> 5) % 31, (r >> 10) & 31);
-                let size = (r >> 30) << 30;
-                w = match next() % 13 {
-                    0 => [0xd61f_0000, 0xd63f_0000, 0xd65f_0000][(next() % 3) as usize] | rn << 5,
-                    1 => [0xd538_d080, 0xd53b_d040, 0xd53b_d060, 0xd538_4100, 0xd53b_4220][(next() % 5) as usize] | rt,
-                    2 => 0xd50b_7420 | rt,
-                    3 => [0xd503_3bbf, 0xd503_39bf, 0xd503_3f9f, 0xd503_3fdf][(next() % 4) as usize],
-                    4 => [0xdac0_0400, 0xdac0_0800, 0xdac0_0c00, 0x5ac0_0400, 0x5ac0_0800, 0xdac0_1000, 0x5ac0_1000]
-                        [(next() % 7) as usize]
-                        | rn << 5
-                        | rt,
-                    5 | 6 => [0x08df_fc00, 0x089f_fc00][(next() % 2) as usize] | size | rn << 5 | rt,
-                    7 | 8 => 0x085f_7c00 | (next() as u32 & 1) << 15 | size | rn << 5 | rt,
-                    9 | 10 => 0x0800_7c00 | (next() as u32 & 1) << 15 | size | rs << 16 | rn << 5 | rt,
-                    11 => 0xf980_0000 | (r & 0x3f_ffff),
-                    _ => {
-                        // Q register loads and stores with small offsets
-                        let (base, lsb) = [(0x3d80_0000, 10), (0x3dc0_0000, 10), (0xad00_0000, 15), (0xad40_0000, 15), (0x3c80_0c00, 12), (0x3cc0_0400, 12)]
-                            [(next() % 6) as usize];
-                        let rt2 = if base >> 24 == 0xad { rs << 10 } else { 0 };
-                        base | (r >> 12 & 7) << lsb | rt2 | rn << 5 | rt
+        let gen = |len: usize, br_regs: &mut u32, next: &mut dyn FnMut() -> u64| {
+            let mut words = Vec::new();
+            while words.len() < len {
+                let mut w = next() as u32;
+                if w.is_multiple_of(8) {
+                    // Forms random words are (almost) never
+                    let r = next() as u32;
+                    let (rt, rn, rs) = (r & 31, (r >> 5) % 31, (r >> 10) & 31);
+                    let size = (r >> 30) << 30;
+                    w = match next() % 13 {
+                        0 => [0xd61f_0000, 0xd63f_0000, 0xd65f_0000][(next() % 3) as usize] | rn << 5,
+                        1 => [0xd538_d080, 0xd53b_d040, 0xd53b_d060, 0xd538_4100, 0xd53b_4220][(next() % 5) as usize] | rt,
+                        2 => 0xd50b_7420 | rt,
+                        3 => [0xd503_3bbf, 0xd503_39bf, 0xd503_3f9f, 0xd503_3fdf][(next() % 4) as usize],
+                        4 => [0xdac0_0400, 0xdac0_0800, 0xdac0_0c00, 0x5ac0_0400, 0x5ac0_0800, 0xdac0_1000, 0x5ac0_1000]
+                            [(next() % 7) as usize]
+                            | rn << 5
+                            | rt,
+                        5 | 6 => [0x08df_fc00, 0x089f_fc00][(next() % 2) as usize] | size | rn << 5 | rt,
+                        7 | 8 => 0x085f_7c00 | (next() as u32 & 1) << 15 | size | rn << 5 | rt,
+                        9 | 10 => 0x0800_7c00 | (next() as u32 & 1) << 15 | size | rs << 16 | rn << 5 | rt,
+                        11 => 0xf980_0000 | (r & 0x3f_ffff),
+                        _ => {
+                            // Q register loads and stores with small offsets
+                            let (base, lsb) = [(0x3d80_0000, 10), (0x3dc0_0000, 10), (0xad00_0000, 15), (0xad40_0000, 15), (0x3c80_0c00, 12), (0x3cc0_0400, 12)]
+                                [(next() % 6) as usize];
+                            let rt2 = if base >> 24 == 0xad { rs << 10 } else { 0 };
+                            base | (r >> 12 & 7) << lsb | rt2 | rn << 5 | rt
+                        }
+                    };
+                }
+                if let (Some(form), op) = decode_op(w) {
+                    if matches!(form, Form::B | Form::Bl | Form::Br | Form::Blr) && !next().is_multiple_of(8) {
+                        continue;
                     }
-                };
-            }
-            if let (Some(form), op) = decode_op(w) {
-                if matches!(form, Form::B | Form::Bl | Form::Br | Form::Blr) && next() % 8 != 0 {
-                    continue;
+                    if matches!(form, Form::Br | Form::Blr) {
+                        *br_regs |= 1 << op.b;
+                    }
+                    words.push(w);
                 }
-                if matches!(form, Form::Br | Form::Blr) {
-                    br_regs |= 1 << op.b;
-                }
-                words.push(w);
             }
-        }
+            words
+        };
+        let len = 1 + (next() % 24) as usize;
+        let len1 = 1 + (next() % 24) as usize;
+        let mut words = gen(len, &mut br_regs, &mut next);
+        let mut words1 = gen(len1, &mut br_regs, &mut next);
         let start = (next() % (1024 - len as u64)) as usize * 4;
-        // Most direct branches go to the code (or just past it)
-        for (k, w) in words.iter_mut().enumerate() {
+        let start1 = 0x1000 + (next() % (1024 - len1 as u64)) as usize * 4;
+        // Branch targets: the instructions, or just past either run
+        let targets: Vec<usize> = (0..=len).map(|k| start + 4 * k).chain((0..=len1).map(|k| start1 + 4 * k)).collect();
+        // Most direct branches go to the code
+        for (w, at) in words.iter_mut().zip((start..).step_by(4)).chain(words1.iter_mut().zip((start1..).step_by(4))) {
             let (Some(form), _) = decode_op(*w) else { continue };
             let (bits, lsb) = match form {
                 Form::B | Form::Bl => (26, 0),
@@ -2168,7 +2314,7 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                 _ => continue,
             };
             if next() % 4 != 0 {
-                let off = (next() % (len as u64 + 1)) as i64 - k as i64;
+                let off = (targets[(next() % targets.len() as u64) as usize] as i64 - at as i64) / 4;
                 let mask = ((1u32 << bits) - 1) << lsb;
                 *w = (*w & !mask) | (((off as u32) << lsb) & mask);
             }
@@ -2189,7 +2335,7 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                 c.x[i] = match if br_regs & 1 << i != 0 { 2 } else { rn() % 5 } {
                     0 => rn(),
                     1 => rn() % 64,
-                    2 => RAM_BASE + (start + 4 * (rn() % (len as u64 + 1)) as usize) as u64,
+                    2 => RAM_BASE + targets[(rn() % targets.len() as u64) as usize] as u64,
                     _ => RAM_BASE + 0x8000 + rn() % 0x4000,
                 };
             }
@@ -2210,11 +2356,14 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                 c.excl_addr = c.x[(rn() % 31) as usize];
                 c.excl_size = 1 << (rn() % 4);
             }
-            for b in c.bus.ram[0x1000..].iter_mut() {
+            for b in c.bus.ram[0x2000..].iter_mut() {
                 *b = rn() as u8;
             }
             for (k, w) in words.iter().enumerate() {
                 c.bus.ram[start + 4 * k..start + 4 * k + 4].copy_from_slice(&w.to_le_bytes());
+            }
+            for (k, w) in words1.iter().enumerate() {
+                c.bus.ram[start1 + 4 * k..start1 + 4 * k + 4].copy_from_slice(&w.to_le_bytes());
             }
             c.pc = RAM_BASE + start as u64;
             c.ns_per_insn = 1;
@@ -2226,12 +2375,12 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                 c.tlb.asid = (rn() % 4) as u16;
                 for p in 0..(RAM_SIZE >> 12) {
                     let va = RAM_BASE + (p << 12) as u64;
-                    let perm = if p == start >> 12 {
+                    let perm = if p < 2 {
                         P_R1 | P_W1 | P_X1 | P_R0 | P_W0 | P_X0
                     } else {
                         [P_R1 | P_W1 | P_R0 | P_W0, P_R1 | P_R0, P_R1 | P_W1, P_R1 | P_W1 | P_R0, 0][(rn() % 5) as usize]
                     };
-                    c.tlb.insert(va, va, p == start >> 12 || rn() % 2 == 0, perm, Some(p << 12));
+                    c.tlb.insert(va, va, p < 2 || rn() % 2 == 0, perm, Some(p << 12));
                 }
                 c.tlb.asid = (rn() % 4) as u16;
             }
@@ -2239,21 +2388,43 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
         };
         let mut a = mk();
         let mut b = mk();
-        let a_code = a.bus.ram[..0x1000].to_vec();
         a.jit.enabled = true;
         a.jit.threshold = 0;
         a.jit.compile = Some(compile);
         a.jit.table_base = table_base;
-        a.jit_enter(limit); // compiles
+        // Compile both
+        a.pc = RAM_BASE + start1 as u64;
+        a.jit_enter(limit);
+        a.pc = RAM_BASE + start as u64;
+        a.jit_enter(limit);
         if a.jit.stats.failed != 0 {
             return Some(format!("iteration {iter}: code at {:#x} failed to compile ({:08x?})", a.pc, words));
         }
-        let Some(used) = a.jit_enter(limit) else {
+        // Sometimes change an instruction of the compiled code: it must not run
+        let rewrite = next() % 4 == 0;
+        if rewrite {
+            let at = targets[(next() % targets.len() as u64) as usize];
+            let w = loop {
+                let w = next() as u32;
+                if decode_op(w).0.is_some() {
+                    break w;
+                }
+            };
+            a.bus.write_ram(at, 4, w as u64);
+            b.bus.write_ram(at, 4, w as u64);
+        }
+        let a_code = a.bus.ram[..0x2000].to_vec();
+        let mut run = a.jit_enter(limit);
+        if rewrite && run.is_none() && a.icount == 0 {
+            // The entry's page was compiled again
+            run = a.jit_enter(limit);
+        }
+        let Some(used) = run else {
             // Nothing run: the first block doesn't fit in the limit, or its
             // first instruction is left to the interpreter
             not_run += 1;
             if a.icount != 0 || a.pc != b.pc || a.x != b.x {
-                return Some(format!("iteration {iter}: state changed without running ({:08x?})", words));
+                return Some(format!("iteration {iter}: state changed without running ({:08x?} {:08x?})", words, words1));
             }
             continue;
         };
@@ -2263,9 +2434,16 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
         for _ in 0..used {
             b.step();
         }
+        // Every write to a page with compiled code must be noticed
+        for p in 0..2 {
+            let r = p << 12..(p + 1) << 12;
+            if a.bus.ram[r.clone()] != a_code[r] && a.bus.code_pages[p] != 0 {
+                return Some(format!("iteration {iter}: write to code page {p} not noticed ({:08x?} {:08x?})", words, words1));
+            }
+        }
         // Code that changes itself is only seen by compiled code after the
         // next ISB (or exception): skip
-        if b.bus.ram[..0x1000] != a_code[..] {
+        if b.bus.ram[..0x2000] != a_code[..] {
             skipped += 1;
             continue;
         }
@@ -2273,7 +2451,13 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
             (c.x, c.sp_el0, c.sp_el1, c.pc, c.nzcv, c.icount, c.sr.esr_el1, c.sr.far_el1, c.sr.elr_el1, c.excl_size, c.excl_addr)
         };
         if state(&a) != state(&b) || a.v != b.v || a.bus.ram != b.bus.ram {
-            let mut d = format!("iteration {iter}: state differs after block {:08x?} at {:#x}\n", words, RAM_BASE + start as u64);
+            let mut d = format!(
+                "iteration {iter}: state differs after code {:08x?} at {:#x} and {:08x?} at {:#x}\n",
+                words,
+                RAM_BASE + start as u64,
+                words1,
+                RAM_BASE + start1 as u64
+            );
             for i in 0..31 {
                 if a.x[i] != b.x[i] {
                     d += &format!("  x{i}: jit {:#x} interp {:#x}\n", a.x[i], b.x[i]);

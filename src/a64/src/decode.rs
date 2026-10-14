@@ -46,6 +46,9 @@ pub struct DCache {
     jit: Vec<Option<Box<JitPage>>>,
     /// Function table slots of compiled regions that were dropped.
     pub jit_free: Vec<u32>,
+    /// Per RAM page: address of its JitPage::state, or 0. Compiled code
+    /// looks branch targets up in it; allocated once (jit_init).
+    jit_ptrs: Box<[usize]>,
 }
 
 impl DCache {
@@ -65,6 +68,7 @@ impl DCache {
                     }
                     *p = None;
                 }
+                self.jit_ptrs.fill(0);
                 self.count = 0;
             }
             self.pages[n] = Some(vec![decode(0); PAGE_OPS].into_boxed_slice());
@@ -86,7 +90,24 @@ impl DCache {
         if self.jit.len() <= page {
             self.jit.resize_with(page + 1, || None);
         }
-        self.jit[page].get_or_insert_with(JitPage::new).state.as_mut_ptr()
+        let ptr = self.jit[page].get_or_insert_with(JitPage::new).state.as_mut_ptr();
+        if let Some(p) = self.jit_ptrs.get_mut(page) {
+            *p = ptr as usize;
+        }
+        ptr
+    }
+
+    /// Address of the table of JitPage::state addresses, for `ram_pages` RAM pages.
+    pub fn jit_ptrs(&mut self, ram_pages: usize) -> usize {
+        if self.jit_ptrs.is_empty() {
+            self.jit_ptrs = vec![0; ram_pages].into_boxed_slice();
+            for (p, jp) in self.jit.iter_mut().enumerate() {
+                if let (Some(jp), Some(e)) = (jp, self.jit_ptrs.get_mut(p)) {
+                    *e = jp.state.as_mut_ptr() as usize;
+                }
+            }
+        }
+        self.jit_ptrs.as_ptr() as usize
     }
 
     /// JIT state of RAM page `page`, if it has any.
