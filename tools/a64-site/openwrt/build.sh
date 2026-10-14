@@ -1,11 +1,12 @@
 #!/bin/sh
 # Builds an OpenWrt armsr/armv8 image for v86's aarch64 machine with the
 # official image builder (no compiling): the stock kernel, and a squashfs
-# rootfs without the drivers for real hardware, with LAN set up for v86's
-# DHCP/DNS (files/etc/uci-defaults/99-v86).
+# rootfs without the drivers for real hardware, plus the LuCI web interface
+# (shown next to the console on the site), with LAN set up for v86's DHCP/DNS
+# (files/etc/uci-defaults/99-v86).
 #
 #   tools/a64-site/openwrt/build.sh <work-dir>
-#   tools/a64-site/add-image.sh openwrt "OpenWrt 24.10.8" \
+#   WEB=/cgi-bin/luci/ tools/a64-site/add-image.sh openwrt "OpenWrt 24.10.8" \
 #       <work-dir>/out/openwrt-24.10.8-armsr-armv8-generic-kernel.bin \
 #       <work-dir>/out/openwrt-24.10.8-armsr-armv8-generic-squashfs-rootfs.img \
 #       "rootwait root=/dev/vda console=ttyAMA0"
@@ -32,7 +33,7 @@ REMOVE="kmod-amazon-ena kmod-e1000e kmod-vmxnet3 kmod-rtc-rx8025 kmod-i2c-mux-pc
     kmod-phy-marvell-10g kmod-sfp kmod-atlantic kmod-bcmgenet kmod-octeontx2-net
     kmod-renesas-net-avb kmod-phy-realtek kmod-phy-smsc kmod-thunderx-net
     ppp ppp-mod-pppoe"
-PACKAGES=$(for p in $REMOVE; do printf -- "-%s " "$p"; done)
+PACKAGES="luci $(for p in $REMOVE; do printf -- "-%s " "$p"; done)"
 
 make -C "$IB" image PROFILE=generic PACKAGES="$PACKAGES" FILES="$HERE/files" \
     ROOTFS_PARTSIZE=64 BIN_DIR="$WORK/out"
