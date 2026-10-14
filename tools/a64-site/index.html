@@ -126,6 +126,8 @@ code { color: var(--fg); }
     const emulator = window.emulator = new V86({
         arch: "aarch64",
         wasm_path: "v86-a64.wasm",
+        // ?jit=0 turns off the JIT (compiled blocks; src/a64/src/jit.rs)
+        a64_jit: params.get("jit") !== "0",
         memory_size: (build.memory_mb || 128) * 1024 * 1024,
         kernel: { url: base + build.kernel },
         hda: {

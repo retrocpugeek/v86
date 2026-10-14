@@ -40,6 +40,11 @@ const MAX_PAGES: usize = 2048;
 pub struct DCache {
     pages: Vec<Option<Box<[Op]>>>,
     count: usize,
+    /// JIT state of a block starting at each slot (see jit.rs), allocated for
+    /// a page when its first block start is counted.
+    jit: Vec<Option<Box<[u32]>>>,
+    /// Function table slots of compiled blocks that were dropped.
+    pub jit_free: Vec<u32>,
 }
 
 impl DCache {
@@ -53,6 +58,14 @@ impl DCache {
         if self.pages[n].is_none() {
             if self.count == MAX_PAGES {
                 self.pages.iter_mut().for_each(|p| *p = None);
+                for p in self.jit.iter_mut() {
+                    for &j in p.iter().flat_map(|p| p.iter()) {
+                        if crate::jit::is_installed(j) {
+                            self.jit_free.push(crate::jit::func_index(j));
+                        }
+                    }
+                    *p = None;
+                }
                 self.count = 0;
             }
             self.pages[n] = Some(vec![decode(0); PAGE_OPS].into_boxed_slice());
@@ -62,6 +75,38 @@ impl DCache {
     }
 
     pub fn pages(&self) -> usize { self.count }
+
+    /// Slot `slot` of RAM page `page`, if that page is decoded.
+    pub fn slot(&mut self, page: usize, slot: usize) -> Option<&mut Op> {
+        self.pages.get_mut(page)?.as_mut()?.get_mut(slot)
+    }
+
+    /// JIT state for the slots of decoded RAM page `page`. Valid as long as
+    /// the pointer from page() for it.
+    pub fn jit_page(&mut self, page: usize) -> *mut u32 {
+        if self.jit.len() <= page {
+            self.jit.resize_with(page + 1, || None);
+        }
+        self.jit[page].get_or_insert_with(|| vec![0; PAGE_OPS].into_boxed_slice()).as_mut_ptr()
+    }
+
+    /// JIT state for slot `slot` of decoded RAM page `page`.
+    pub fn jit_state(&mut self, page: usize, slot: usize) -> &mut u32 {
+        // Safety: jit_page has PAGE_OPS entries
+        unsafe { &mut *self.jit_page(page).add(slot) }
+    }
+
+    /// Replace slot `n` of RAM page `page` (`slot`), whose instruction word changed.
+    #[cold]
+    pub fn redecode(&mut self, page: usize, n: usize, slot: &mut Op, insn: u32) {
+        if let Some(j) = self.jit.get_mut(page).and_then(|p| p.as_mut()) {
+            if crate::jit::is_installed(j[n]) {
+                self.jit_free.push(crate::jit::func_index(j[n]));
+            }
+            j[n] = 0;
+        }
+        *slot = decode(insn);
+    }
 }
 
 // ---- decoding ----
@@ -84,15 +129,93 @@ macro_rules! pick {
     };
 }
 
+/// An instruction form with a handler of its own (and code generation in
+/// jit.rs). The fields are the handler's const parameters; the operands are
+/// in the Op.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Form {
+    Adr,
+    Adrp,
+    AddImm { sf: u32, sub: u32, s: u32 },
+    LogicImm { sf: u32, opc: u32 },
+    MovConst,
+    Movk { sf: u32 },
+    /// SBFM (opc 0) and UBFM (opc 2).
+    Bitfield { sf: u32, opc: u32 },
+    Extr { sf: u32 },
+    B,
+    Bl,
+    BCond,
+    Cbz { sf: u32, nz: u32 },
+    Tbz { nz: u32 },
+    /// BR and RET.
+    Br,
+    Blr,
+    Nop,
+    LogicReg { sf: u32, opc: u32, n: u32, shift: u32 },
+    AddReg { sf: u32, sub: u32, s: u32, shift: u32 },
+    AddExt { sf: u32, sub: u32, s: u32 },
+    /// op: bit 1 = invert, bit 0 = increment.
+    Csel { sf: u32, op: u32 },
+    Madd { sf: u32, sub: u32 },
+    Shiftv { sf: u32 },
+    Ldp { size: u32, signed: u32, mode: u32 },
+    Stp { size: u32, mode: u32 },
+    /// ext: 0 zero-extend, 1 sign-extend to 64 bits, 2 sign-extend to 32 bits.
+    Ld { size: u32, ext: u32, mode: u32 },
+    St { size: u32, mode: u32 },
+}
+
 pub fn decode(i: u32) -> Op {
-    let mut op = Op { insn: i, a: (i & 31) as u8, b: bits(i, 9, 5) as u8, c: bits(i, 20, 16) as u8, d: 0, f: generic, imm: 0 };
-    if let Some(f) = decode_form(i, &mut op) {
-        op.f = f;
+    let (form, mut op) = decode_op(i);
+    if let Some(form) = form {
+        op.f = handler(form);
     }
     op
 }
 
-fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
+/// The instruction's form, if it has a handler of its own, and its operands.
+pub fn decode_op(i: u32) -> (Option<Form>, Op) {
+    let mut op =
+        Op { insn: i, a: (i & 31) as u8, b: bits(i, 9, 5) as u8, c: bits(i, 20, 16) as u8, d: 0, f: generic, imm: 0 };
+    let form = decode_form(i, &mut op);
+    (form, op)
+}
+
+fn handler(form: Form) -> Handler {
+    use Form::*;
+    match form {
+        Adr => adr,
+        Adrp => adrp,
+        AddImm { sf, sub, s } => pick!(add_imm; sf => [0, 1]; sub => [0, 1]; s => [0, 1]),
+        LogicImm { sf, opc } => pick!(logic_imm; sf => [0, 1]; opc => [0, 1, 2, 3]),
+        MovConst => mov_const,
+        Movk { sf } => pick!(movk; sf => [0, 1]),
+        Bitfield { sf, opc } => pick!(bitfield; sf => [0, 1]; opc => [0, 2]),
+        Extr { sf } => pick!(extr; sf => [0, 1]),
+        B => b,
+        Bl => bl,
+        BCond => b_cond,
+        Cbz { sf, nz } => pick!(cbz; sf => [0, 1]; nz => [0, 1]),
+        Tbz { nz } => pick!(tbz; nz => [0, 1]),
+        Br => br,
+        Blr => blr,
+        Nop => nop,
+        LogicReg { sf, opc, n, shift } => pick!(logic_reg; sf => [0, 1]; opc => [0, 1, 2, 3]; n => [0, 1]; shift => [0, 1]),
+        AddReg { sf, sub, s, shift } => pick!(add_reg; sf => [0, 1]; sub => [0, 1]; s => [0, 1]; shift => [0, 1]),
+        AddExt { sf, sub, s } => pick!(add_ext; sf => [0, 1]; sub => [0, 1]; s => [0, 1]),
+        Csel { sf, op } => pick!(csel; sf => [0, 1]; op => [0, 1, 2, 3]),
+        Madd { sf, sub } => pick!(madd; sf => [0, 1]; sub => [0, 1]),
+        Shiftv { sf } => pick!(shiftv; sf => [0, 1]),
+        Ldp { size, signed, mode } => pick!(ldp; size => [2, 3]; signed => [0, 1]; mode => [0, 1, 2]),
+        Stp { size, mode } => pick!(stp; size => [2, 3]; mode => [0, 1, 2]),
+        Ld { size, ext, mode } => pick!(ld; size => [0, 1, 2, 3]; ext => [0, 1, 2]; mode => [0, 1, 2, 3]),
+        St { size, mode } => pick!(st; size => [0, 1, 2, 3]; mode => [0, 1, 2, 3]),
+    }
+}
+
+fn decode_form(i: u32, op: &mut Op) -> Option<Form> {
+    use Form::*;
     let sf = bits(i, 31, 31);
     let w = if sf != 0 { 64 } else { 32 };
     // ---- data processing (immediate) ----
@@ -101,15 +224,15 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         let imm = sext(((bits(i, 23, 5) << 2) | bits(i, 30, 29)) as u64, 21) as u64;
         if sf != 0 {
             op.imm = imm << 12;
-            return Some(adrp);
+            return Some(Adrp);
         }
         op.imm = imm;
-        return Some(adr);
+        return Some(Adr);
     }
     if i & 0x1f80_0000 == 0x1100_0000 {
         // ADD/ADDS/SUB/SUBS (immediate)
         op.imm = (bits(i, 21, 10) as u64) << if bit(i, 22) { 12 } else { 0 };
-        return Some(pick!(add_imm; sf => [0, 1]; bits(i, 30, 30) => [0, 1]; bits(i, 29, 29) => [0, 1]));
+        return Some(AddImm { sf, sub: bits(i, 30, 30), s: bits(i, 29, 29) });
     }
     if i & 0x1f80_0000 == 0x1200_0000 {
         // Logical (immediate)
@@ -119,7 +242,7 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         }
         let (imm, _) = decode_bit_masks(n, bits(i, 15, 10), bits(i, 21, 16), true, w)?;
         op.imm = imm;
-        return Some(pick!(logic_imm; sf => [0, 1]; bits(i, 30, 29) => [0, 1, 2, 3]));
+        return Some(LogicImm { sf, opc: bits(i, 30, 29) });
     }
     if i & 0x1f80_0000 == 0x1280_0000 {
         // MOVN / MOVZ / MOVK
@@ -133,11 +256,11 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         if opc == 3 {
             op.imm = imm;
             op.d = pos as u8;
-            return Some(pick!(movk; sf => [0, 1]));
+            return Some(Movk { sf });
         }
         let v = if opc == 0 { !imm } else { imm };
         op.imm = if sf != 0 { v } else { v as u32 as u64 };
-        return Some(mov_const);
+        return Some(MovConst);
     }
     if i & 0x1f80_0000 == 0x1300_0000 {
         // SBFM / UBFM (BFM is left to exec)
@@ -152,7 +275,7 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         op.imm = wmask & tmask;
         op.c = imms as u8;
         op.d = immr as u8;
-        return Some(pick!(bitfield; sf => [0, 1]; opc => [0, 2]));
+        return Some(Bitfield { sf, opc });
     }
     if i & 0x1f80_0000 == 0x1380_0000 {
         // EXTR
@@ -161,39 +284,39 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
             return None;
         }
         op.d = imms as u8;
-        return Some(pick!(extr; sf => [0, 1]));
+        return Some(Extr { sf });
     }
     // ---- branches ----
     if i & 0x7c00_0000 == 0x1400_0000 {
         // B / BL
         op.imm = (sext(bits(i, 25, 0) as u64, 26) << 2) as u64;
-        return Some(if sf != 0 { bl } else { b });
+        return Some(if sf != 0 { Bl } else { B });
     }
     if i & 0xff00_0010 == 0x5400_0000 {
         // B.cond
         op.imm = (sext(bits(i, 23, 5) as u64, 19) << 2) as u64;
         op.d = (i & 0xf) as u8;
-        return Some(b_cond);
+        return Some(BCond);
     }
     if i & 0x7e00_0000 == 0x3400_0000 {
         // CBZ / CBNZ
         op.imm = (sext(bits(i, 23, 5) as u64, 19) << 2) as u64;
-        return Some(pick!(cbz; sf => [0, 1]; bits(i, 24, 24) => [0, 1]));
+        return Some(Cbz { sf, nz: bits(i, 24, 24) });
     }
     if i & 0x7e00_0000 == 0x3600_0000 {
         // TBZ / TBNZ
         op.imm = (sext(bits(i, 18, 5) as u64, 14) << 2) as u64;
         op.d = ((sf << 5) | bits(i, 23, 19)) as u8;
-        return Some(pick!(tbz; bits(i, 24, 24) => [0, 1]));
+        return Some(Tbz { nz: bits(i, 24, 24) });
     }
     match i & 0xffff_fc1f {
-        0xd61f_0000 | 0xd65f_0000 => return Some(br), // BR, RET
-        0xd63f_0000 => return Some(blr),
+        0xd61f_0000 | 0xd65f_0000 => return Some(Br), // BR, RET
+        0xd63f_0000 => return Some(Blr),
         _ => {}
     }
     if i & 0xffff_f01f == 0xd503_201f && !matches!(bits(i, 11, 5), 2 | 3) {
         // Hints other than WFE/WFI: NOP, YIELD, SEV, PAuth/BTI, ...
-        return Some(nop);
+        return Some(Nop);
     }
     // ---- data processing (register) ----
     if i & 0x1f00_0000 == 0x0a00_0000 {
@@ -204,8 +327,7 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         }
         op.d = bits(i, 23, 22) as u8;
         op.imm = amount as u64;
-        return Some(pick!(logic_reg; sf => [0, 1]; bits(i, 30, 29) => [0, 1, 2, 3];
-            bits(i, 21, 21) => [0, 1]; (amount != 0) as u32 => [0, 1]));
+        return Some(LogicReg { sf, opc: bits(i, 30, 29), n: bits(i, 21, 21), shift: (amount != 0) as u32 });
     }
     if i & 0x1f20_0000 == 0x0b00_0000 {
         // ADD/SUB (shifted register)
@@ -216,8 +338,7 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         }
         op.d = ty as u8;
         op.imm = amount as u64;
-        return Some(pick!(add_reg; sf => [0, 1]; bits(i, 30, 30) => [0, 1]; bits(i, 29, 29) => [0, 1];
-            (amount != 0) as u32 => [0, 1]));
+        return Some(AddReg { sf, sub: bits(i, 30, 30), s: bits(i, 29, 29), shift: (amount != 0) as u32 });
     }
     if i & 0x1f20_0000 == 0x0b20_0000 {
         // ADD/SUB (extended register)
@@ -227,22 +348,22 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         }
         op.d = bits(i, 15, 13) as u8;
         op.imm = shift as u64;
-        return Some(pick!(add_ext; sf => [0, 1]; bits(i, 30, 30) => [0, 1]; bits(i, 29, 29) => [0, 1]));
+        return Some(AddExt { sf, sub: bits(i, 30, 30), s: bits(i, 29, 29) });
     }
     if i & 0x3fe0_0800 == 0x1a80_0000 {
         // CSEL / CSINC / CSINV / CSNEG
         op.d = bits(i, 15, 12) as u8;
-        return Some(pick!(csel; sf => [0, 1]; (bits(i, 30, 30) << 1) | bits(i, 10, 10) => [0, 1, 2, 3]));
+        return Some(Csel { sf, op: (bits(i, 30, 30) << 1) | bits(i, 10, 10) });
     }
     if i & 0x7fe0_0000 == 0x1b00_0000 {
         // MADD / MSUB
         op.d = bits(i, 14, 10) as u8;
-        return Some(pick!(madd; sf => [0, 1]; bits(i, 15, 15) => [0, 1]));
+        return Some(Madd { sf, sub: bits(i, 15, 15) });
     }
     if i & 0x7fe0_f000 == 0x1ac0_2000 {
         // LSLV / LSRV / ASRV / RORV
         op.d = bits(i, 11, 10) as u8;
-        return Some(pick!(shiftv; sf => [0, 1]));
+        return Some(Shiftv { sf });
     }
     // ---- loads and stores (general-purpose registers) ----
     if i & 0x3e00_0000 == 0x2800_0000 {
@@ -261,11 +382,7 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
             1 => POST,
             _ => PRE,
         };
-        return Some(if load != 0 {
-            pick!(ldp; size => [2, 3]; signed => [0, 1]; mode => [0, 1, 2])
-        } else {
-            pick!(stp; size => [2, 3]; mode => [0, 1, 2])
-        });
+        return Some(if load != 0 { Ldp { size, signed, mode } } else { Stp { size, mode } });
     }
     if i & 0x3e00_0000 != 0x3800_0000 {
         return None;
@@ -292,14 +409,14 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Handler> {
         return None;
     };
     let ext = match (bits(i, 23, 22), size) {
-        (0, _) => return Some(pick!(st; size => [0, 1, 2, 3]; mode => [0, 1, 2, 3])),
+        (0, _) => return Some(St { size, mode }),
         (1, _) => 0,
         (2, 3) => return None, // PRFM
         (2, _) => 1,
         (_, 0 | 1) => 2,
         _ => return None,
     };
-    Some(pick!(ld; size => [0, 1, 2, 3]; ext => [0, 1, 2]; mode => [0, 1, 2, 3]))
+    Some(Ld { size, ext, mode })
 }
 
 // ---- handlers ----
@@ -310,7 +427,7 @@ fn width(sf: u32) -> u32 { if sf != 0 { 64 } else { 32 } }
 #[inline(always)]
 fn trunc(v: u64, sf: u32) -> u64 { if sf != 0 { v } else { v as u32 as u64 } }
 
-fn generic(c: &mut Cpu, op: &Op) -> Res<()> { c.exec(op.insn) }
+pub(crate) fn generic(c: &mut Cpu, op: &Op) -> Res<()> { c.exec(op.insn) }
 
 fn nop(_: &mut Cpu, _: &Op) -> Res<()> { Ok(()) }
 
@@ -517,11 +634,11 @@ fn shiftv<const SF: u32>(c: &mut Cpu, op: &Op) -> Res<()> {
 }
 
 // Addressing modes for loads and stores
-const OFF: u32 = 0;
-const POST: u32 = 1;
-const PRE: u32 = 2;
+pub const OFF: u32 = 0;
+pub const POST: u32 = 1;
+pub const PRE: u32 = 2;
 /// Register offset: Rm (c) extended by option (d) and shifted by imm.
-const REG: u32 = 3;
+pub const REG: u32 = 3;
 
 /// Access address and base register writeback value.
 #[inline(always)]

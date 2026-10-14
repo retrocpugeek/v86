@@ -35,8 +35,21 @@ pub struct Tlb {
     /// Instruction fetch cache: the page (VA) instructions were last fetched
     /// from, if it's RAM, and its offset in Bus::ram. Valid until the TLB is
     /// flushed or the ASID or exception level changes (invalidate_fetch).
-    fetch_page: u64,
-    fetch_ram: usize,
+    pub(crate) fetch_page: u64,
+    pub(crate) fetch_ram: usize,
+}
+
+/// TLB layout, for the inline lookups in generated code (jit.rs).
+pub(crate) mod layout {
+    use super::{Entry, TLB_SIZE};
+    use std::mem::{offset_of, size_of};
+    pub const ENTRIES: u32 = TLB_SIZE as u32;
+    pub const ENTRY_SIZE: u32 = size_of::<Entry>() as u32;
+    pub const VPN: u32 = offset_of!(Entry, vpn) as u32;
+    pub const ASID: u32 = offset_of!(Entry, asid) as u32;
+    pub const GLOBAL: u32 = offset_of!(Entry, global) as u32;
+    pub const PERM: u32 = offset_of!(Entry, perm) as u32;
+    pub const RAM: u32 = offset_of!(Entry, ram) as u32;
 }
 
 impl Default for Tlb {
@@ -54,6 +67,22 @@ impl Tlb {
     #[inline(always)]
     pub fn invalidate_fetch(&mut self) { self.fetch_page = u64::MAX; }
 
+    /// Put an entry for `va` -> `pa` with the current ASID (tests).
+    pub fn insert(&mut self, va: u64, pa: u64, global: bool, perm: u8, ram: Option<usize>) {
+        let vpn = va >> 12;
+        self.e[Self::index(vpn)] = Entry {
+            vpn,
+            pa_page: pa & !0xfff,
+            asid: self.asid,
+            global,
+            perm,
+            ram: ram.map_or(NOT_RAM, |r| r as u32),
+        };
+    }
+
+    /// Address of the entries (they're never reallocated).
+    pub(crate) fn entries_addr(&self) -> usize { self.e.as_ptr() as usize }
+
     /// Diagnostics: the entry that would serve `va`, as (pa_page, asid, global, perm).
     pub fn probe(&self, va: u64) -> Option<(u64, u16, bool, u8)> {
         let vpn = va >> 12;
@@ -62,7 +91,10 @@ impl Tlb {
     }
 
     #[inline(always)]
-    fn index(vpn: u64) -> usize { ((vpn ^ (vpn >> 12)) as usize) & (TLB_SIZE - 1) }
+    fn index(vpn: u64) -> usize {
+        // jit.rs generates the same
+        ((vpn ^ (vpn >> 12)) as usize) & (TLB_SIZE - 1)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -274,6 +306,12 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn ram_hit_read(&self, va: u64) -> Option<usize> { self.ram_hit(va, Acc::Read, false) }
+
+    #[inline(always)]
+    pub(crate) fn ram_hit_write(&self, va: u64) -> Option<usize> { self.ram_hit(va, Acc::Write, false) }
+
     /// Access of `size` bytes, which must not cross a page.
     #[inline(always)]
     pub fn read(&mut self, va: u64, size: u32, unpriv: bool) -> Res<u64> {
@@ -373,13 +411,13 @@ impl Cpu {
         // fetch_slow sets them together.
         let slot = unsafe { &mut *self.dcur.add(off >> 2) };
         if slot.insn != insn {
-            *slot = decode(insn);
+            self.dcache.redecode(self.tlb.fetch_ram >> 12, off >> 2, slot, insn);
         }
         Ok(*slot)
     }
 
     #[inline(never)]
-    fn fetch_slow(&mut self, va: u64) -> Res<u32> {
+    pub(crate) fn fetch_slow(&mut self, va: u64) -> Res<u32> {
         if va & 3 != 0 {
             return Err(Exception { ec: ec::PC_ALIGN, iss: 0, far: Some(va), ret_next: false });
         }
@@ -388,6 +426,9 @@ impl Cpu {
             self.tlb.fetch_page = va & !0xfff;
             self.tlb.fetch_ram = off;
             self.dcur = self.dcache.page(off >> 12);
+            if self.jit.enabled {
+                self.djit = self.dcache.jit_page(off >> 12);
+            }
         }
         Ok(self.bus.read(pa, 4) as u32)
     }

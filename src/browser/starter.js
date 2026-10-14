@@ -114,6 +114,7 @@ export function V86(options)
         // aarch64 (v86-a64.wasm): device space is handled in JS
         "a64_mmio_read": function(addr, size) { return cpu.mmio_read(addr, size); },
         "a64_mmio_write": function(addr, size, value) { cpu.mmio_write(addr, size, value); },
+        "a64_jit_compile": function(ptr, len, index, cookie) { return cpu.jit_compile(ptr, len, index, cookie); },
     };
 
     let wasm_fn = options.wasm_fn;
@@ -252,6 +253,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.uart3 = options.uart3;
     settings.parallel1 = options.parallel1;
     settings.cmdline = options.cmdline;
+    settings.a64_jit = options.a64_jit;
     settings.preserve_mac_from_state_image = options.preserve_mac_from_state_image;
     settings.mac_address_translation = options.mac_address_translation;
     settings.cpuid_level = options.cpuid_level;

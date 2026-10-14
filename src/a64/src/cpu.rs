@@ -1,7 +1,8 @@
 //! CPU state, the step loop, exception entry/return and the generic timers.
 
 use crate::bus::Bus;
-use crate::decode::{DCache, Op};
+use crate::decode::{generic, DCache, Op};
+use crate::jit::Jit;
 use crate::exc::{undef, ec, Exception, Res};
 use crate::gic::{PPI_PTIMER, PPI_VTIMER};
 use crate::mmu::Tlb;
@@ -88,6 +89,15 @@ pub struct Cpu {
     /// Decoded page for the instruction fetch cache's page (Tlb::fetch_page);
     /// set together with it in fetch_slow.
     pub(crate) dcur: *mut Op,
+    pub jit: Jit,
+    /// JIT state of the fetch page's slots (DCache::jit_page), like dcur.
+    pub(crate) djit: *mut u32,
+    /// Set by jit_read/jit_write for compiled code (see jit.rs).
+    pub jit_flag: u32,
+    pub jit_exc: Exception,
+    /// The next instruction starts a block: the last one branched, raised an
+    /// exception or had no handler of its own (see jit.rs).
+    pub block_start: bool,
 }
 
 impl Cpu {
@@ -125,6 +135,11 @@ impl Cpu {
             stop_batch: false,
             dcache: DCache::default(),
             dcur: std::ptr::null_mut(),
+            jit: Jit::default(),
+            djit: std::ptr::null_mut(),
+            jit_flag: 0,
+            jit_exc: Exception::undef(),
+            block_start: true,
         }
     }
 
@@ -219,6 +234,7 @@ impl Cpu {
         };
         self.sr.spsr_el1 = self.pstate();
         self.sr.elr_el1 = ret;
+        self.block_start = true;
         self.el = 1;
         self.tlb.invalidate_fetch();
         self.spsel = 1;
@@ -278,7 +294,11 @@ impl Cpu {
 
     /// Execute one instruction (or take a pending interrupt).
     #[inline]
-    pub fn step(&mut self) {
+    pub fn step(&mut self) { self.step_inner::<false>() }
+
+    /// step(); with JIT, also tracks block starts.
+    #[inline(always)]
+    fn step_inner<const JIT: bool>(&mut self) {
         if self.auto_irq && self.irq_deliverable() {
             self.take_irq();
             return;
@@ -310,6 +330,10 @@ impl Cpu {
                 self.icount -= 1;
             }
             self.take_exception(e, pc);
+            return;
+        }
+        if JIT {
+            self.block_start = self.pc != pc.wrapping_add(4) || op.f as usize == generic as *const () as usize;
         }
     }
 
@@ -382,9 +406,22 @@ impl Cpu {
             }
             let end = n + limit;
             self.stop_batch = false;
-            while n < end && !self.stop_batch {
-                self.step();
-                n += 1;
+            if self.jit.enabled {
+                while n < end && !self.stop_batch {
+                    if self.block_start {
+                        if let Some(used) = self.jit_enter(end - n) {
+                            n += used;
+                            continue;
+                        }
+                    }
+                    self.step_inner::<true>();
+                    n += 1;
+                }
+            } else {
+                while n < end && !self.stop_batch {
+                    self.step_inner::<false>();
+                    n += 1;
+                }
             }
         }
         RunExit::Budget

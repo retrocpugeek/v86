@@ -1,2 +1,6 @@
 [build]
 target-dir = "target"
+
+# The JIT (src/jit.rs) adds compiled blocks to the function table from JS.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--export-table", "-C", "link-arg=--growable-table"]

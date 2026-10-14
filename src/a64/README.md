@@ -52,6 +52,7 @@ tests/a64/browser.mjs     # examples/aarch64.html in headless Chrome (images in 
 | `cpu.rs` | State, step/run loop, exception entry/ERET, generic timers |
 | `mmu.rs` | VMSAv8-64 stage 1 walk (4 KB granule, TBI), ASID-tagged TLB, memory accessors |
 | `decode.rs` | Decoded-instruction cache: per-page decoded ops with handlers for the common integer forms (others go through `exec`) |
+| `jit.rs` | Browser build: compiles hot blocks of those forms to WebAssembly (see below) |
 | `sysregs.rs` | MRS/MSR, EL0 trap rules; ID values captured from QEMU (`tools/a64-ref/idprobe`) |
 | `exec_int.rs` | Integer data processing, branches |
 | `exec_ldst.rs` | Loads/stores, pairs, exclusives, acquire/release |
@@ -73,6 +74,24 @@ target/release/a64run --kernel Image --dtb virt.dtb --disk rootfs.ext4
 The serial console is on stdin/stdout; Ctrl-A x quits. The disk is copy-on-write
 in memory. `tools/a64-ref/smoke.py` boots, logs in as root, runs a few commands
 and powers off (`--qemu` runs the same thing on QEMU).
+
+## JIT (browser build)
+
+`jit.rs` compiles hot blocks (straight-line code within a page, entered at a
+branch target) to small WebAssembly modules, which JS compiles and adds to the
+core's function table (`A64CPU.jit_compile`). Compiled code works on the `Cpu`
+struct in linear memory, looks loads and stores up in the TLB inline (anything
+but RAM goes through `jit_read`/`jit_write` and ends the block after the
+instruction), and checks on entry that the instruction words in RAM are still
+the ones it was compiled from. `?jit=0` on the site turns it off.
+
+The native build has no JIT. Its self-test runs random blocks compiled and
+interpreted from the same random state (with the MMU off, and on with random
+TLB permissions) and compares the results:
+
+```sh
+make build/v86-a64.wasm && node tools/a64-ref/jit-test.mjs [blocks] [seed]
+```
 
 ## Lockstep against QEMU
 

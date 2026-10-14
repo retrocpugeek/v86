@@ -72,6 +72,13 @@ export function A64CPU(bus, wasm, stop_idling)
 
     this.powered_off = false;
     this.settings = null;
+
+    // JIT (src/a64/src/jit.rs): compiled blocks go into the core's function table
+    this.jit_table = this.wasm["__indirect_function_table"];
+    this.jit_imports = { "m": this.wasm_memory, "r": this.wasm["a64_jit_rd"], "w": this.wasm["a64_jit_wr"] };
+    /** Bumped when the core is recreated: compilations for the old one are dropped. */
+    this.jit_generation = 0;
+    this.jit_errors = 0;
 }
 
 /**
@@ -285,6 +292,11 @@ A64CPU.prototype.reset_core = function(ram_mb)
 {
     this.ram_size = ram_mb * 1024 * 1024;
     this.ram_ptr = this.wasm["a64_init"](ram_mb);
+    this.jit_generation++;
+    if(this.jit_table && !(this.settings && this.settings.a64_jit === false))
+    {
+        this.wasm["a64_jit_enable"](this.jit_table.length, 0);
+    }
     this.mem8 = null;
     this.irq_lines = null;
     this.powered_off = false;
@@ -476,6 +488,38 @@ A64CPU.prototype.reboot_internal = function()
         virtio.reset();
     }
     this.boot();
+};
+
+/**
+ * Called from wasm: compile a JIT module and put its function "f" into the
+ * function table at `index`, then report back through a64_jit_done.
+ * @return {number} 0 = pending (see jit::CompileFn)
+ */
+A64CPU.prototype.jit_compile = function(ptr, len, index, cookie)
+{
+    const generation = this.jit_generation;
+    const code = new Uint8Array(this.wasm_memory.buffer, ptr >>> 0, len >>> 0).slice();
+    WebAssembly.instantiate(code, { "e": this.jit_imports }).then(({ instance }) => {
+        if(generation !== this.jit_generation) return;
+        const table = this.jit_table;
+        if(table.length <= index)
+        {
+            table.grow(Math.max(index + 1 - table.length, 256));
+        }
+        table.set(index, instance.exports["f"]);
+        this.wasm["a64_jit_done"](cookie, 1);
+    }, err => {
+        if(generation !== this.jit_generation) return;
+        if(this.jit_errors++ < 5) console.error("a64 JIT: compilation failed:", err);
+        this.wasm["a64_jit_done"](cookie, 0);
+    });
+    return 0;
+};
+
+/** @return {Array<number>} JIT counters: compiled, entered, stale, failed */
+A64CPU.prototype.jit_stats = function()
+{
+    return [0, 1, 2, 3].map(n => this.wasm["a64_jit_stat"](n));
 };
 
 /** @return {number} instructions executed since boot */
