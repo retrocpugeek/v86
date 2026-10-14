@@ -205,6 +205,12 @@ pub enum Form {
     DcZva,
     /// SMADDL, SMSUBL, UMADDL, UMSUBL
     MaddL { unsigned: u32, sub: u32 },
+    /// ADC, ADCS, SBC, SBCS
+    Adc { sf: u32, sub: u32, s: u32 },
+    /// UMULH, SMULH
+    Mulh { unsigned: u32 },
+    /// UDIV, SDIV
+    Div { sf: u32, signed: u32 },
     /// CCMN, CCMP (sub = 1); op.d = condition, op.imm = NZCV.
     Ccmp { sf: u32, sub: u32, imm: u32 },
     /// REV16 (opc 1), REV32 / 32-bit REV (2), REV (3)
@@ -275,6 +281,7 @@ fn handler(form: Form) -> Handler {
         Ld { size, ext, mode } => pick!(ld; size => [0, 1, 2, 3]; ext => [0, 1, 2]; mode => [0, 1, 2, 3]),
         St { size, mode } => pick!(st; size => [0, 1, 2, 3]; mode => [0, 1, 2, 3]),
         Barrier { .. } => nop,
+        Adc { .. } | Mulh { .. } | Div { .. } => generic,
         Mrs { .. } | DcZva | MaddL { .. } | Ccmp { .. } | Rev { .. } | Clz { .. } | LdQ { .. } | StQ { .. } => generic,
         LdAcq { .. } | StRel { .. } | LdEx { .. } | StEx { .. } => generic,
     }
@@ -453,6 +460,18 @@ fn decode_form(i: u32, op: &mut Op) -> Option<Form> {
         // LSLV / LSRV / ASRV / RORV
         op.d = bits(i, 11, 10) as u8;
         return Some(Shiftv { sf });
+    }
+    if i & 0x1fe0_fc00 == 0x1a00_0000 {
+        // ADC / ADCS / SBC / SBCS
+        return Some(Adc { sf, sub: bits(i, 30, 30), s: bits(i, 29, 29) });
+    }
+    if i & 0xff60_8000 == 0x9b40_0000 {
+        // SMULH / UMULH
+        return Some(Mulh { unsigned: bits(i, 23, 23) });
+    }
+    if i & 0x7fe0_f800 == 0x1ac0_0800 {
+        // UDIV / SDIV
+        return Some(Div { sf, signed: bits(i, 10, 10) });
     }
     if i & 0xff60_0000 == 0x9b20_0000 {
         // SMADDL / SMSUBL / UMADDL / UMSUBL

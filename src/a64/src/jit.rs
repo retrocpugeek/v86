@@ -547,6 +547,11 @@ const I32_LT_U: u8 = 0x49;
 const I32_GE_U: u8 = 0x4f;
 const I64_EQZ: u8 = 0x50;
 const I64_LT_U: u8 = 0x54;
+const I64_LE_U: u8 = 0x58;
+const I32_DIV_S: u8 = 0x6d;
+const I32_DIV_U: u8 = 0x6e;
+const I64_DIV_S: u8 = 0x7f;
+const I64_DIV_U: u8 = 0x80;
 const I64_GT_U: u8 = 0x56;
 const I64_GE_U: u8 = 0x5a;
 const I32_AND: u8 = 0x71;
@@ -1899,6 +1904,235 @@ impl Gen<'_> {
                 self.a.set(R);
                 self.set_x(op.a, R);
             }
+            Form::Adc { sf, sub, s } => {
+                // R = A + B + C, with B inverted for SBC (AddWithCarry())
+                let ones = if sf != 0 { u64::MAX } else { 0xffff_ffff };
+                self.x(op.b);
+                self.mask(sf);
+                self.a.set(A);
+                self.x(op.c);
+                if sub != 0 {
+                    self.a.i64c(ones);
+                    self.a.op(I64_XOR);
+                }
+                self.mask(sf);
+                self.a.set(B);
+                // V = carry in
+                self.a.load32(OFF_NZCV);
+                self.a.i32c(29);
+                self.a.op(I32_SHR_U);
+                self.a.i32c(1);
+                self.a.op(I32_AND);
+                self.a.op(I64_EXTEND_I32_U);
+                self.a.set(V);
+                self.a.get(A);
+                self.a.get(B);
+                self.a.op(I64_ADD);
+                self.a.get(V);
+                self.a.op(I64_ADD);
+                self.a.set(R);
+                if s != 0 {
+                    let a = &mut self.a;
+                    a.get(CPU);
+                    if sf != 0 {
+                        // N, Z
+                        a.get(R);
+                        a.i64c(63);
+                        a.op(I64_SHR_U);
+                        a.op(I32_WRAP_I64);
+                        a.i32c(31);
+                        a.op(I32_SHL);
+                        a.get(R);
+                        a.op(I64_EQZ);
+                        a.i32c(30);
+                        a.op(I32_SHL);
+                        a.op(I32_OR);
+                        // C: R <= A with a carry in, else R < A
+                        a.get(R);
+                        a.get(A);
+                        a.op(I64_LE_U);
+                        a.get(R);
+                        a.get(A);
+                        a.op(I64_LT_U);
+                        a.get(V);
+                        a.op(I32_WRAP_I64);
+                        a.op(SELECT);
+                        a.i32c(29);
+                        a.op(I32_SHL);
+                        a.op(I32_OR);
+                        // V: the operands' sign differs from the result's
+                        a.get(A);
+                        a.get(R);
+                        a.op(I64_XOR);
+                        a.get(B);
+                        a.get(R);
+                        a.op(I64_XOR);
+                        a.op(I64_AND);
+                        a.i64c(63);
+                        a.op(I64_SHR_U);
+                        a.op(I32_WRAP_I64);
+                        a.i32c(28);
+                        a.op(I32_SHL);
+                        a.op(I32_OR);
+                    } else {
+                        // C is bit 32 of the 64-bit sum
+                        a.get(R);
+                        a.i64c(32);
+                        a.op(I64_SHR_U);
+                        a.op(I32_WRAP_I64);
+                        a.i32c(29);
+                        a.op(I32_SHL);
+                        let w = |a: &mut Asm, l: u32| {
+                            a.get(l);
+                            a.op(I32_WRAP_I64);
+                        };
+                        w(a, R);
+                        a.i32c(0x8000_0000u32 as i32);
+                        a.op(I32_AND);
+                        a.op(I32_OR);
+                        w(a, R);
+                        a.op(I32_EQZ);
+                        a.i32c(30);
+                        a.op(I32_SHL);
+                        a.op(I32_OR);
+                        w(a, A);
+                        w(a, R);
+                        a.op(I32_XOR);
+                        w(a, B);
+                        w(a, R);
+                        a.op(I32_XOR);
+                        a.op(I32_AND);
+                        a.i32c(31);
+                        a.op(I32_SHR_U);
+                        a.i32c(28);
+                        a.op(I32_SHL);
+                        a.op(I32_OR);
+                    }
+                    a.mem(I32_STORE, 2, OFF_NZCV);
+                }
+                self.a.get(R);
+                self.mask(sf);
+                self.a.set(R);
+                self.set_x(op.a, R);
+            }
+            Form::Mulh { unsigned } => {
+                // From 32-bit halves: the high 64 bits of A * B
+                let half = |a: &mut Asm, l: u32, hi: bool| {
+                    a.get(l);
+                    if hi {
+                        a.i64c(32);
+                        a.op(I64_SHR_U);
+                    } else {
+                        a.i64c(0xffff_ffff);
+                        a.op(I64_AND);
+                    }
+                };
+                self.x(op.b);
+                self.a.set(A);
+                self.x(op.c);
+                self.a.set(B);
+                let a = &mut self.a;
+                // T = lo(A) * lo(B)
+                half(a, A, false);
+                half(a, B, false);
+                a.op(I64_MUL);
+                a.set(T);
+                // V = hi(A) * lo(B) + (T >> 32)
+                half(a, A, true);
+                half(a, B, false);
+                a.op(I64_MUL);
+                half(a, T, true);
+                a.op(I64_ADD);
+                a.set(V);
+                // WB = lo(V) + lo(A) * hi(B)
+                half(a, V, false);
+                half(a, A, false);
+                half(a, B, true);
+                a.op(I64_MUL);
+                a.op(I64_ADD);
+                a.set(WB);
+                // R = hi(A) * hi(B) + (V >> 32) + (WB >> 32)
+                half(a, A, true);
+                half(a, B, true);
+                a.op(I64_MUL);
+                half(a, V, true);
+                a.op(I64_ADD);
+                half(a, WB, true);
+                a.op(I64_ADD);
+                if unsigned == 0 {
+                    // Signed: minus B if A < 0, minus A if B < 0
+                    for (x, y) in [(A, B), (B, A)] {
+                        a.get(x);
+                        a.i64c(63);
+                        a.op(I64_SHR_S);
+                        a.get(y);
+                        a.op(I64_AND);
+                        a.op(I64_SUB);
+                    }
+                }
+                a.set(R);
+                self.set_x(op.a, R);
+            }
+            Form::Div { sf, signed } => {
+                // 0 for a zero divisor; -A for -1 (no trap on MIN / -1)
+                self.x(op.b);
+                self.a.set(A);
+                self.x(op.c);
+                self.a.set(B);
+                let a = &mut self.a;
+                let (ty, wrap): (u8, fn(&mut Asm, u32)) = if sf != 0 {
+                    (0x7e, |a, l| a.get(l))
+                } else {
+                    (0x7f, |a, l| {
+                        a.get(l);
+                        a.op(I32_WRAP_I64);
+                    })
+                };
+                wrap(a, B);
+                a.op(if sf != 0 { I64_EQZ } else { I32_EQZ });
+                a.op(IF);
+                a.op(ty);
+                if sf != 0 {
+                    a.i64c(0);
+                } else {
+                    a.i32c(0);
+                }
+                a.op(ELSE);
+                if signed != 0 {
+                    wrap(a, B);
+                    if sf != 0 {
+                        a.i64c(u64::MAX);
+                        a.op(I64_EQ);
+                    } else {
+                        a.i32c(-1);
+                        a.op(I32_EQ);
+                    }
+                    a.op(IF);
+                    a.op(ty);
+                    if sf != 0 {
+                        a.i64c(0);
+                    } else {
+                        a.i32c(0);
+                    }
+                    wrap(a, A);
+                    a.op(if sf != 0 { I64_SUB } else { I32_SUB });
+                    a.op(ELSE);
+                    wrap(a, A);
+                    wrap(a, B);
+                    a.op(if sf != 0 { I64_DIV_S } else { I32_DIV_S });
+                    a.op(END);
+                } else {
+                    wrap(a, A);
+                    wrap(a, B);
+                    a.op(if sf != 0 { I64_DIV_U } else { I32_DIV_U });
+                }
+                a.op(END);
+                if sf == 0 {
+                    a.op(I64_EXTEND_I32_U);
+                }
+                a.set(R);
+                self.set_x(op.a, R);
+            }
             Form::Ccmp { sf, sub, imm } => {
                 self.cond(op.d as u32);
                 self.if_();
@@ -2253,7 +2487,9 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
         // branches: one in page 0 and one in page 1, branching within
         // themselves and to each other
         let mut br_regs = 0u32;
-        let gen = |len: usize, br_regs: &mut u32, next: &mut dyn FnMut() -> u64| {
+        // Registers multiply and divide instructions use (often edge cases)
+        let mut edge_regs = 0u32;
+        let gen = |len: usize, br_regs: &mut u32, edge_regs: &mut u32, next: &mut dyn FnMut() -> u64| {
             let mut words = Vec::new();
             while words.len() < len {
                 let mut w = next() as u32;
@@ -2262,7 +2498,7 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                     let r = next() as u32;
                     let (rt, rn, rs) = (r & 31, (r >> 5) % 31, (r >> 10) & 31);
                     let size = (r >> 30) << 30;
-                    w = match next() % 13 {
+                    w = match next() % 15 {
                         0 => [0xd61f_0000, 0xd63f_0000, 0xd65f_0000][(next() % 3) as usize] | rn << 5,
                         1 => [0xd538_d080, 0xd53b_d040, 0xd53b_d060, 0xd538_4100, 0xd53b_4220][(next() % 5) as usize] | rt,
                         2 => 0xd50b_7420 | rt,
@@ -2275,6 +2511,19 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                         7 | 8 => 0x085f_7c00 | (next() as u32 & 1) << 15 | size | rn << 5 | rt,
                         9 | 10 => 0x0800_7c00 | (next() as u32 & 1) << 15 | size | rs << 16 | rn << 5 | rt,
                         11 => 0xf980_0000 | (r & 0x3f_ffff),
+                    // ADC/ADCS/SBC/SBCS, UMULH/SMULH, UDIV/SDIV
+                    13 => [0x1a00_0000, 0x3a00_0000, 0x5a00_0000, 0x7a00_0000][(next() % 4) as usize]
+                        | (next() as u32 & 1) << 31
+                        | rs << 16
+                        | rn << 5
+                        | rt,
+                    14 => {
+                        *edge_regs |= 1 << rs | 1 << rn;
+                        [0x9bc0_7c00, 0x9b40_7c00, 0x1ac0_0800, 0x1ac0_0c00, 0x9ac0_0800, 0x9ac0_0c00][(next() % 6) as usize]
+                            | rs << 16
+                            | rn << 5
+                            | rt
+                    }
                         _ => {
                             // Q register loads and stores with small offsets
                             let (base, lsb) = [(0x3d80_0000, 10), (0x3dc0_0000, 10), (0xad00_0000, 15), (0xad40_0000, 15), (0x3c80_0c00, 12), (0x3cc0_0400, 12)]
@@ -2298,8 +2547,8 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
         };
         let len = 1 + (next() % 24) as usize;
         let len1 = 1 + (next() % 24) as usize;
-        let mut words = gen(len, &mut br_regs, &mut next);
-        let mut words1 = gen(len1, &mut br_regs, &mut next);
+        let mut words = gen(len, &mut br_regs, &mut edge_regs, &mut next);
+        let mut words1 = gen(len1, &mut br_regs, &mut edge_regs, &mut next);
         let start = (next() % (1024 - len as u64)) as usize * 4;
         let start1 = 0x1000 + (next() % (1024 - len1 as u64)) as usize * 4;
         // Branch targets: the instructions, or just past either run
@@ -2332,10 +2581,19 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
             };
             let mut c = Box::new(Cpu::new(Bus::new(RAM_BASE, RAM_SIZE)));
             for i in 0..31 {
-                c.x[i] = match if br_regs & 1 << i != 0 { 2 } else { rn() % 5 } {
+                let kind = if br_regs & 1 << i != 0 {
+                    2
+                } else if edge_regs & 1 << i != 0 && rn() % 2 == 0 {
+                    3
+                } else {
+                    rn() % 6
+                };
+                c.x[i] = match kind {
                     0 => rn(),
                     1 => rn() % 64,
                     2 => RAM_BASE + targets[(rn() % targets.len() as u64) as usize] as u64,
+                    // Edge cases (division, carries)
+                    3 => [0, u64::MAX, 1 << 63, 0xffff_ffff, 0x8000_0000, 1][(rn() % 6) as usize],
                     _ => RAM_BASE + 0x8000 + rn() % 0x4000,
                 };
             }
