@@ -1,0 +1,4 @@
+# A terminal, and an on-screen keyboard along the bottom (for phones): 180
+# pixels plus openbox's title bar
+xterm -geometry 80x24+16+16 &
+xvkbd -compact -geometry 796x180+0+398 &

@@ -34,6 +34,14 @@ JS (`src/a64_cpu.js`): PL011 on `serial0` (`src/pl011.js`), PL031
 (virtio-net, virtio-console, 9p) run on the virtio-mmio transport added to
 `src/virtio.js`, and `src/virtio_blk.js` serves `hda`. The device tree is
 generated from the configured devices (`src/fdt.js`); `dtb` overrides it.
+
+With `a64_display: { width, height, canvas }` the machine gets a display
+(`src/a64_display.js`): the top of RAM becomes a `simple-framebuffer`
+(x8r8g8b8, Linux's `simplefb`), copied to the canvas up to 30 times a
+second, and the canvas's keyboard and pointer events (mouse and touch) go to
+two virtio-input devices (`src/virtio_input.js`), a keyboard and a tablet.
+`tools/a64-site/x11/` builds a Buildroot image with Xorg (fbdev, evdev),
+openbox, xterm and xvkbd for it.
 Guest time follows the host clock, and idle time is waited out rather than skipped.
 State save/restore isn't supported yet.
 

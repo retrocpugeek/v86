@@ -461,6 +461,13 @@ export interface V86Options {
     a64_jit?: boolean;
 
     /**
+     * arch "aarch64" only: a display. The top of RAM becomes a simple-framebuffer
+     * (x8r8g8b8, Linux's simplefb driver), drawn to `canvas`, whose keyboard and
+     * pointer events go to two virtio-input devices, a keyboard and a tablet.
+     */
+    a64_display?: { width?: number; height?: number; canvas?: HTMLCanvasElement };
+
+    /**
      * arch "aarch64" only: a device tree blob to use instead of the generated one
      */
     dtb?: V86Image;

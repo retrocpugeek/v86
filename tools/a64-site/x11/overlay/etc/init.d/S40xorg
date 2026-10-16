@@ -1,0 +1,18 @@
+#!/bin/sh
+# Starts X with an openbox session for root (see /root/.xinitrc). Replaces
+# the xserver package's S40xorg, which starts a bare server.
+case "$1" in
+start)
+    printf "Starting X: "
+    if [ -e /dev/fb0 ]; then
+        cd /root && HOME=/root xinit /root/.xinitrc -- /usr/bin/Xorg :0 vt1 -nolisten tcp -keeptty \
+            > /var/log/x11.log 2>&1 &
+        echo "OK"
+    else
+        echo "no framebuffer"
+    fi
+    ;;
+stop)
+    killall Xorg 2>/dev/null
+    ;;
+esac

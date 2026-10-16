@@ -21,6 +21,11 @@ main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
 #web-status { color: var(--muted); }
 #guest-web { flex: 1; min-height: 480px; width: 100%; border: 1px solid #444; background: #fff; }
 #guest-web:not([src]) { visibility: hidden; }
+#display { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+#display[hidden] { display: none; }
+#screen { max-width: 100%; height: auto; background: #000; border: 1px solid #444; outline: none; cursor: none; }
+#screen:focus { border-color: var(--accent); }
+#display-note { color: var(--muted); font-size: 12px; }
 button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1px 8px; }
 .log-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .log-tools button { padding: 4px 10px; }
@@ -68,6 +73,10 @@ code { color: var(--fg); }
   </div>
 </dialog>
 <main>
+  <section id="display" hidden>
+    <canvas id="screen" aria-label="Guest display"></canvas>
+    <span id="display-note">Click the screen to type into it; the serial console is next to it.</span>
+  </section>
   <div id="terminal"></div>
   <section id="web" hidden>
     <div class="bar">
@@ -106,6 +115,10 @@ code { color: var(--fg); }
 
     const manifest = await (await fetch("images/manifest.json", { cache: "no-cache" })).json();
     const build = manifest.builds.find(b => b.id === params.get("build")) || manifest.builds[0];
+    // ?display=800x600 adds the display to any image (for testing)
+    const display_param = /^(\d+)x(\d+)$/.exec(params.get("display") || "");
+    const display = build.display || (display_param && { width: +display_param[1], height: +display_param[2] });
+    document.getElementById("display").hidden = !display;
 
     for(const b of manifest.builds)
     {
@@ -130,6 +143,12 @@ code { color: var(--fg); }
         a64_jit: params.get("jit") !== "0",
         // U-Boot instead of a kernel (tools/a64-site/u-boot/)
         a64_firmware: !!build.firmware,
+        // A framebuffer, keyboard and tablet (tools/a64-site/x11/)
+        a64_display: display ? {
+            width: display.width,
+            height: display.height,
+            canvas: document.getElementById("screen"),
+        } : undefined,
         memory_size: (build.memory_mb || 128) * 1024 * 1024,
         kernel: { url: base + build.kernel },
         hda: {

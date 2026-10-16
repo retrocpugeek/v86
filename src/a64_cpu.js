@@ -15,6 +15,7 @@ import { VirtioNet } from "./virtio_net.js";
 import { VirtioConsole } from "./virtio_console.js";
 import { Virtio9p } from "../lib/9p.js";
 import { FdtNode, fdt_build } from "./fdt.js";
+import { A64Display } from "./a64_display.js";
 
 // For Types Only
 import { BusConnector } from "./bus.js";
@@ -315,6 +316,13 @@ A64CPU.prototype.init = function(settings, device_bus)
     {
         this.devices.virtio_9p = new Virtio9p(settings.fs9p, cpu, device_bus);
     }
+    if(settings.a64_display)
+    {
+        // Framebuffer at the top of RAM; keyboard and tablet after the other
+        // virtio devices (so they're /dev/input/event0 and event1)
+        const addr = RAM_BASE + this.ram_size - A64Display.size(settings.a64_display);
+        this.devices.display = new A64Display(cpu, settings.a64_display, addr);
+    }
 
     this.boot();
 };
@@ -473,6 +481,11 @@ A64CPU.prototype.build_dtb = function(initrd_addr, initrd_size)
             .prop("reg", reg(base, VIRTIO_SLOT_SIZE))
             .prop("interrupts", [0, VIRTIO_FIRST_SPI + slot, 1])
             .prop("dma-coherent", true);
+    }
+
+    if(this.devices.display)
+    {
+        this.devices.display.add_dtb_nodes(root, reg);
     }
 
     const chosen = root.child("chosen")
