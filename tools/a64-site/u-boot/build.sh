@@ -17,6 +17,8 @@ KERNEL=$(realpath "$1") ROOTFS=$(realpath "$2") OUT=$(realpath -m "$3")
 HERE=$(cd "$(dirname "$0")" && pwd)
 VERSION=v2026.10
 CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-gnu-}
+# The version banner's build time, in UTC rather than the build machine's zone
+export TZ=UTC
 export PATH=$PATH:/sbin:/usr/sbin
 mkdir -p "$OUT"
 
