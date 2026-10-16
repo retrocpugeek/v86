@@ -51,11 +51,45 @@ fn clmul(a: u64, b: u64, esz: u32) -> u128 {
 fn rbit_esz(x: u64, esz: u32) -> u64 { x.reverse_bits() >> (64 - esz) }
 
 /// Elementwise integer operation for the "three same" group. None = unallocated.
+/// Element ops of "three same" (integer). The saturating forms don't set
+/// FPSR.QC.
 fn int3(opc: u32, u: bool, esz: u32, a: u64, b: u64, d: u64) -> Option<u64> {
     let m = ones(esz);
     let (sa, sb) = (sx(a, esz), sx(b, esz));
+    let sat = |v: i128| -> u64 {
+        if u {
+            v.clamp(0, m as i128) as u64
+        } else {
+            v.clamp(-(1i128 << (esz - 1)), (1i128 << (esz - 1)) - 1) as u64
+        }
+    };
     Some(
         match (opc, u) {
+            // SQADD/UQADD, SQSUB/UQSUB
+            (0x01, false) => sat(sa as i128 + sb as i128),
+            (0x01, true) => sat(a as i128 + b as i128),
+            (0x05, false) => sat(sa as i128 - sb as i128),
+            (0x05, true) => sat(a as i128 - b as i128),
+            (0x09..=0x0b, _) => {
+                // SQSHL/UQSHL, SRSHL/URSHL, SQRSHL/UQRSHL: shift by the signed
+                // low byte of b (right if negative)
+                let x = if u { a as i128 } else { sa as i128 };
+                let sh = b as u8 as i8 as i32;
+                let v = if sh >= esz as i32 {
+                    // Everything shifted out: saturates if nonzero (RSHL gives 0)
+                    match (x.signum(), opc) {
+                        (0, _) | (_, 0x0a) => 0,
+                        (1, _) => i128::MAX,
+                        _ => i128::MIN,
+                    }
+                } else if sh >= 0 {
+                    x << sh
+                } else {
+                    let s = ((-sh) as u32).min(100);
+                    if opc == 0x09 { x >> s } else { (x + (1i128 << (s - 1))) >> s }
+                };
+                if opc == 0x0a { v as u64 } else { sat(v) }
+            }
             (0x00, false) => ((sa as i128 + sb as i128) >> 1) as u64,
             (0x00, true) => ((a as u128 + b as u128) >> 1) as u64,
             (0x02, false) => ((sa as i128 + sb as i128 + 1) >> 1) as u64,
@@ -334,8 +368,15 @@ impl Cpu {
         }
         let esz = 8 << size;
         if scalar {
-            // Only the 64-bit compare/add/sub/shift forms exist as scalars.
-            if size != 3 || !matches!(opc, 0x06 | 0x07 | 0x08 | 0x10 | 0x11) {
+            // The saturating forms exist as scalars for every size, the
+            // other compare/add/sub/shift forms only for 64 bits.
+            if matches!(opc, 0x01 | 0x05 | 0x09 | 0x0b) {
+                let m = ones(esz) as u128;
+                let Some(r) = int3(opc, u, esz, (a & m) as u64, (b & m) as u64, 0) else { return undef() };
+                self.v[rd as usize] = r as u128;
+                return Ok(());
+            }
+            if size != 3 || !matches!(opc, 0x06 | 0x07 | 0x08 | 0x0a | 0x10 | 0x11) {
                 return undef();
             }
             let Some(r) = int3(opc, u, 64, a as u64, b as u64, d as u64) else { return undef() };
@@ -1047,7 +1088,8 @@ impl Cpu {
         let (rd, rn) = (i & 31, bits(i, 9, 5));
         let hs = 31 - immh.leading_zeros(); // highest set bit
         let esz = 8u32 << hs;
-        if scalar && esz != 64 {
+        let fp_fixed = matches!(opc, 0x1c | 0x1f);
+        if scalar && esz != 64 && !(fp_fixed && esz == 32) {
             return undef();
         }
         if !scalar && esz == 64 && !q && !matches!(opc, 0x10 | 0x11 | 0x14) {
@@ -1108,6 +1150,37 @@ impl Cpu {
                 self.v[rd as usize] = if q { (d & u64::MAX as u128) | n << 64 } else { n };
                 return Ok(());
             }
+            0x1c | 0x1f => {
+                // SCVTF/UCVTF, FCVTZS/FCVTZU (fixed-point, rsh fraction
+                // bits); half precision needs ARMv8.2. Scaling by a power
+                // of two is exact, so there's one rounding.
+                if esz < 32 {
+                    return undef();
+                }
+                let scale = 2f64.powi(rsh as i32);
+                for k in 0..lanes {
+                    let x = lane(a, k, esz);
+                    let v = if opc == 0x1c {
+                        let f = match (esz, u) {
+                            (64, false) => x as i64 as f64,
+                            (64, true) => x as f64,
+                            (_, false) => x as u32 as i32 as f64,
+                            (_, true) => x as u32 as f64,
+                        } / scale;
+                        if esz == 64 { f.to_bits() } else { (f as f32).to_bits() as u64 }
+                    } else {
+                        // Toward zero, saturating (NaN gives 0), as Rust's casts do
+                        let f = if esz == 64 { f64::from_bits(x) } else { f32::from_bits(x as u32) as f64 } * scale;
+                        match (esz, u) {
+                            (64, false) => f as i64 as u64,
+                            (64, true) => f as u64,
+                            (_, false) => f as i32 as u32 as u64,
+                            (_, true) => f as u32 as u64,
+                        }
+                    };
+                    set_lane(&mut r, k, esz, v);
+                }
+            }
             0x14 if !scalar => {
                 // SSHLL/USHLL (UXTL/SXTL with shift 0)
                 if esz == 64 {
@@ -1125,7 +1198,7 @@ impl Cpu {
             _ => return undef(),
         }
         if scalar {
-            self.v[rd as usize] = r & u64::MAX as u128;
+            self.v[rd as usize] = r & ones(esz) as u128;
         } else {
             self.vd(rd, r, q);
         }
@@ -1146,8 +1219,11 @@ impl Cpu {
     fn fp_dp(&mut self, i: u32) -> Res<()> {
         let ftype = bits(i, 23, 22);
         let (rd, rn, rm) = (i & 31, bits(i, 9, 5), bits(i, 20, 16));
-        if bit(i, 29) || !bit(i, 21) {
+        if bit(i, 29) {
             return undef();
+        }
+        if !bit(i, 21) {
+            return self.fp_fixed_conv(i);
         }
         if bits(i, 15, 10) == 0 {
             return self.fp_int_conv(i);
@@ -1297,6 +1373,46 @@ impl Cpu {
                 let x = fround(x, mode);
                 let signed = opc & 1 == 0;
                 let r = match (sf, signed) {
+                    (true, true) => x as i64 as u64,
+                    (true, false) => x as u64,
+                    (false, true) => x as i32 as u32 as u64,
+                    (false, false) => x as u32 as u64,
+                };
+                self.set_xr(rd, r);
+            }
+            _ => return undef(),
+        }
+        Ok(())
+    }
+
+    /// SCVTF, UCVTF, FCVTZS, FCVTZU (scalar, fixed-point): the integer has
+    /// 64 - scale fraction bits.
+    fn fp_fixed_conv(&mut self, i: u32) -> Res<()> {
+        let sf = bit(i, 31);
+        let ftype = bits(i, 23, 22);
+        let (rmode, opc, scale) = (bits(i, 20, 19), bits(i, 18, 16), bits(i, 15, 10));
+        let (rd, rn) = (i & 31, bits(i, 9, 5));
+        if ftype >= 2 || (!sf && scale < 32) {
+            return undef();
+        }
+        let fbits = 64 - scale as i32;
+        let dbl = ftype == 1;
+        match (rmode, opc) {
+            (0, 2 | 3) => {
+                // Scaling by a power of two is exact, so there's one rounding
+                let x = self.xr(rn);
+                let r = match (sf, opc == 2) {
+                    (true, true) => if dbl { x as i64 as f64 } else { x as i64 as f32 as f64 },
+                    (true, false) => if dbl { x as f64 } else { x as f32 as f64 },
+                    (false, true) => x as i32 as f64,
+                    (false, false) => x as u32 as f64,
+                };
+                self.fp_set(rd, r / 2f64.powi(fbits), dbl);
+            }
+            (3, 0 | 1) => {
+                // Toward zero, saturating (NaN gives 0), as Rust's casts do
+                let x = self.fp_get(rn, dbl) * 2f64.powi(fbits);
+                let r = match (sf, opc == 0) {
                     (true, true) => x as i64 as u64,
                     (true, false) => x as u64,
                     (false, true) => x as i32 as u32 as u64,
@@ -1508,6 +1624,97 @@ mod tests {
         c.v[2] = 10.0f64.to_bits() as u128 | (10.0f64.to_bits() as u128) << 64;
         c.exec(0x4e62_cc20).unwrap();
         assert_eq!(f64::from_bits((c.v[0] >> 64) as u64), 31.0);
+    }
+
+    #[test]
+    fn fp_fixed_point() {
+        let mut c = cpu();
+        // fcvtzu w1, d31, #32 (Xorg's double_to_fp3232): the fraction as 0.32
+        c.v[31] = 0.75f64.to_bits() as u128;
+        c.exec(0x1e59_83e1).unwrap();
+        assert_eq!(c.x[1], 0xc000_0000);
+        // fcvtzs x2, d3, #16: toward zero
+        c.v[3] = (-2.5f64 - 1.0 / 131072.0).to_bits() as u128;
+        c.exec(0x9e58_c062).unwrap();
+        assert_eq!(c.x[2] as i64, -(5 << 15));
+        // fcvtzs w4, s5, #1: saturates
+        c.v[5] = 3e9f32.to_bits() as u128;
+        c.exec(0x1e18_fca4).unwrap();
+        assert_eq!(c.x[4], 0x7fff_ffff);
+        // scvtf d6, w7, #32
+        c.x[7] = -1i32 as u32 as u64;
+        c.exec(0x1e42_80e6).unwrap();
+        assert_eq!(f64::from_bits(c.v[6] as u64), -1.0 / 4294967296.0);
+        // ucvtf s8, x9, #8
+        c.x[9] = 0x180;
+        c.exec(0x9e03_e128).unwrap();
+        assert_eq!(f32::from_bits(c.v[8] as u32), 1.5);
+        // scvtf d10, x11, #64
+        c.x[11] = 1 << 62;
+        c.exec(0x9e42_016a).unwrap();
+        assert_eq!(f64::from_bits(c.v[10] as u64), 0.25);
+
+        // SIMD register forms
+        // scvtf d0, d0, #6
+        c.v[0] = (-128i64) as u64 as u128;
+        c.exec(0x5f7a_e400).unwrap();
+        assert_eq!(c.v[0], (-2.0f64).to_bits() as u128);
+        // scvtf v1.4s, v2.4s, #8
+        c.v[2] = [256u32, 384, 0xffff_ff00, 0].iter().enumerate().map(|(k, &x)| (x as u128) << (32 * k)).sum();
+        c.exec(0x4f38_e441).unwrap();
+        let f = |k: u32| f32::from_bits((c.v[1] >> (32 * k)) as u32);
+        assert_eq!((f(0), f(1), f(2), f(3)), (1.0, 1.5, -1.0, 0.0));
+        // fcvtzu v3.2d, v4.2d, #3: saturates at 0 for negative values
+        c.v[4] = 2.25f64.to_bits() as u128 | ((-1.0f64).to_bits() as u128) << 64;
+        c.exec(0x6f7d_fc83).unwrap();
+        assert_eq!(c.v[3], 18);
+        // fcvtzs s5, s6, #2; the rest of the register is cleared
+        c.v[5] = u128::MAX;
+        c.v[6] = (-1.3f32).to_bits() as u128;
+        c.exec(0x5f3e_fcc5).unwrap();
+        assert_eq!(c.v[5], (-5i32) as u32 as u128);
+        // ucvtf s7, s8, #1
+        c.v[8] = 3;
+        c.exec(0x7f3f_e507).unwrap();
+        assert_eq!(c.v[7], 1.5f32.to_bits() as u128);
+    }
+
+    #[test]
+    fn saturating() {
+        let mut c = cpu();
+        let lanes = |v: u128, esz: u32, n: u32| -> Vec<u64> { (0..n).map(|k| (v >> (esz * k)) as u64 & ones(esz)).collect() };
+        let pack = |xs: &[u64], esz: u32| -> u128 { xs.iter().enumerate().map(|(k, &x)| ((x & ones(esz)) as u128) << (esz * k as u32)).sum() };
+        // uqadd v28.8b, v0.8b, v4.8b
+        c.v[0] = pack(&[250, 1, 128, 0, 0, 0, 0, 0], 8);
+        c.v[4] = pack(&[10, 2, 128, 0, 0, 0, 0, 0], 8);
+        c.v[28] = u128::MAX;
+        c.exec(0x2e24_0c1c).unwrap();
+        assert_eq!(c.v[28], pack(&[255, 3, 255], 8));
+        // sqadd v1.8h, v2.8h, v3.8h
+        c.v[2] = pack(&[0x7ff0, 0x8010, 5, 0, 0, 0, 0, 0], 16);
+        c.v[3] = pack(&[0x0100, 0xff00, (-7i16) as u16 as u64, 0, 0, 0, 0, 0], 16);
+        c.exec(0x4e63_0c41).unwrap();
+        assert_eq!(lanes(c.v[1], 16, 3), [0x7fff, 0x8000, (-2i16) as u16 as u64]);
+        // uqsub v4.16b, v5.16b, v6.16b
+        c.v[5] = pack(&[5, 200], 8);
+        c.v[6] = pack(&[9, 100], 8);
+        c.exec(0x6e26_2ca4).unwrap();
+        assert_eq!(lanes(c.v[4], 8, 2), [0, 100]);
+        // sqshl v7.4s, v8.4s, v9.4s: by 4, by 40 (saturates), by -1, by 1
+        c.v[8] = pack(&[0x0100_0000, (-3i32) as u32 as u64, (-3i32) as u32 as u64, 0x4000_0000], 32);
+        c.v[9] = pack(&[4, 40, 0xff, 1], 32);
+        c.exec(0x4ea9_4d07).unwrap();
+        assert_eq!(lanes(c.v[7], 32, 4), [0x1000_0000, 0x8000_0000, (-2i32) as u32 as u64, 0x7fff_ffff]);
+        // urshl v10.2d, v11.2d, v12.2d: right by 2 rounding, left by 64
+        c.v[11] = pack(&[6, 1], 64);
+        c.v[12] = pack(&[(-2i64) as u64, 64], 64);
+        c.exec(0x6eec_556a).unwrap();
+        assert_eq!(lanes(c.v[10], 64, 2), [2, 0]);
+        // sqadd b13, b14, b15
+        c.v[14] = 0x7f;
+        c.v[15] = 0x0101;
+        c.exec(0x5e2f_0dcd).unwrap();
+        assert_eq!(c.v[13], 0x7f);
     }
 
     #[test]
