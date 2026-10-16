@@ -130,6 +130,21 @@ pub extern "C" fn a64_boot(image: u32, image_len: u32, dtb: u32, dtb_len: u32) -
     }
 }
 
+/// Load firmware (U-Boot) and the DTB: see boot::load_firmware.
+#[no_mangle]
+pub extern "C" fn a64_boot_firmware(fw: u32, fw_len: u32, dtb: u32, dtb_len: u32) -> i32 {
+    let (fw, dtb) = unsafe {
+        (
+            std::slice::from_raw_parts(fw as *const u8, fw_len as usize),
+            std::slice::from_raw_parts(dtb as *const u8, dtb_len as usize),
+        )
+    };
+    match boot::load_firmware(cpu(), fw, dtb) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
 /// Guest physical address of the DTB placed by a64_boot (for a given RAM size).
 #[no_mangle]
 pub extern "C" fn a64_dtb_addr() -> f64 { boot::dtb_addr(cpu().bus.ram.len() as u64) as f64 }

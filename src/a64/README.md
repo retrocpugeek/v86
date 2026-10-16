@@ -75,6 +75,12 @@ The serial console is on stdin/stdout; Ctrl-A x quits. The disk is copy-on-write
 in memory. `tools/a64-ref/smoke.py` boots, logs in as root, runs a few commands
 and powers off (`--qemu` runs the same thing on QEMU).
 
+Instead of a kernel, the machine can start firmware: `--bios u-boot.bin` here,
+`a64_firmware: true` with `kernel` in the V86 API. It's loaded 2 MB into RAM
+with the DTB at the start of RAM, where U-Boot's QEMU board expects it.
+`tools/a64-site/u-boot/build.sh` builds U-Boot for this machine (position
+independent, no flash) and a disk it boots with `extlinux.conf`.
+
 ## JIT (browser build)
 
 `jit.rs` compiles hot code to WebAssembly a page at a time. Once a branch

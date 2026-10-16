@@ -2,6 +2,7 @@
 //!
 //!   a64run --kernel Image --dtb v86-virt.dtb [--disk rootfs.ext4] [--mem 128] [--steps N]
 //!          [--lockstep qemu-cpu.log] [--icount-shift S] [--quiet-undef]
+//!   a64run --bios u-boot.bin --dtb v86-virt.dtb [--disk disk.img] ...
 //!
 //! The serial console (PL011) is attached to stdin/stdout. Ctrl-A x quits.
 //! With --lockstep, the register state before every instruction is compared
@@ -26,7 +27,9 @@ use v86_a64::dev::virtio::{Empty, VirtioDevice, VirtioMmio};
 use v86_a64::dev::virtio_blk::VirtioBlk;
 
 struct Args {
+    /// The kernel, or the firmware with --bios
     kernel: String,
+    bios: bool,
     dtb: String,
     mem_mb: u64,
     steps: u64,
@@ -37,13 +40,14 @@ struct Args {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: a64run --kernel Image --dtb file.dtb [--disk rootfs.ext4] [--mem MB] [--steps N] [--lockstep qemu.log] [--icount-shift S] [--quiet-undef]");
+    eprintln!("usage: a64run (--kernel Image | --bios u-boot.bin) --dtb file.dtb [--disk rootfs.ext4] [--mem MB] [--steps N] [--lockstep qemu.log] [--icount-shift S] [--quiet-undef]");
     exit(2)
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
         kernel: String::new(),
+        bios: false,
         dtb: String::new(),
         mem_mb: 128,
         steps: u64::MAX,
@@ -57,6 +61,10 @@ fn parse_args() -> Args {
         let mut val = || it.next().unwrap_or_else(|| usage());
         match k.as_str() {
             "--kernel" => a.kernel = val(),
+            "--bios" => {
+                a.kernel = val();
+                a.bios = true;
+            }
             "--dtb" => a.dtb = val(),
             "--mem" => a.mem_mb = val().parse().unwrap_or_else(|_| usage()),
             "--steps" => a.steps = val().parse().unwrap_or_else(|_| usage()),
@@ -122,11 +130,13 @@ fn main() {
     let mut cpu = Cpu::new(bus);
     cpu.ns_per_insn = 1 << args.icount_shift;
     cpu.log_undef = !args.quiet_undef;
-    let info = boot::load(&mut cpu, &image, &dtb).unwrap_or_else(|e| {
+    let loaded = if args.bios { boot::load_firmware(&mut cpu, &image, &dtb) } else { boot::load(&mut cpu, &image, &dtb) };
+    let info = loaded.unwrap_or_else(|e| {
         eprintln!("boot: {e}");
         exit(1)
     });
-    eprintln!("a64run: kernel at {:#x}, dtb at {:#x}, {} MB RAM", info.entry, info.dtb, args.mem_mb);
+    let what = if args.bios { "firmware" } else { "kernel" };
+    eprintln!("a64run: {what} at {:#x}, dtb at {:#x}, {} MB RAM", info.entry, info.dtb, args.mem_mb);
 
     if let Some(path) = &args.lockstep {
         lockstep(&mut cpu, path, args.steps);

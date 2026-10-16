@@ -254,6 +254,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.parallel1 = options.parallel1;
     settings.cmdline = options.cmdline;
     settings.a64_jit = options.a64_jit;
+    settings.a64_firmware = options.a64_firmware;
     settings.preserve_mac_from_state_image = options.preserve_mac_from_state_image;
     settings.mac_address_translation = options.mac_address_translation;
     settings.cpuid_level = options.cpuid_level;

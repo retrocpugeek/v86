@@ -343,6 +343,11 @@ A64CPU.prototype.boot = function()
     const settings = this.settings;
     dbg_assert(settings.kernel, "aarch64: a kernel (arm64 Image) is required");
     const kernel = new Uint8Array(settings.kernel);
+    if(settings.a64_firmware)
+    {
+        this.boot_firmware(kernel);
+        return;
+    }
     const dtb_addr = this.wasm["a64_dtb_addr"]();
 
     let initrd = null;
@@ -373,6 +378,24 @@ A64CPU.prototype.boot = function()
     {
         this.write_blob(initrd, initrd_addr);
     }
+};
+
+/**
+ * Firmware boot (settings.a64_firmware): see a64_boot_firmware.
+ * @param {!Uint8Array} firmware
+ */
+A64CPU.prototype.boot_firmware = function(firmware)
+{
+    const settings = this.settings;
+    const dtb = settings.dtb ? new Uint8Array(settings.dtb) : this.build_dtb(0, 0);
+    const fptr = this.wasm["a64_alloc"](firmware.length);
+    const dptr = this.wasm["a64_alloc"](dtb.length);
+    new Uint8Array(this.wasm_memory.buffer, fptr, firmware.length).set(firmware);
+    new Uint8Array(this.wasm_memory.buffer, dptr, dtb.length).set(dtb);
+    const result = this.wasm["a64_boot_firmware"](fptr, firmware.length, dptr, dtb.length);
+    this.wasm["a64_free"](fptr, firmware.length);
+    this.wasm["a64_free"](dptr, dtb.length);
+    dbg_assert(result === 0, "aarch64: firmware doesn't fit in RAM");
 };
 
 /**

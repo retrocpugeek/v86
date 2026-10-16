@@ -1,5 +1,7 @@
 //! Direct kernel boot, laid out exactly like QEMU's `-kernel` on the virt
-//! machine so execution can be compared against it from the first instruction.
+//! machine so execution can be compared against it from the first instruction,
+//! and firmware boot (U-Boot), laid out like QEMU's `-bios` as far as the
+//! firmware can tell.
 
 use crate::cpu::Cpu;
 
@@ -51,4 +53,23 @@ pub fn load(cpu: &mut Cpu, image: &[u8], dtb: &[u8]) -> Result<BootInfo, String>
     cpu.bus.load(RAM_BASE, &bytes);
     cpu.pc = RAM_BASE;
     Ok(BootInfo { entry, dtb: dtb_addr })
+}
+
+/// Load firmware (e.g. U-Boot built position-independent) and the DTB. As
+/// with QEMU's `-bios`, the DTB is at the start of RAM, where U-Boot's QEMU
+/// board looks for it; the firmware isn't in flash at 0 but 2 MB into RAM,
+/// and starts there with x0 = DTB.
+pub fn load_firmware(cpu: &mut Cpu, firmware: &[u8], dtb: &[u8]) -> Result<BootInfo, String> {
+    let entry = RAM_BASE + KERNEL_OFFSET;
+    if dtb.len() as u64 > KERNEL_OFFSET {
+        return Err("DTB larger than 2 MB".into());
+    }
+    if entry + firmware.len() as u64 > RAM_BASE + cpu.bus.ram.len() as u64 {
+        return Err("firmware doesn't fit in RAM".into());
+    }
+    cpu.bus.load(RAM_BASE, dtb);
+    cpu.bus.load(entry, firmware);
+    cpu.x[0] = RAM_BASE;
+    cpu.pc = entry;
+    Ok(BootInfo { entry, dtb: RAM_BASE })
 }

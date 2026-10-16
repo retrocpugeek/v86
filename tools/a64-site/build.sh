@@ -5,6 +5,7 @@
 #
 #   tools/a64-site/build.sh
 #   tools/a64-site/add-image.sh default "Buildroot (reference)" .../Image .../rootfs.ext4
+#   FIRMWARE=1 tools/a64-site/add-image.sh u-boot "U-Boot ..." .../u-boot.bin .../disk.img  (see u-boot/build.sh)
 #   npx wrangler deploy --config tools/a64-site/wrangler.jsonc
 set -eu
 cd "$(dirname "$0")/../.."

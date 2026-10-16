@@ -442,9 +442,23 @@ export interface V86Options {
     bzimage?: V86Image;
 
     /**
-     * arch "aarch64" only: an arm64 Linux kernel (`Image` format)
+     * arch "aarch64" only: an arm64 Linux kernel (`Image` format), or firmware
+     * with `a64_firmware`
      */
     kernel?: V86Image;
+
+    /**
+     * arch "aarch64" only: `kernel` is firmware (e.g. U-Boot built
+     * position-independent), not a Linux kernel. It's loaded 2 MB into RAM,
+     * with the device tree at the start of RAM, as QEMU's virt machine does
+     * for `-bios`.
+     */
+    a64_firmware?: boolean;
+
+    /**
+     * arch "aarch64" only: false turns off the JIT (default: on)
+     */
+    a64_jit?: boolean;
 
     /**
      * arch "aarch64" only: a device tree blob to use instead of the generated one
