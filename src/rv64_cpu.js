@@ -22,6 +22,7 @@ import { FdtNode, fdt_build } from "./fdt.js";
 import { BusConnector } from "./bus.js";
 
 const RAM_BASE = 0x80000000;
+const CH32_SRAM_BASE = 0x20000000;
 const UART_BASE = 0x10000000;
 const UART_IRQ = 10;
 const RTC_BASE = 0x101000;
@@ -58,6 +59,8 @@ export function RV64CPU(bus, wasm, stop_idling)
     this.xlen32 = wasm.arch === "riscv32";
     /** A CH32V003 microcontroller (arch "ch32v003") rather than virt */
     this.ch32 = wasm.arch === "ch32v003";
+    /** Guest-physical address of RAM (the CH32V003's SRAM: 0x20000000) */
+    this.ram_base = this.ch32 ? CH32_SRAM_BASE : RAM_BASE;
     this.stop_idling = stop_idling;
 
     /** Devices by role; virtio_net reads devices.net to pick its id. */
@@ -208,18 +211,18 @@ RV64CPU.prototype.get_irq_lines = function()
 // addresses that went through read32s/| 0 arrive negative: >>> 0 them.
 RV64CPU.prototype.read8 = function(addr)
 {
-    return this.ram()[(addr >>> 0) - RAM_BASE];
+    return this.ram()[(addr >>> 0) - this.ram_base];
 };
 
 RV64CPU.prototype.read16 = function(addr)
 {
-    const m = this.ram(), o = (addr >>> 0) - RAM_BASE;
+    const m = this.ram(), o = (addr >>> 0) - this.ram_base;
     return m[o] | m[o + 1] << 8;
 };
 
 RV64CPU.prototype.read32s = function(addr)
 {
-    const m = this.ram(), o = (addr >>> 0) - RAM_BASE;
+    const m = this.ram(), o = (addr >>> 0) - this.ram_base;
     return m[o] | m[o + 1] << 8 | m[o + 2] << 16 | m[o + 3] << 24;
 };
 
@@ -251,14 +254,14 @@ RV64CPU.prototype.ram_written = function(o, len)
 
 RV64CPU.prototype.write8 = function(addr, value)
 {
-    const o = (addr >>> 0) - RAM_BASE;
+    const o = (addr >>> 0) - this.ram_base;
     this.ram_written(o, 1);
     this.ram()[o] = value;
 };
 
 RV64CPU.prototype.write16 = function(addr, value)
 {
-    const m = this.ram(), o = (addr >>> 0) - RAM_BASE;
+    const m = this.ram(), o = (addr >>> 0) - this.ram_base;
     this.ram_written(o, 2);
     m[o] = value;
     m[o + 1] = value >> 8;
@@ -266,7 +269,7 @@ RV64CPU.prototype.write16 = function(addr, value)
 
 RV64CPU.prototype.write32 = function(addr, value)
 {
-    const m = this.ram(), o = (addr >>> 0) - RAM_BASE;
+    const m = this.ram(), o = (addr >>> 0) - this.ram_base;
     this.ram_written(o, 4);
     m[o] = value;
     m[o + 1] = value >> 8;
@@ -281,7 +284,7 @@ RV64CPU.prototype.write32 = function(addr, value)
  */
 RV64CPU.prototype.read_blob = function(addr, length)
 {
-    const o = (addr >>> 0) - RAM_BASE;
+    const o = (addr >>> 0) - this.ram_base;
     return this.ram().subarray(o, o + length);
 };
 
@@ -291,7 +294,7 @@ RV64CPU.prototype.read_blob = function(addr, length)
  */
 RV64CPU.prototype.write_blob = function(blob, addr)
 {
-    const o = (addr >>> 0) - RAM_BASE;
+    const o = (addr >>> 0) - this.ram_base;
     this.ram_written(o, blob.length);
     this.ram().set(blob, o);
 };
@@ -377,6 +380,8 @@ RV64CPU.prototype.boot = function()
         const result = this.wasm["rv64_init_ch32"](ptr, flash.length);
         this.wasm["rv64_free"](ptr, flash.length);
         dbg_assert(result === 0, "ch32v003: the flash image is over 16 KB");
+        this.ram_ptr = this.wasm["rv64_ram_ptr"]();
+        this.mem8 = null;
         return;
     }
     dbg_assert(settings.bios, "riscv64: firmware (bios, OpenSBI fw_dynamic) is required");

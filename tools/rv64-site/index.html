@@ -42,6 +42,16 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #pad .small button { height: 46px; font-size: 15px; }
 #pad button.down { background: #3d6290; border-color: #6c9bd2; }
 #pad-note { color: var(--muted); font-size: 13px; }
+/* CH32V003 hardware and resources */
+#mcu-info { flex: 1 1 320px; max-width: 560px; font-size: 14px; }
+#mcu-info[hidden] { display: none; }
+#mcu-info h2 { font-size: 15px; margin: 0 0 6px; }
+#mcu-info table { border-collapse: collapse; width: 100%; margin-bottom: 14px; }
+#mcu-info th, #mcu-info td { text-align: left; vertical-align: top; padding: 4px 8px 4px 0; border-bottom: 1px solid #2a2f38; }
+#mcu-info th { color: var(--muted); font-weight: normal; white-space: nowrap; width: 9em; }
+#mcu-info .bar { display: block; height: 6px; margin-top: 4px; background: #2a2f38; border-radius: 3px; overflow: hidden; }
+#mcu-info .bar i { display: block; height: 100%; background: var(--accent); }
+#mcu-info .live { color: var(--accent); font-size: 12px; }
 footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
 a { color: var(--accent); }
 code { color: var(--fg); }
@@ -93,6 +103,26 @@ code { color: var(--fg); }
       <button data-key="new">New game</button>
     </div>
     <span id="pad-note">Keyboard: arrows, space (drop), z, p, r.</span>
+  </section>
+  <section id="mcu-info" hidden>
+    <h2>Emulated hardware</h2>
+    <table>
+      <tr><th>Microcontroller</th><td>WCH CH32V003</td></tr>
+      <tr><th>CPU</th><td>QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter)</td></tr>
+      <tr><th>Clock</th><td>24 MHz internal oscillator, as the firmware sets it (the chip runs up to 48 MHz)</td></tr>
+      <tr><th>Flash</th><td>16 KB (16,384 bytes) at 0x0800 0000, also at 0</td></tr>
+      <tr><th>SRAM</th><td>2 KB (2,048 bytes) at 0x2000 0000</td></tr>
+      <tr><th>Peripherals</th><td>SysTick timer, PFIC interrupt controller, USART1 as the serial console (115200 baud), RCC clocks; other registers just hold values</td></tr>
+    </table>
+    <h2>Firmware and its resources</h2>
+    <table>
+      <tr id="mcu-flash-row"><th>Image</th><td id="mcu-flash"></td></tr>
+      <tr id="mcu-ram-row"><th>RAM, static</th><td id="mcu-ram"></td></tr>
+      <tr><th>Stack, peak</th><td id="mcu-stack">…</td></tr>
+      <tr><th>CPU load</th><td id="mcu-cpu">…</td></tr>
+      <tr><th>Timing</th><td>SysTick interrupt every 10 ms; the CPU sleeps (<code>wfi</code>) in between</td></tr>
+    </table>
+    <span class="live">Stack and CPU load are measured live in the emulator, every second.</span>
   </section>
   <section id="web" hidden>
     <div class="bar">
@@ -241,6 +271,56 @@ function start_mcu(build, base, status)
     {
         setup_pad(emulator);
     }
+    show_mcu_info(emulator, build.stats);
+}
+
+// The CH32V003's specs and the firmware's use of them: sizes from the build
+// (tools/ch32v003/build.sh), peak stack from the pattern the firmware fills
+// free RAM with at reset (the lowest changed word), and CPU load as
+// instructions per second against the 24 MHz clock (about one per cycle).
+function show_mcu_info(emulator, stats)
+{
+    document.getElementById("mcu-info").hidden = false;
+    const n = v => v.toLocaleString("en");
+    const pct = (part, whole) => (100 * part / whole).toFixed(part / whole < 0.1 ? 1 : 0) + "%";
+    const bar = (part, whole) => `<span class="bar"><i style="width: ${Math.min(100, 100 * part / whole).toFixed(1)}%"></i></span>`;
+    if(stats)
+    {
+        document.getElementById("mcu-flash").innerHTML =
+            `${n(stats.flash)} bytes: ${pct(stats.flash, stats.flash_size)} of flash (code and constants ${n(stats.text)}, initial data ${n(stats.data)})` +
+            bar(stats.flash, stats.flash_size);
+        const ram = stats.data + stats.bss;
+        document.getElementById("mcu-ram").innerHTML =
+            `${n(ram)} bytes: ${pct(ram, stats.ram_size)} of SRAM (data ${n(stats.data)}, bss ${n(stats.bss)}); ` +
+            `${n(stats.stack_top - stats.stack_bottom)} bytes left for the stack` + bar(ram, stats.ram_size);
+    }
+    else
+    {
+        document.getElementById("mcu-flash-row").hidden = true;
+        document.getElementById("mcu-ram-row").hidden = true;
+    }
+    const MHZ = 24;
+    let last_count = emulator.get_instruction_counter(), last_time = performance.now();
+    setInterval(() =>
+    {
+        const count = emulator.get_instruction_counter(), time = performance.now();
+        const ips = (count - last_count) / ((time - last_time) / 1000);
+        last_count = count;
+        last_time = time;
+        document.getElementById("mcu-cpu").innerHTML =
+            `${pct(ips, MHZ * 1e6)} busy: ${(ips / 1e6).toFixed(2)} million instructions per second of ${MHZ} MHz` + bar(ips, MHZ * 1e6);
+        if(stats)
+        {
+            const size = stats.stack_top - stats.stack_bottom;
+            const ram = emulator.read_memory(stats.stack_bottom, size);
+            let k = 0;
+            while(k < size && ram[k] === (stats.stack_fill & 0xff)) k++;
+            const used = size - (k & ~3);
+            document.getElementById("mcu-stack").innerHTML =
+                `${n(used)} bytes of ${n(size)} (${pct(used, size)}); peak SRAM use ${n(stats.data + stats.bss + used)} of ${n(stats.ram_size)} bytes` +
+                bar(used, size);
+        }
+    }, 1000);
 }
 
 // On-screen controls for the Tetris firmware (tools/ch32v003/tetris.c): each

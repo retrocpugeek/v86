@@ -953,7 +953,9 @@ V86.prototype.get_instruction_counter = function()
 {
     if(this.v86)
     {
-        return this.v86.cpu.instruction_counter[0] >>> 0;
+        const cpu = this.v86.cpu;
+        // The aarch64 and riscv machines count in wasm
+        return cpu.instruction_counter ? cpu.instruction_counter[0] >>> 0 : cpu.get_instruction_counter();
     }
     else
     {

@@ -133,6 +133,10 @@ pub extern "C" fn rv64_init_ch32(ptr: u32, len: u32) -> i32 {
     0
 }
 
+/// Where the machine's RAM is in linear memory.
+#[no_mangle]
+pub extern "C" fn rv64_ram_ptr() -> u32 { cpu().bus.ram.as_ptr() as u32 }
+
 #[no_mangle]
 pub extern "C" fn rv64_irq_lines_ptr() -> u32 { addr_of!(IRQ_LINES) as u32 }
 
