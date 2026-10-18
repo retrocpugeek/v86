@@ -20,6 +20,7 @@ a native runner, and the browser build (`v86-rv64.wasm`) that v86 runs as
 | `bus.rs` | RAM, boot ROM, CLINT, PLIC, sifive_test (power off/reset), device map |
 | `boot.rs` | QEMU-identical reset vector and fw_dynamic info, kernel and DTB placement |
 | `dev/` | NS16550A UART, goldfish RTC, virtio-mmio + virtio-blk (native runner) |
+| `jit.rs` | Browser build: compiles hot pages of S/U-mode code to WebAssembly (see its module comment) |
 | `wasm.rs` | Browser build exports; virtio devices are v86's (JS), reached through MMIO imports |
 
 ## Running
@@ -66,5 +67,8 @@ new V86({
 });
 ```
 
-The device tree is generated from the configured devices. `tools/rv64-site/`
+The device tree is generated from the configured devices. The JIT is on by
+default (`rv64_jit: false` turns it off; the site takes `?jit=0`).
+`node tools/rv64-ref/jit-test.mjs [iterations] [seed]` runs its self-test:
+random code run compiled and interpreted must end in the same state. `tools/rv64-site/`
 hosts it on Cloudflare Workers, like the arm site.

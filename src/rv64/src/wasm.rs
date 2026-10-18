@@ -20,6 +20,8 @@ extern "C" {
     fn rv64_mmio_write(addr: u32, size: u32, value: u32);
     /// A byte from the UART (serial console).
     fn rv64_serial_out(byte: u32);
+    /// Compile a JIT module (see jit::CompileFn).
+    fn rv64_jit_compile(ptr: u32, len: u32, table_index: u32, cookie: u32) -> u32;
 }
 
 /// The virtio-mmio slots, handed to JS.
@@ -189,3 +191,67 @@ pub extern "C" fn rv64_pc() -> f64 { cpu().pc as f64 }
 /// RAM base, for JS's guest-physical accessors.
 #[no_mangle]
 pub extern "C" fn rv64_ram_base() -> f64 { RAM_BASE as f64 }
+
+// ---- JIT (src/jit.rs) ----
+
+fn host_compile(code: &[u8], table_index: u32, cookie: u32) -> u32 {
+    unsafe { rv64_jit_compile(code.as_ptr() as u32, code.len() as u32, table_index, cookie) }
+}
+
+/// Turn the JIT on. Compiled regions go into the function table from
+/// `table_base` on; threshold 0 keeps the default.
+#[no_mangle]
+pub extern "C" fn rv64_jit_enable(table_base: u32, threshold: u32) {
+    let c = cpu();
+    c.jit.enabled = true;
+    c.jit.table_base = table_base;
+    c.jit.compile = Some(host_compile);
+    if threshold != 0 {
+        c.jit.threshold = threshold;
+    }
+}
+
+/// Address of Bus::code_pages (one byte per RAM page; see jit.rs), for the
+/// JS write functions.
+#[no_mangle]
+pub extern "C" fn rv64_jit_code_pages() -> u32 { cpu().jit_tables().0 as u32 }
+
+/// JS wrote RAM offsets off..off + len, which include a page with compiled code.
+#[no_mangle]
+pub extern "C" fn rv64_jit_written(off: u32, len: u32) { cpu().bus.written(off as usize, len as usize) }
+
+#[no_mangle]
+pub extern "C" fn rv64_jit_done(cookie: u32, ok: u32) { cpu().jit_done(cookie, ok != 0) }
+
+/// Called by compiled code.
+#[no_mangle]
+pub extern "C" fn rv64_jit_rd(cpu: *mut Cpu, va: u64, size: u32) -> u64 { unsafe { (*cpu).jit_read(va, size) } }
+
+#[no_mangle]
+pub extern "C" fn rv64_jit_wr(cpu: *mut Cpu, va: u64, size: u32, v: u64) { unsafe { (*cpu).jit_write(va, size, v) } }
+
+/// JIT counters: 0 = regions compiled, 1 = calls to compiled code, 2 =
+/// regions dropped because their page was written, 3 = failed compilations,
+/// 4 = instructions run compiled, 5 = loads and stores of compiled code that
+/// took the slow path.
+#[no_mangle]
+pub extern "C" fn rv64_jit_stat(n: u32) -> f64 {
+    let s = cpu().jit.stats;
+    [s.compiled, s.entered, s.stale, s.failed, s.insns, s.slow].get(n as usize).copied().unwrap_or(0) as f64
+}
+
+static mut SELFTEST_MSG: String = String::new();
+
+/// Run jit::selftest (rv64_jit_compile must install synchronously). Returns
+/// 0 if it passed, else the length of a message at rv64_jit_selftest_msg().
+#[no_mangle]
+pub extern "C" fn rv64_jit_selftest(seed: u32, iterations: u32, table_base: u32) -> u32 {
+    let r = crate::jit::selftest(seed as u64 | (seed as u64) << 32, iterations, table_base, host_compile);
+    let msg = r.unwrap_or_default();
+    let len = msg.len() as u32;
+    unsafe { *addr_of_mut!(SELFTEST_MSG) = msg };
+    len
+}
+
+#[no_mangle]
+pub extern "C" fn rv64_jit_selftest_msg() -> u32 { unsafe { (*addr_of!(SELFTEST_MSG)).as_ptr() as u32 } }

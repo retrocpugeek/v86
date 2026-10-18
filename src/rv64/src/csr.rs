@@ -278,7 +278,7 @@ impl Cpu {
             0x305 => c.mtvec = v & !2,
             0x306 => c.mcounteren = v & 0xffff_ffff,
             0x30a => c.menvcfg = v & 1,
-            0x320 => c.mcountinhibit = v & 0xffff_fffd,
+            0x320 => c.mcountinhibit = v & 5, // CY, IR (no hpm counters)
             0x340 => c.mscratch = v,
             0x341 => c.mepc = v & !1,
             0x342 => c.mcause = v,

@@ -19,9 +19,24 @@ const PTE_U: u64 = 16;
 const PTE_A: u64 = 64;
 const PTE_D: u64 = 128;
 
-const TLB_ENTRIES: usize = 512;
+pub const TLB_ENTRIES: usize = 512;
+
+// TlbEntry::perm: what the entry allows without a walk, for the inline
+// lookups of compiled code (jit.rs). Write permissions need D. MXR isn't
+// taken into account (it only adds permissions: the slow path sees it).
+pub const P_R_S: u8 = 1; // read from S mode, SUM clear
+pub const P_R_SUM: u8 = 2; // read from S mode, SUM set
+pub const P_R_U: u8 = 4;
+pub const P_W_S: u8 = 8;
+pub const P_W_SUM: u8 = 16;
+pub const P_W_U: u8 = 32;
+pub const P_X_S: u8 = 64;
+pub const P_X_U: u8 = 128;
+/// TlbEntry::ram for a page that isn't RAM.
+pub const NOT_RAM: u32 = u32::MAX;
 
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct TlbEntry {
     /// va >> 12, or u64::MAX
     vpn: u64,
@@ -29,21 +44,121 @@ struct TlbEntry {
     pa: u64,
     /// The leaf PTE's bits (D set only if it was set when cached).
     pte: u64,
+    /// Offset of the page in RAM, or NOT_RAM.
+    ram: u32,
+    /// P_* bits.
+    perm: u8,
+    /// Level of the leaf PTE: 0 for a 4 KB page, 1 or 2 for a superpage
+    /// (cached a 4 KB page at a time).
+    level: u8,
+}
+
+const INVALID: TlbEntry = TlbEntry { vpn: u64::MAX, pa: 0, pte: 0, ram: NOT_RAM, perm: 0, level: 0 };
+
+/// TLB layout, for the inline lookups in compiled code (jit.rs).
+pub(crate) mod layout {
+    use super::TlbEntry;
+    use std::mem::{offset_of, size_of};
+    pub const ENTRY_SIZE: u32 = size_of::<TlbEntry>() as u32;
+    pub const VPN: u32 = offset_of!(TlbEntry, vpn) as u32;
+    pub const RAM: u32 = offset_of!(TlbEntry, ram) as u32;
+    pub const PERM: u32 = offset_of!(TlbEntry, perm) as u32;
 }
 
 pub struct Tlb {
     e: Vec<TlbEntry>,
+    /// Indices of the entries filled since the last flush (flushes are
+    /// frequent: they only clear these).
+    filled: Vec<u16>,
+    /// The page instruction fetch last translated for the JIT: (va >> 12,
+    /// privilege) -> RAM page (jit.rs). Cleared with the TLB.
+    pub fetch_vpn: u64,
+    pub fetch_prv: u64,
+    pub fetch_page: u32,
 }
 
 impl Default for Tlb {
-    fn default() -> Self { Tlb { e: vec![TlbEntry { vpn: u64::MAX, pa: 0, pte: 0 }; TLB_ENTRIES] } }
+    fn default() -> Self {
+        Tlb { e: vec![INVALID; TLB_ENTRIES], filled: Vec::new(), fetch_vpn: u64::MAX, fetch_prv: 0, fetch_page: 0 }
+    }
+}
+
+/// P_* bits for a leaf PTE.
+fn pte_perm(pte: u64) -> u8 {
+    let u = pte & PTE_U != 0;
+    let r = pte & PTE_R != 0;
+    let w = pte & PTE_W != 0 && pte & PTE_D != 0;
+    let x = pte & PTE_X != 0;
+    let mut p = 0;
+    if r {
+        p |= P_R_SUM | if u { P_R_U } else { P_R_S };
+    }
+    if w {
+        p |= P_W_SUM | if u { P_W_U } else { P_W_S };
+    }
+    if x {
+        p |= if u { P_X_U } else { P_X_S };
+    }
+    p
 }
 
 impl Tlb {
     pub fn flush(&mut self) {
-        for e in self.e.iter_mut() {
-            e.vpn = u64::MAX;
+        if self.filled.len() >= TLB_ENTRIES {
+            for e in self.e.iter_mut() {
+                e.vpn = u64::MAX;
+            }
+        } else {
+            for &i in &self.filled {
+                self.e[i as usize].vpn = u64::MAX;
+            }
         }
+        self.filled.clear();
+        self.fetch_vpn = u64::MAX;
+    }
+
+    #[inline]
+    fn set(&mut self, e: TlbEntry) {
+        let i = (e.vpn as usize) % TLB_ENTRIES;
+        if self.filled.len() < TLB_ENTRIES {
+            self.filled.push(i as u16);
+        }
+        self.e[i] = e;
+    }
+
+    /// SFENCE.VMA for one address: drop the entries that the leaf PTE
+    /// mapping va may be cached in.
+    pub fn flush_va(&mut self, va: u64) {
+        let vpn = va >> 12;
+        let mut drop = |e: &mut TlbEntry| {
+            let shift = 9 * e.level as u32;
+            if e.vpn >> shift == vpn >> shift {
+                e.vpn = u64::MAX;
+            }
+        };
+        if self.filled.len() >= TLB_ENTRIES {
+            self.e.iter_mut().for_each(drop);
+        } else {
+            for &i in &self.filled {
+                drop(&mut self.e[i as usize]);
+            }
+        }
+        self.fetch_vpn = u64::MAX;
+    }
+
+    /// Address of the entries in memory (they're never reallocated).
+    pub(crate) fn entries_addr(&self) -> usize { self.e.as_ptr() as usize }
+
+    /// Put an entry for `va` -> `pa` with leaf PTE bits `pte` (tests).
+    pub fn insert(&mut self, va: u64, pa: u64, pte: u64, ram: Option<usize>) {
+        self.set(TlbEntry {
+            vpn: va >> 12,
+            pa: pa & !0xfff,
+            pte,
+            ram: ram.map_or(NOT_RAM, |r| r as u32),
+            perm: pte_perm(pte),
+            level: 0,
+        });
     }
 }
 
@@ -145,14 +260,15 @@ impl Cpu {
             }
             let page_mask = (1u64 << (12 + 9 * level)) - 1;
             let pa_page = ((ppn << 12) & !page_mask) | (va & page_mask & !0xfff);
-            self.tlb.e[((va >> 12) as usize) % TLB_ENTRIES] = TlbEntry { vpn: va >> 12, pa: pa_page, pte: new };
+            let ram = self.bus.ram_offset(pa_page, 0x1000).map_or(NOT_RAM, |o| o as u32);
+            self.tlb.set(TlbEntry { vpn: va >> 12, pa: pa_page, pte: new, ram, perm: pte_perm(new), level: level as u8 });
             return Ok(pa_page | (va & 0xfff));
         }
         Err(page_fault(acc, va))
     }
 
     /// Read from physical memory; access fault outside RAM and devices.
-    fn phys_read(&mut self, pa: u64, size: u32, va: u64, acc: Acc) -> Res<u64> {
+    pub(crate) fn phys_read(&mut self, pa: u64, size: u32, va: u64, acc: Acc) -> Res<u64> {
         if let Some(off) = self.bus.ram_offset(pa, size as u64) {
             return Ok(self.bus.read_ram(off, size));
         }
@@ -165,7 +281,7 @@ impl Cpu {
         Ok(v)
     }
 
-    fn phys_write(&mut self, pa: u64, size: u32, v: u64, va: u64) -> Res<()> {
+    pub(crate) fn phys_write(&mut self, pa: u64, size: u32, v: u64, va: u64) -> Res<()> {
         if let Some(off) = self.bus.ram_offset(pa, size as u64) {
             self.bus.write_ram(off, size, v);
             return Ok(());

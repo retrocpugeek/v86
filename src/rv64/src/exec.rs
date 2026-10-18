@@ -294,7 +294,12 @@ impl Cpu {
                     if self.prv == PRV_U || (self.prv == PRV_S && self.csr.mstatus & MSTATUS_TVM != 0) {
                         return Err(illegal(raw));
                     }
-                    self.tlb.flush();
+                    if rs1 != 0 {
+                        let va = self.rx(rs1);
+                        self.tlb.flush_va(va);
+                    } else {
+                        self.tlb.flush();
+                    }
                     self.icache_flush();
                 }
                 _ => return Err(illegal(raw)),

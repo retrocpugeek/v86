@@ -3,6 +3,7 @@
 use crate::bus::Bus;
 use crate::csr::Csrs;
 use crate::mmu::Tlb;
+use crate::jit::{self, Jit};
 use crate::rvc;
 
 pub const PRV_U: u64 = 0;
@@ -125,6 +126,15 @@ pub struct Cpu {
     /// Decoded instructions by virtual pc; see ICacheEntry.
     pub icache: Vec<ICacheEntry>,
     icache_gen: u32,
+    pub jit: Jit,
+    /// Set by jit_read/jit_write for compiled code (see jit.rs).
+    pub jit_flag: u32,
+    pub jit_exc: Exception,
+    /// Calls compiled code may still chain to another page's code (see jit.rs).
+    pub jit_hops: u32,
+    /// pc is a block start: a branch went there, or the instruction before
+    /// it trapped or isn't compiled (see jit.rs).
+    pub block_start: bool,
 }
 
 const ICACHE_ENTRIES: usize = 1 << 14;
@@ -140,6 +150,8 @@ pub struct ICacheEntry {
     raw: u32,
     len: u8,
     prv: u8,
+    /// The JIT compiles the instruction (jit::compilable).
+    jit: bool,
 }
 
 impl Cpu {
@@ -166,8 +178,13 @@ impl Cpu {
             log_illegal: false,
             trap_counts: [[0; 16]; 2],
             auto_irq: true,
-            icache: vec![ICacheEntry { pc: 1, gen: 0, insn: 0, raw: 0, len: 0, prv: 0 }; ICACHE_ENTRIES],
+            icache: vec![ICacheEntry { pc: 1, gen: 0, insn: 0, raw: 0, len: 0, prv: 0, jit: false }; ICACHE_ENTRIES],
             icache_gen: 1,
+            jit: Jit::default(),
+            jit_flag: 0,
+            jit_exc: Exception { cause: 0, tval: 0 },
+            jit_hops: 0,
+            block_start: true,
         }
     }
 
@@ -326,11 +343,19 @@ impl Cpu {
     }
 
     /// Execute one instruction, or take an interrupt.
-    pub fn step(&mut self) {
+    #[inline]
+    pub fn step(&mut self) { self.step_inner::<false>() }
+
+    /// step(); with JIT, also tracks block starts.
+    #[inline(always)]
+    fn step_inner<const JIT: bool>(&mut self) {
         if let Some(irq) = self.pending_interrupt().filter(|_| self.auto_irq) {
             self.waiting = false;
             let pc = self.pc;
             self.trap(irq, 0, true, pc);
+            if JIT {
+                self.block_start = true;
+            }
             return;
         }
         let pc = self.pc;
@@ -339,23 +364,27 @@ impl Cpu {
         self.icount += 1;
         let slot = (pc >> 1) as usize & (ICACHE_ENTRIES - 1);
         let e = self.icache[slot];
-        let r = if e.pc == pc && e.gen == self.icache_gen && e.prv == self.prv as u8 {
+        let (r, len, compiled) = if e.pc == pc && e.gen == self.icache_gen && e.prv == self.prv as u8 {
             self.pc = pc.wrapping_add(e.len as u64);
-            self.exec(e.insn, e.raw)
+            (self.exec(e.insn, e.raw), e.len, e.jit)
         } else {
             match self.fetch(pc) {
                 Ok((raw, len)) => match if len == 2 { rvc::expand(raw) } else { Some(raw) } {
                     Some(insn) => {
+                        let jit = jit::compilable(insn);
                         self.icache[slot] =
-                            ICacheEntry { pc, gen: self.icache_gen, insn, raw, len: len as u8, prv: self.prv as u8 };
+                            ICacheEntry { pc, gen: self.icache_gen, insn, raw, len: len as u8, prv: self.prv as u8, jit };
                         self.pc = pc.wrapping_add(len);
-                        self.exec(insn, raw)
+                        (self.exec(insn, raw), len as u8, jit)
                     }
-                    None => Err(illegal(raw)),
+                    None => (Err(illegal(raw)), 0, false),
                 },
-                Err(e) => Err(e),
+                Err(e) => (Err(e), 0, false),
             }
         };
+        if JIT {
+            self.block_start = r.is_err() || !compiled || self.pc != pc.wrapping_add(len as u64);
+        }
         if let Err(e) = r {
             if e.cause == cause::ILLEGAL_INSN && self.log_illegal {
                 eprintln!("rv64: illegal insn {:08x} at {pc:#x} (prv {})", e.tval, self.prv);
@@ -404,9 +433,22 @@ impl Cpu {
             }
             let end = n + limit;
             self.stop_batch = false;
-            while n < end && !self.stop_batch && !self.waiting {
-                self.step();
-                n += 1;
+            if self.jit.enabled {
+                while n < end && !self.stop_batch && !self.waiting {
+                    if self.block_start {
+                        if let Some(used) = self.jit_enter(end - n) {
+                            n += used;
+                            continue;
+                        }
+                    }
+                    self.step_inner::<true>();
+                    n += 1;
+                }
+            } else {
+                while n < end && !self.stop_batch && !self.waiting {
+                    self.step_inner::<false>();
+                    n += 1;
+                }
             }
         }
         RunExit::Budget

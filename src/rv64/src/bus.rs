@@ -215,6 +215,12 @@ pub struct Bus {
     pub log_unmapped: bool,
     /// Most recent device (non-RAM) read: (pa, size, value). For lockstep.
     pub last_mmio_read: Option<(u64, u32, u64)>,
+    /// Per RAM page: 1 if it has compiled code (jit.rs); empty without JIT.
+    /// A write to such a page clears the flag and queues the page in
+    /// `code_written`: its compiled code is dropped before compiled code
+    /// runs again, and compiled code doesn't call into it.
+    pub code_pages: Vec<u8>,
+    pub code_written: Vec<u32>,
 }
 
 impl Bus {
@@ -229,6 +235,28 @@ impl Bus {
             maps: Vec::new(),
             log_unmapped: true,
             last_mmio_read: None,
+            code_pages: Vec::new(),
+            code_written: Vec::new(),
+        }
+    }
+
+    /// Note a write to RAM offsets off..off + len (see code_pages).
+    #[inline(always)]
+    pub fn written(&mut self, off: usize, len: usize) {
+        if !self.code_pages.is_empty() {
+            self.written_slow(off, len);
+        }
+    }
+
+    #[inline(never)]
+    fn written_slow(&mut self, off: usize, len: usize) {
+        for p in off >> 12..=(off + len.max(1) - 1) >> 12 {
+            if let Some(f) = self.code_pages.get_mut(p) {
+                if *f != 0 {
+                    *f = 0;
+                    self.code_written.push(p as u32);
+                }
+            }
         }
     }
 
@@ -255,6 +283,7 @@ impl Bus {
 
     #[inline(always)]
     pub fn write_ram(&mut self, off: usize, size: u32, value: u64) {
+        self.written(off, size as usize);
         write_le(&mut self.ram[off..], size, value);
     }
 
@@ -374,6 +403,7 @@ impl Bus {
 
     pub fn load(&mut self, pa: u64, data: &[u8]) {
         let off = self.ram_offset(pa, data.len() as u64).expect("load outside RAM");
+        self.written(off, data.len());
         self.ram[off..off + data.len()].copy_from_slice(data);
     }
 }

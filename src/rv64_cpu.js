@@ -72,6 +72,15 @@ export function RV64CPU(bus, wasm, stop_idling)
     this.powered_off = false;
     this.settings = null;
 
+    // JIT (src/rv64/src/jit.rs): compiled regions go into the core's function table
+    this.jit_table = this.wasm["__indirect_function_table"];
+    this.jit_imports = { "m": this.wasm_memory, "r": this.wasm["rv64_jit_rd"], "w": this.wasm["rv64_jit_wr"], "t": this.jit_table };
+    /** Bumped when the core is recreated: compilations for the old one are dropped. */
+    this.jit_generation = 0;
+    this.jit_errors = 0;
+    /** @type {Uint8Array} pages with compiled code (see ram_written) */
+    this.jit_code_pages = null;
+
     bus.register("serial0-input", byte => {
         this.wasm["rv64_serial_in"](byte);
         this.stop_idling();
@@ -207,14 +216,43 @@ RV64CPU.prototype.read32s = function(addr)
     return m[o] | m[o + 1] << 8 | m[o + 2] << 16 | m[o + 3] << 24;
 };
 
+/**
+ * Before a write to RAM offsets o..o + len: tell the JIT if a page with
+ * compiled code is written (see Bus::code_pages in src/rv64/src/bus.rs).
+ * @param {number} o
+ * @param {number} len
+ */
+RV64CPU.prototype.ram_written = function(o, len)
+{
+    const pages = this.jit_code_pages;
+    if(!pages) return;
+    if(pages.buffer !== this.wasm_memory.buffer)
+    {
+        const code_pages = this.wasm["rv64_jit_code_pages"]();
+        this.jit_code_pages = new Uint8Array(this.wasm_memory.buffer, code_pages, this.ram_size >> 12);
+        return this.ram_written(o, len);
+    }
+    for(let p = o >> 12; p <= (o + Math.max(len, 1) - 1) >> 12; p++)
+    {
+        if(pages[p])
+        {
+            this.wasm["rv64_jit_written"](o, len);
+            return;
+        }
+    }
+};
+
 RV64CPU.prototype.write8 = function(addr, value)
 {
-    this.ram()[(addr >>> 0) - RAM_BASE] = value;
+    const o = (addr >>> 0) - RAM_BASE;
+    this.ram_written(o, 1);
+    this.ram()[o] = value;
 };
 
 RV64CPU.prototype.write16 = function(addr, value)
 {
     const m = this.ram(), o = (addr >>> 0) - RAM_BASE;
+    this.ram_written(o, 2);
     m[o] = value;
     m[o + 1] = value >> 8;
 };
@@ -222,6 +260,7 @@ RV64CPU.prototype.write16 = function(addr, value)
 RV64CPU.prototype.write32 = function(addr, value)
 {
     const m = this.ram(), o = (addr >>> 0) - RAM_BASE;
+    this.ram_written(o, 4);
     m[o] = value;
     m[o + 1] = value >> 8;
     m[o + 2] = value >> 16;
@@ -245,7 +284,9 @@ RV64CPU.prototype.read_blob = function(addr, length)
  */
 RV64CPU.prototype.write_blob = function(blob, addr)
 {
-    this.ram().set(blob, (addr >>> 0) - RAM_BASE);
+    const o = (addr >>> 0) - RAM_BASE;
+    this.ram_written(o, blob.length);
+    this.ram().set(blob, o);
 };
 
 // ---- setup ----
@@ -294,6 +335,14 @@ RV64CPU.prototype.reset_core = function(ram_mb)
     this.mem8 = null;
     this.irq_lines = null;
     this.powered_off = false;
+    this.jit_generation++;
+    this.jit_code_pages = null;
+    if(this.jit_table && !(this.settings && this.settings.rv64_jit === false))
+    {
+        this.wasm["rv64_jit_enable"](this.jit_table.length, 0);
+        const code_pages = this.wasm["rv64_jit_code_pages"]();
+        this.jit_code_pages = new Uint8Array(this.wasm_memory.buffer, code_pages, this.ram_size >> 12);
+    }
 };
 
 RV64CPU.prototype.boot = function()
@@ -475,6 +524,38 @@ RV64CPU.prototype.reboot_internal = function()
         virtio.reset();
     }
     this.boot();
+};
+
+/**
+ * Called from wasm: compile a JIT module and put its function "f" into the
+ * function table at `index`, then report back through rv64_jit_done.
+ * @return {number} 0 = pending (see jit::CompileFn)
+ */
+RV64CPU.prototype.jit_compile = function(ptr, len, index, cookie)
+{
+    const generation = this.jit_generation;
+    const code = new Uint8Array(this.wasm_memory.buffer, ptr >>> 0, len >>> 0).slice();
+    WebAssembly.instantiate(code, { "e": this.jit_imports }).then(({ instance }) => {
+        if(generation !== this.jit_generation) return;
+        const table = this.jit_table;
+        if(table.length <= index)
+        {
+            table.grow(Math.max(index + 1 - table.length, 256));
+        }
+        table.set(index, instance.exports["f"]);
+        this.wasm["rv64_jit_done"](cookie, 1);
+    }, err => {
+        if(generation !== this.jit_generation) return;
+        if(this.jit_errors++ < 5) console.error("rv64 JIT: compilation failed:", err);
+        this.wasm["rv64_jit_done"](cookie, 0);
+    });
+    return 0;
+};
+
+/** @return {Array<number>} JIT counters: compiled, entered, stale, failed, instructions, slow loads/stores */
+RV64CPU.prototype.jit_stats = function()
+{
+    return [0, 1, 2, 3, 4, 5].map(n => this.wasm["rv64_jit_stat"](n));
 };
 
 /** @return {number} instructions executed since boot */

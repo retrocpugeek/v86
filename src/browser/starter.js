@@ -119,6 +119,7 @@ export function V86(options)
         "rv64_mmio_read": function(addr, size) { return cpu.mmio_read(addr, size); },
         "rv64_mmio_write": function(addr, size, value) { cpu.mmio_write(addr, size, value); },
         "rv64_serial_out": function(byte) { cpu.serial_out(byte); },
+        "rv64_jit_compile": function(ptr, len, index, cookie) { return cpu.jit_compile(ptr, len, index, cookie); },
     };
 
     let wasm_fn = options.wasm_fn;
@@ -258,6 +259,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.parallel1 = options.parallel1;
     settings.cmdline = options.cmdline;
     settings.a64_jit = options.a64_jit;
+    settings.rv64_jit = options.rv64_jit;
     settings.a64_firmware = options.a64_firmware;
     settings.a64_display = options.a64_display;
     settings.preserve_mac_from_state_image = options.preserve_mac_from_state_image;

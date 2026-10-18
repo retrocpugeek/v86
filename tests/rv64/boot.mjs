@@ -10,7 +10,7 @@
 // virtio-net device backed by v86's fetch network adapter is added and the
 // test checks that the guest gets a DHCP lease.
 //
-// Requires build/v86-rv64.wasm (make build/v86-rv64.wasm).
+// RV64_JIT=0 turns the JIT off. Requires build/v86-rv64.wasm (make build/v86-rv64.wasm).
 
 import url from "node:url";
 import assert from "node:assert/strict";
@@ -40,6 +40,7 @@ const emulator = new V86({
     hda: { url: rootfs, async: false },
     memory_size: 256 * 1024 * 1024,
     cmdline: process.env.RV64_CMDLINE || "rootwait root=/dev/vda ro rootfstype=squashfs console=ttyS0",
+    rv64_jit: process.env.RV64_JIT !== "0",
     autostart: true,
     disable_keyboard: true,
     disable_mouse: true,
@@ -77,7 +78,10 @@ emulator.add_listener("serial0-output-byte", byte =>
     if(step === steps.length)
     {
         const secs = (Date.now() - start) / 1000;
-        console.error(`\n[rv64] PASS: booted, logged in, ran commands and powered off in ${secs.toFixed(1)}s`);
+        const stats = emulator.v86.cpu.jit_stats();
+        const total = emulator.v86.cpu.get_instruction_counter();
+        const jit = stats.map(n => n.toFixed(0)).join("/") + `, ${(100 * stats[4] / total).toFixed(1)}% of ${(total / 1e6).toFixed(0)}M`;
+        console.error(`\n[rv64] PASS: booted, logged in, ran commands and powered off in ${secs.toFixed(1)}s (JIT compiled/entered/stale/failed/insns/slow: ${jit})`);
         emulator.destroy();
         process.exit(0);
     }

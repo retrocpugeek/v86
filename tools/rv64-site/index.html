@@ -128,6 +128,8 @@ code { color: var(--fg); }
     const emulator = window.emulator = new V86({
         arch: "riscv64",
         wasm_path: "v86-rv64.wasm",
+        // ?jit=0 turns off the JIT (compiled blocks; src/rv64/src/jit.rs)
+        rv64_jit: params.get("jit") !== "0",
         // OpenSBI (fw_dynamic), which starts the kernel in S mode
         bios: { url: base + build.bios },
         memory_size: (build.memory_mb || 256) * 1024 * 1024,
