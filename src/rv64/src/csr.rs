@@ -151,6 +151,7 @@ impl Cpu {
             }
             0x310 | 0x31a => 0, // mstatush, menvcfgh
             0x804 if self.bus.ch32.is_some() => self.csr.intsyscr,
+            0xbc0 if self.bus.ch32.is_some() => 0x1f,
             0x301 => MISA32,
             0xc80..=0xc82 => hi(self.csr_read64(n - 0x80)?), // cycleh, timeh, instreth
             0xb80 | 0xb82 => hi(self.csr_read64(n - 0x80)?), // mcycleh, minstreth
@@ -176,7 +177,14 @@ impl Cpu {
             0x300 | 0x100 => self.csr_write64(n, v & 0x7fff_ffff),
             0x310 | 0x31a => Ok(()),
             0x804 if self.bus.ch32.is_some() => {
-                self.csr.intsyscr = v & 3;
+                self.csr.intsyscr = v & 0x3f;
+                Ok(())
+            }
+            // QingKe V4 CORECFGR (pipeline and prediction settings)
+            0xbc0 if self.bus.ch32.is_some() => Ok(()),
+            // mtvec: QingKe's vector table modes use both low bits
+            0x305 if self.bus.ch32.is_some() => {
+                self.csr.mtvec = v;
                 Ok(())
             }
             0x301 => Ok(()),

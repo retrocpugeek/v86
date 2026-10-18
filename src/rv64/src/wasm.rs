@@ -113,24 +113,34 @@ pub extern "C" fn rv64_init(ram_mb: u32, epoch_secs: f64) -> u32 {
 #[no_mangle]
 pub extern "C" fn rv64_set_xlen32(on: u32) { cpu().xlen32 = on != 0 }
 
-/// Create a WCH CH32V003 (dev/ch32.rs) with `firmware` (`len` bytes at
-/// `ptr`) in its flash, instead of the virt machine; it starts at once.
+/// Create a WCH CH32V microcontroller (dev/ch32.rs; `chip` 0: CH32V003,
+/// 1: CH32V307) with `firmware` (`len` bytes at `ptr`) in its flash, instead
+/// of the virt machine, and its RTC at `epoch_secs`; it starts at once.
 /// USART1 is the console (rv64_serial_out, rv64_serial_in). Returns 0, or -1
 /// if the firmware doesn't fit.
 #[no_mangle]
-pub extern "C" fn rv64_init_ch32(ptr: u32, len: u32) -> i32 {
+pub extern "C" fn rv64_init_ch32(chip: u32, ptr: u32, len: u32, epoch_secs: f64) -> i32 {
     unsafe {
         *addr_of_mut!(CPU) = None;
         *addr_of_mut!(IRQ_LINES) = [0; NUM_IRQ_LINES + 1];
     }
     let fw = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let out = Box::new(|b: u8| unsafe { rv64_serial_out(b as u32) });
-    let Ok(mut cpu) = crate::dev::ch32::machine(fw, out) else { return -1 };
+    let chip = if chip == 1 { crate::dev::ch32::Chip::V307 } else { crate::dev::ch32::Chip::V003 };
+    let Ok(mut cpu) = crate::dev::ch32::machine(chip, fw, out, epoch_secs as u64) else { return -1 };
     cpu.bus.log_unmapped = false;
     cpu.realtime = true;
     unsafe { *addr_of_mut!(UART_RX) = Some(cpu.bus.ch32.as_ref().unwrap().rx.clone()) };
     unsafe { *addr_of_mut!(CPU) = Some(Box::new(cpu)) };
     0
+}
+
+/// A CH32V GPIO port's output register (0: port A, 1: B, ...), or 0.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_gpio_out(port: u32) -> u32 {
+    // (also before the machine exists: the page may ask early)
+    unsafe { CPU.as_deref() }.and_then(|c| c.bus.ch32.as_ref()).map_or(0, |c| c.gpio_out(port))
 }
 
 /// Where the machine's RAM is in linear memory.
@@ -211,7 +221,8 @@ pub extern "C" fn rv64_sync_time(host_ms: f64) { cpu().sync_host_ns((host_ms * 1
 pub extern "C" fn rv64_ms_until_timer() -> f64 { cpu().ns_until_timer().map_or(-1.0, |ns| ns as f64 / 1e6) }
 
 #[no_mangle]
-pub extern "C" fn rv64_icount() -> f64 { cpu().icount as f64 }
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_icount() -> f64 { unsafe { CPU.as_deref() }.map_or(0.0, |c| c.icount as f64) }
 
 #[no_mangle]
 pub extern "C" fn rv64_pc() -> f64 { cpu().pc as f64 }

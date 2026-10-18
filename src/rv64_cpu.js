@@ -1,7 +1,7 @@
 // RISC-V machine for v86: QEMU-style riscv64 (or, for arch "riscv32",
-// riscv32) "virt" board with one hart. For arch "ch32v003", a WCH CH32V003
-// microcontroller instead: `bios` is its flash image, USART1 the serial
-// console (src/rv64/src/dev/ch32.rs).
+// riscv32) "virt" board with one hart. For arch "ch32v003" or "ch32v307",
+// a WCH CH32V microcontroller instead: `bios` is its flash image, USART1 the
+// serial console (src/rv64/src/dev/ch32.rs).
 //
 // The hart, MMU, CLINT, PLIC, 16550 UART and goldfish RTC run in
 // v86-rv64.wasm (src/rv64). The virtio-mmio slots are JS: virtio-blk (hda),
@@ -57,8 +57,9 @@ export function RV64CPU(bus, wasm, stop_idling)
     this.wasm_memory = this.wasm["memory"];
     /** RV32 (arch "riscv32"): see Cpu::xlen32 in src/rv64/src/cpu.rs */
     this.xlen32 = wasm.arch === "riscv32";
-    /** A CH32V003 microcontroller (arch "ch32v003") rather than virt */
-    this.ch32 = wasm.arch === "ch32v003";
+    /** A CH32V microcontroller (arch "ch32v003" or "ch32v307") rather than virt */
+    this.ch32 = wasm.arch === "ch32v003" || wasm.arch === "ch32v307";
+    this.ch32_chip = wasm.arch === "ch32v307" ? 1 : 0;
     /** Guest-physical address of RAM (the CH32V003's SRAM: 0x20000000) */
     this.ram_base = this.ch32 ? CH32_SRAM_BASE : RAM_BASE;
     this.stop_idling = stop_idling;
@@ -348,7 +349,7 @@ RV64CPU.prototype.reset_core = function(ram_mb)
     if(this.ch32)
     {
         // boot() creates the machine with its firmware
-        this.ram_size = 2048;
+        this.ram_size = this.ch32_chip === 1 ? 128 * 1024 : 2048;
         this.powered_off = false;
         return;
     }
@@ -373,13 +374,13 @@ RV64CPU.prototype.boot = function()
     const settings = this.settings;
     if(this.ch32)
     {
-        dbg_assert(settings.bios, "ch32v003: a flash image (bios) is required");
+        dbg_assert(settings.bios, "ch32v: a flash image (bios) is required");
         const flash = new Uint8Array(settings.bios);
         const ptr = this.wasm["rv64_alloc"](flash.length);
         new Uint8Array(this.wasm_memory.buffer, ptr, flash.length).set(flash);
-        const result = this.wasm["rv64_init_ch32"](ptr, flash.length);
+        const result = this.wasm["rv64_init_ch32"](this.ch32_chip, ptr, flash.length, Date.now() / 1000);
         this.wasm["rv64_free"](ptr, flash.length);
-        dbg_assert(result === 0, "ch32v003: the flash image is over 16 KB");
+        dbg_assert(result === 0, "ch32v: the flash image doesn't fit in the flash");
         this.ram_ptr = this.wasm["rv64_ram_ptr"]();
         this.mem8 = null;
         return;
@@ -592,6 +593,16 @@ RV64CPU.prototype.jit_compile = function(ptr, len, index, cookie)
 RV64CPU.prototype.jit_stats = function()
 {
     return [0, 1, 2, 3, 4, 5].map(n => this.wasm["rv64_jit_stat"](n));
+};
+
+/**
+ * CH32V: a GPIO port's output data register (port 0: A, 1: B, ...).
+ * @param {number} port
+ * @return {number}
+ */
+RV64CPU.prototype.ch32_gpio_out = function(port)
+{
+    return this.ch32 ? this.wasm["rv64_ch32_gpio_out"](port) : 0;
 };
 
 /** @return {number} instructions executed since boot */

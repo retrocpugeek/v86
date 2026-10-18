@@ -52,6 +52,18 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #mcu-info .bar { display: block; height: 6px; margin-top: 4px; background: #2a2f38; border-radius: 3px; overflow: hidden; }
 #mcu-info .bar i { display: block; height: 100%; background: var(--accent); }
 #mcu-info .live { color: var(--accent); font-size: 12px; }
+#leds { display: flex; gap: 14px; align-items: center; font-size: 13px; color: var(--muted); }
+#leds[hidden] { display: none; }
+#leds .led { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: #1d2633; border: 1px solid #3c4d66;
+    vertical-align: -2px; margin-right: 6px; }
+#leds .led.on { background: #4da3ff; border-color: #a9d1ff; box-shadow: 0 0 10px #4da3ff; }
+/* Shell keys and commands (builds with "controls": "shell") */
+#shell-pad { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 560px; align-self: flex-start; }
+#shell-pad[hidden] { display: none; }
+#shell-pad .row { display: flex; flex-wrap: wrap; gap: 8px; }
+#shell-pad button { min-width: 56px; height: 42px; padding: 0 12px; border-radius: 10px; background: #233041; border: 1px solid #3c4d66;
+    color: var(--fg); font-size: 15px; touch-action: manipulation; }
+#shell-pad .cmd button { font-family: ui-monospace, monospace; font-size: 14px; }
 footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
 a { color: var(--accent); }
 code { color: var(--fg); }
@@ -104,25 +116,33 @@ code { color: var(--fg); }
     </div>
     <span id="pad-note">Keyboard: arrows, space (drop), z, p, r.</span>
   </section>
+  <section id="shell-pad" hidden aria-label="Shell keys">
+    <div class="row">
+      <button data-send="\t">Tab</button>
+      <button data-send="\x1b[A" aria-label="Up">&#x25b2;</button>
+      <button data-send="\x1b[B" aria-label="Down">&#x25bc;</button>
+      <button data-send="\x1b[D" aria-label="Left">&#x25c0;</button>
+      <button data-send="\x1b[C" aria-label="Right">&#x25b6;</button>
+      <button data-send="\x03">Ctrl-C</button>
+      <button data-send="\x04">Ctrl-D</button>
+      <button data-send="\r">Enter</button>
+    </div>
+    <div class="row cmd" id="shell-cmds"></div>
+    <span id="shell-note" class="live"></span>
+  </section>
   <section id="mcu-info" hidden>
+    <div id="leds" hidden></div>
     <h2>Emulated hardware</h2>
-    <table>
-      <tr><th>Microcontroller</th><td>WCH CH32V003</td></tr>
-      <tr><th>CPU</th><td>QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter)</td></tr>
-      <tr><th>Clock</th><td>24 MHz internal oscillator, as the firmware sets it (the chip runs up to 48 MHz)</td></tr>
-      <tr><th>Flash</th><td>16 KB (16,384 bytes) at 0x0800 0000, also at 0</td></tr>
-      <tr><th>SRAM</th><td>2 KB (2,048 bytes) at 0x2000 0000</td></tr>
-      <tr><th>Peripherals</th><td>SysTick timer, PFIC interrupt controller, USART1 as the serial console (115200 baud), RCC clocks; other registers just hold values</td></tr>
-    </table>
+    <table id="mcu-hw"></table>
     <h2>Firmware and its resources</h2>
     <table>
       <tr id="mcu-flash-row"><th>Image</th><td id="mcu-flash"></td></tr>
       <tr id="mcu-ram-row"><th>RAM, static</th><td id="mcu-ram"></td></tr>
-      <tr><th>Stack, peak</th><td id="mcu-stack">…</td></tr>
+      <tr id="mcu-stack-row"><th>Stack, peak</th><td id="mcu-stack">…</td></tr>
       <tr><th>CPU load</th><td id="mcu-cpu">…</td></tr>
-      <tr><th>Timing</th><td>SysTick interrupt every 10 ms; the CPU sleeps (<code>wfi</code>) in between</td></tr>
+      <tr id="mcu-timing-row"><th>Timing</th><td id="mcu-timing"></td></tr>
     </table>
-    <span class="live">Stack and CPU load are measured live in the emulator, every second.</span>
+    <span class="live" id="mcu-live"></span>
   </section>
   <section id="web" hidden>
     <div class="bar">
@@ -135,11 +155,7 @@ code { color: var(--fg); }
   </section>
 </main>
 <footer>
-  <p id="mcu-about" hidden>
-    A WCH CH32V003 microcontroller (RISC-V RV32EC, 48 MHz class, 2 KB of RAM, 16 KB of flash) emulated by
-    v86's RISC-V core, running a bare-metal Tetris that draws over its serial port
-    (<a href="https://github.com/retrocpugeek/v86/tree/riscv-port/tools/ch32v003">firmware source</a>).
-  </p>
+  <p id="mcu-about" hidden></p>
   Buildroot Linux running on v86's RISC-V core (RV64GC or RV32GC, OpenSBI, QEMU <code>virt</code>-like machine), entirely in your browser.
   Log in as <code>root</code>. Disk changes stay in this tab.
   Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
@@ -182,7 +198,7 @@ code { color: var(--fg); }
     const relay = params.get("relay") || "fetch";
     const cors_proxy = params.has("relay") ? undefined : location.origin + "/proxy?url=";
 
-    if(build.arch === "ch32v003")
+    if(MCUS[build.arch])
     {
         start_mcu(build, base, status);
         return;
@@ -237,29 +253,75 @@ code { color: var(--fg); }
     throw e;
 });
 
-// A CH32V003 microcontroller (src/rv64/src/dev/ch32.rs) with build.bios as
-// its flash: no kernel or disk. The terminal is sized to build.cols x
-// build.rows, with the font scaled to fit the page's width.
+// The emulated microcontrollers (src/rv64/src/dev/ch32.rs): specs for the
+// page, the clock CPU load is measured against, what the firmware does.
+const SRC = "https://github.com/retrocpugeek/v86/tree/riscv-port/tools/";
+const MCUS = {
+    ch32v003: {
+        name: "CH32V003",
+        mhz: 24,
+        hw: [
+            ["Microcontroller", "WCH CH32V003"],
+            ["CPU", "QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter)"],
+            ["Clock", "24 MHz internal oscillator, as the firmware sets it (the chip runs up to 48 MHz)"],
+            ["Flash", "16 KB (16,384 bytes) at 0x0800 0000, also at 0"],
+            ["SRAM", "2 KB (2,048 bytes) at 0x2000 0000"],
+            ["Peripherals", "SysTick timer, PFIC interrupt controller, USART1 as the serial console (115200 baud), RCC clocks; other registers just hold values"],
+        ],
+        timing: "SysTick interrupt every 10 ms; the CPU sleeps (<code>wfi</code>) in between",
+        about: "A WCH CH32V003 microcontroller (RISC-V RV32EC, 48 MHz class, 2 KB of RAM, 16 KB of flash) emulated by " +
+            "v86's RISC-V core, running a bare-metal Tetris that draws over its serial port " +
+            `(<a href="${SRC}ch32v003">firmware source</a>).`,
+    },
+    ch32v307: {
+        name: "CH32V307",
+        mhz: 144,
+        hw: [
+            ["Microcontroller", "WCH CH32V307 (as on the CH32V307V-R1 board)"],
+            ["CPU", "QingKe V4F: RISC-V RV32IMAFC, machine mode (run by v86's interpreter), with QingKe's hardware register stacking (HPE) and vector table"],
+            ["Clock", "144 MHz from the 8 MHz crystal and PLL, as the firmware sets it"],
+            ["Flash", "256 KB at 0x0800 0000, also at 0 (the chip's 256 KB flash / 64 KB SRAM split)"],
+            ["SRAM", "64 KB at 0x2000 0000 (up to 128 KB with other splits)"],
+            ["Peripherals", "SysTick timer (with its software interrupt), PFIC interrupt controller, USART1 as the serial console (115200 baud, interrupt driven), RCC clocks and PLL, RTC (set from your clock, shown in UTC), GPIO output; other registers just hold values"],
+        ],
+        timing: "SysTick interrupt every 1 ms (RT-Thread's tick); thread switches by software interrupt; the idle thread sleeps (<code>wfi</code>)",
+        about: "A WCH CH32V307 microcontroller (RISC-V RV32IMAFC, 144 MHz) emulated by v86's RISC-V core, running " +
+            `<a href="https://github.com/RT-Thread/rt-thread">RT-Thread</a> with its <code>msh</code> shell on the serial port ` +
+            `(<a href="${SRC}ch32v307">build script</a>). Demos: <code>snake</code> (w/a/s/d or arrows, q quits; ` +
+            `<a href="https://github.com/mysterywolf/snake">source</a>, GPL-2.0), <code>aclock</code> (any key quits; ` +
+            `<a href="https://github.com/mysterywolf/aclock">source</a>), <code>core_mark</code> (takes about 15 s; ` +
+            `the score measures the emulator on your device, not a real chip; ` +
+            `<a href="https://github.com/wuhanstudio/coremark">source</a>) and <code>lua</code> (Lua 5.1, Ctrl-D quits; ` +
+            `<a href="https://github.com/liu2guang/Lua2RTT">source</a>).`,
+    },
+};
+
+// A microcontroller with build.bios as its flash: no kernel or disk. The
+// terminal is sized to build.cols x build.rows, with the font scaled to fit
+// the page's width.
 function start_mcu(build, base, status)
 {
+    const mcu = MCUS[build.arch];
     const cols = build.cols || 46, rows = build.rows || 25;
     const width = Math.min(document.documentElement.clientWidth - 32 - 8, 760);
     const font_size = Math.max(8, Math.min(18, Math.floor(width / (cols * 0.6))));
-    const GameTerminal = class extends window["Terminal"]
+    const SizedTerminal = class extends window["Terminal"]
     {
         constructor(options)
         {
             super(Object.assign({}, options, { cols, rows, fontSize: font_size }));
         }
     };
-    document.getElementById("mcu-about").hidden = false;
-    document.querySelector("h1").textContent = "v86 CH32V003";
-    document.title = "v86 CH32V003: " + build.label.replace(/^.*: /, "");
+    const about = document.getElementById("mcu-about");
+    about.innerHTML = mcu.about;
+    about.hidden = false;
+    document.querySelector("h1").textContent = "v86 " + mcu.name;
+    document.title = "v86 " + mcu.name + ": " + build.label.replace(/^.*: /, "");
     const emulator = window.emulator = new V86({
-        arch: "ch32v003",
+        arch: build.arch,
         wasm_path: "v86-rv64.wasm",
         bios: { url: base + build.bios },
-        serial_console: { type: "xtermjs", container: document.getElementById("terminal"), xterm_lib: GameTerminal },
+        serial_console: { type: "xtermjs", container: document.getElementById("terminal"), xterm_lib: SizedTerminal },
         autostart: true,
         disable_keyboard: true,
         disable_mouse: true,
@@ -271,19 +333,53 @@ function start_mcu(build, base, status)
     {
         setup_pad(emulator);
     }
-    show_mcu_info(emulator, build.stats);
+    else if(build.controls === "shell")
+    {
+        setup_shell_pad(emulator, build.commands || []);
+    }
+    show_mcu_info(emulator, mcu, build);
 }
 
-// The CH32V003's specs and the firmware's use of them: sizes from the build
-// (tools/ch32v003/build.sh), peak stack from the pattern the firmware fills
-// free RAM with at reset (the lowest changed word), and CPU load as
-// instructions per second against the 24 MHz clock (about one per cycle).
-function show_mcu_info(emulator, stats)
+// Keys a phone's keyboard lacks, and one-tap commands, for a serial shell.
+function setup_shell_pad(emulator, commands)
 {
+    const pad = document.getElementById("shell-pad");
+    pad.hidden = false;
+    const unescape = s => s.replace(/\\(x[0-9a-f]{2}|[trn])/g, (_, e) =>
+        e[0] === "x" ? String.fromCharCode(parseInt(e.slice(1), 16)) : { t: "\t", r: "\r", n: "\n" }[e]);
+    for(const button of pad.querySelectorAll("button[data-send]"))
+    {
+        const text = unescape(button.dataset.send);
+        button.addEventListener("click", () => emulator.serial0_send(text));
+    }
+    const cmds = document.getElementById("shell-cmds");
+    for(const c of commands)
+    {
+        const button = document.createElement("button");
+        button.textContent = c;
+        button.addEventListener("click", () => emulator.serial0_send(c + "\r"));
+        cmds.append(button);
+    }
+    document.getElementById("shell-note").textContent = "Tap the terminal to type; these send keys and commands.";
+}
+
+// The microcontroller's specs and the firmware's use of them: sizes from the
+// build, peak stack (if the firmware fills its free RAM with a pattern at
+// reset: the lowest changed word), CPU load as instructions per second
+// against the clock (about one per cycle), and LEDs from GPIO outputs.
+function show_mcu_info(emulator, mcu, build)
+{
+    const stats = build.stats;
     document.getElementById("mcu-info").hidden = false;
+    document.getElementById("mcu-hw").innerHTML = mcu.hw.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+    document.getElementById("mcu-timing").innerHTML = mcu.timing;
     const n = v => v.toLocaleString("en");
     const pct = (part, whole) => (100 * part / whole).toFixed(part / whole < 0.1 ? 1 : 0) + "%";
     const bar = (part, whole) => `<span class="bar"><i style="width: ${Math.min(100, 100 * part / whole).toFixed(1)}%"></i></span>`;
+    const has_stack = stats && stats.stack_bottom !== undefined;
+    document.getElementById("mcu-stack-row").hidden = !has_stack;
+    document.getElementById("mcu-live").textContent = (has_stack ? "Stack and CPU load are" : "CPU load is") +
+        " measured live in the emulator, every second.";
     if(stats)
     {
         document.getElementById("mcu-flash").innerHTML =
@@ -292,14 +388,27 @@ function show_mcu_info(emulator, stats)
         const ram = stats.data + stats.bss;
         document.getElementById("mcu-ram").innerHTML =
             `${n(ram)} bytes: ${pct(ram, stats.ram_size)} of SRAM (data ${n(stats.data)}, bss ${n(stats.bss)}); ` +
-            `${n(stats.stack_top - stats.stack_bottom)} bytes left for the stack` + bar(ram, stats.ram_size);
+            (has_stack ? `${n(stats.stack_top - stats.stack_bottom)} bytes left for the stack` : `the rest is the heap and thread stacks`) +
+            bar(ram, stats.ram_size);
     }
     else
     {
         document.getElementById("mcu-flash-row").hidden = true;
         document.getElementById("mcu-ram-row").hidden = true;
     }
-    const MHZ = 24;
+    const leds = build.leds || [];
+    if(leds.length)
+    {
+        const box = document.getElementById("leds");
+        box.hidden = false;
+        box.innerHTML = leds.map(l => `<span><span class="led"></span>${l.label} (P${"ABCDE"[l.port]}${l.pin})</span>`).join("");
+        const dots = box.querySelectorAll(".led");
+        emulator.add_listener("emulator-ready", () => setInterval(() =>
+        {
+            leds.forEach((l, i) => dots[i].classList.toggle("on", !!(emulator.get_gpio_out(l.port) >> l.pin & 1)));
+        }, 50));
+    }
+    const MHZ = mcu.mhz;
     let last_count = emulator.get_instruction_counter(), last_time = performance.now();
     setInterval(() =>
     {
@@ -309,7 +418,7 @@ function show_mcu_info(emulator, stats)
         last_time = time;
         document.getElementById("mcu-cpu").innerHTML =
             `${pct(ips, MHZ * 1e6)} busy: ${(ips / 1e6).toFixed(2)} million instructions per second of ${MHZ} MHz` + bar(ips, MHZ * 1e6);
-        if(stats)
+        if(has_stack)
         {
             const size = stats.stack_top - stats.stack_bottom;
             const ram = emulator.read_memory(stats.stack_bottom, size);

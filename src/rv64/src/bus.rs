@@ -317,6 +317,13 @@ impl Bus {
 
     pub fn has_rom(&self, pa: u64) -> bool { self.rom_offset(pa).is_some() }
 
+    /// A read of `size` bytes from the boot ROM or flash, if pa..pa+size is in it.
+    #[inline]
+    pub fn rom_read(&self, pa: u64, size: u32) -> Option<u64> {
+        let off = self.rom_offset(pa)?;
+        self.rom.get(off..off + size as usize).map(|b| read_le(b, size))
+    }
+
     fn rom_offset(&self, pa: u64) -> Option<usize> {
         let len = self.rom.len() as u64;
         let off = pa.wrapping_sub(self.rom_base);

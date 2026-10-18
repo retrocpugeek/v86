@@ -1,0 +1,11 @@
+--- a/lua2rtt.c
++++ b/lua2rtt.c
+@@ -347,7 +347,7 @@
+         rt_strncpy(handle.argv[1], argv[1], len);
+     }
+ 
+-    rt_uint8_t prio = rt_thread_self()->current_priority+1;
++    rt_uint8_t prio = RT_SCHED_PRIV(rt_thread_self()).current_priority+1;
+     handle.thread = rt_thread_create("lua", lua2rtt_run, RT_NULL, LUA2RTT_THREAD_STACK_SIZE, prio, 10);
+     if(handle.thread == RT_NULL)
+     {

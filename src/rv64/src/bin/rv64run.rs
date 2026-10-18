@@ -3,10 +3,10 @@
 //!   rv64run --bios fw_dynamic.bin --kernel Image --dtb virt.dtb [--disk rootfs]
 //!           [--mem 256] [--steps N] [--log-illegal] [--lockstep qemu-cpu.log] [--xlen 32]
 //!           [--disk-slot N]
-//!   rv64run --ch32v003 firmware.bin [--steps N]
+//!   rv64run (--ch32v003 | --ch32v307) firmware.bin [--steps N]
 //!
-//! --ch32v003 runs a WCH CH32V003 (dev/ch32.rs) instead, in real time, with
-//! USART1 on stdin/stdout.
+//! --ch32v003 and --ch32v307 run a WCH CH32V microcontroller (dev/ch32.rs)
+//! instead, in real time, with USART1 on stdin/stdout.
 //!
 //! Boots like `qemu-system-riscv64 -M virt -bios ... -kernel ...`. The serial
 //! console (16550) is on stdin/stdout; Ctrl-A x quits.
@@ -44,7 +44,7 @@ struct Args {
     /// virtio-mmio transport of the disk (QEMU's -device virtio-blk-device
     /// takes the last one, 7)
     disk_slot: u64,
-    ch32: Option<String>,
+    ch32: Option<(v86_rv64::dev::ch32::Chip, String)>,
 }
 
 fn usage() -> ! {
@@ -78,7 +78,8 @@ fn parse_args() -> Args {
             "--steps" => a.steps = val().parse().unwrap_or_else(|_| usage()),
             "--log-illegal" => a.log_illegal = true,
             "--lockstep" => a.lockstep = Some(val()),
-            "--ch32v003" => a.ch32 = Some(val()),
+            "--ch32v003" => a.ch32 = Some((v86_rv64::dev::ch32::Chip::V003, val())),
+            "--ch32v307" => a.ch32 = Some((v86_rv64::dev::ch32::Chip::V307, val())),
             "--disk-slot" => a.disk_slot = val().parse().ok().filter(|&n| n < 8).unwrap_or_else(|| usage()),
             "--xlen" => {
                 a.xlen32 = match val().as_str() {
@@ -120,12 +121,13 @@ fn read(path: &str) -> Vec<u8> { std::fs::read(path).unwrap_or_else(|e| panic!("
 
 fn main() {
     let args = parse_args();
-    if let Some(fw) = &args.ch32 {
+    if let Some((chip, fw)) = &args.ch32 {
         let out = |b: u8| {
             let _ = std::io::stdout().write_all(&[b]);
         };
-        let mut cpu = v86_rv64::dev::ch32::machine(&read(fw), Box::new(out)).unwrap_or_else(|e| {
-            eprintln!("ch32v003: {e}");
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let mut cpu = v86_rv64::dev::ch32::machine(*chip, &read(fw), Box::new(out), epoch).unwrap_or_else(|e| {
+            eprintln!("{chip:?}: {e}");
             exit(1)
         });
         cpu.realtime = true;

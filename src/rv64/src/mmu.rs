@@ -329,6 +329,10 @@ impl Cpu {
         if let Some(off) = self.bus.ram_offset(pa, size as u64) {
             return Ok(self.bus.read_ram(off, size));
         }
+        // ROM (the CH32V's flash holds constants too): no device to update
+        if let Some(v) = self.bus.rom_read(pa, size) {
+            return Ok(v);
+        }
         if !self.bus.has_device(pa) {
             return Err(access_fault(acc, va));
         }

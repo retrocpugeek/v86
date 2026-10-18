@@ -53,7 +53,7 @@ export function V86(options)
     this.cpu_is_running = false;
     this.cpu_exception_hook = function(n) {};
 
-    /** "x86" (default), "aarch64", "riscv64", "riscv32" or "ch32v003" */
+    /** "x86" (default), "aarch64", "riscv64", "riscv32", "ch32v003" or "ch32v307" */
     const arch = options.arch || "x86";
 
     const bus = Bus.create();
@@ -131,7 +131,7 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch === "ch32v003" ? "v86-rv64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch.startsWith("ch32v") ? "v86-rv64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
                 if(options.wasm_path)
@@ -1554,6 +1554,19 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
 
     this.remove_listener("screen-put-char", screen_put_char);
     return succeeded;
+};
+
+/**
+ * A microcontroller's GPIO port output register (port 0: A, 1: B, ...), for
+ * showing LEDs; 0 for other machines.
+ *
+ * @param {number} port
+ * @return {number}
+ */
+V86.prototype.get_gpio_out = function(port)
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_gpio_out ? cpu.ch32_gpio_out(port) : 0;
 };
 
 /**

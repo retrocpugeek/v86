@@ -33,14 +33,17 @@ JIT). pc-relative results, jump targets and load/store addresses are 32
 bits, CSRs read sign-extended (with the `h` halves of 64-bit ones), and
 paging is Sv32. The C extension has RV32C's C.JAL, C.FLW etc. (`rvc::expand32`).
 
-## CH32V003
+## CH32V microcontrollers
 
-`dev/ch32.rs` makes a WCH CH32V003 microcontroller out of the RV32 core:
-flash at 0x0800_0000 (and 0) as ROM, 2 KB of SRAM, SysTick and the PFIC
-(interrupts in machine mode), USART1 as the console, RCC. `rv64run
---ch32v003 flash.bin` runs one natively in real time; in the browser it's
-`arch: "ch32v003"` with `bios` as the flash image. `tools/ch32v003` has a
-Tetris for it.
+`dev/ch32.rs` makes WCH CH32V microcontrollers out of the RV32 core: flash
+at 0x0800_0000 (and 0) as ROM, SRAM at 0x2000_0000, SysTick and the PFIC
+(interrupts in machine mode, priorities, SysTick's software interrupt),
+USART1 as the console, RCC, GPIO outputs; in cpu.rs, QingKe's hardware
+register stacking (HPE) and vector table. Two chips: the CH32V003 (16 KB
+flash, 2 KB SRAM; `tools/ch32v003` has a Tetris for it) and the CH32V307
+(256 KB, 128 KB; `tools/ch32v307` builds RT-Thread). `rv64run --ch32v003
+flash.bin` (or `--ch32v307`) runs one natively in real time; in the browser
+it's `arch: "ch32v003"` or `"ch32v307"` with `bios` as the flash image.
 
 ## Running
 

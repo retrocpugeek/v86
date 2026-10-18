@@ -1,0 +1,63 @@
+--- a/snake.c
++++ b/snake.c
+@@ -24,10 +24,9 @@
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ #include <string.h>
++#include <stdlib.h> /* v86: rand, srand */
+ #include <unistd.h> /* for seeding randomness */
+ #include <sys/time.h>
+-#include <termios.h> /* for unbuffered input */
+-#include <fcntl.h>
+ #include <rtthread.h> /* for rt_thread_delay */
+ #include <shell.h> /* for finsh_getchar */
+ 
+@@ -113,30 +112,7 @@
+ static int bonus[2]; /* (x, y) of current bonus position */
+ static int timer;
+ 
+-static char getch(void) {
+-    static struct termios old, new;
+-
+-    /* get old settings */
+-    tcgetattr(0, &old);
+-    new = old;
+-
+-    /* disable buffered i/o and echo */
+-    new.c_lflag &= ~ICANON;
+-    new.c_lflag &= ~ECHO;
+-
+-    /* set new terminal settings */
+-    tcsetattr(0, TCSANOW, &new);
+-
+-    /* get char and reset terminal settings */
+-    char ch = finsh_getchar();
+-    tcsetattr(0, TCSANOW, &old);
+-
+-//    /* if ctrl-c was pressed, exit */
+-//    if(ch == 3)
+-//        exit(2);
+-
+-    return ch;
+-} /* getch_() */
++static char getch(void) { return finsh_getchar(); } /* v86: the console is unbuffered already */
+ 
+ static int snake_rand(int min, int max) {
+     /* generate x, where min <= x <= max */
+@@ -196,13 +172,9 @@
+ } /* snake_init() */
+ 
+ static void snake_input(void) {
+-    /* get non-blocking input */
+-    int old = fcntl(0, F_GETFL);
+-    fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+-
+-    int ch = getch();
+-
+-    fcntl(0, F_SETFL, old);
++    /* get non-blocking input (v86: straight from the console device) */
++    char c;
++    int ch = rt_device_read(rt_console_get_device(), -1, &c, 1) == 1 ? c : -1;
+ 
+     /* 'normal' input switch */
+     int weird = RT_FALSE;

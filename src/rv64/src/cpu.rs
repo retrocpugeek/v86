@@ -138,7 +138,18 @@ pub struct Cpu {
     /// RV32 (XLEN 32): registers hold sign-extended 32-bit values, pc and
     /// addresses are 32 bits, Sv32 paging (see exec32).
     pub xlen32: bool,
+    /// CH32V (QingKe) hardware prologue/epilogue: per trap taken, the
+    /// caller-saved registers HPE pushed (interrupts with INTSYSCR.HWSTKEN),
+    /// which its mret restores.
+    hpe_stack: Vec<Option<[u64; 16]>>,
 }
+
+/// The registers QingKe's HPE saves: ra, t0-t2, a0-a7, t3-t6.
+const HPE_REGS: [usize; 16] = [1, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 28, 29, 30, 31];
+const INTSYSCR_HWSTKEN: u64 = 1 << 0;
+/// Interrupts off, and the next mret doesn't restore the HPE frame (RTOS
+/// context switches set it)
+const INTSYSCR_GIHWSTKNEN: u64 = 1 << 5;
 
 const ICACHE_ENTRIES: usize = 1 << 14;
 
@@ -189,6 +200,7 @@ impl Cpu {
             jit_hops: 0,
             block_start: true,
             xlen32: false,
+            hpe_stack: Vec::new(),
         }
     }
 
@@ -241,6 +253,10 @@ impl Cpu {
 
     /// Copy the CLINT's and PLIC's lines into mip (after device accesses).
     pub fn update_mip(&mut self) {
+        if let Some(c) = &self.bus.ch32 {
+            // Console input may have arrived
+            c.invalidate();
+        }
         let mut mip = self.csr.mip & !(MIP_MSIP | MIP_MEIP);
         if self.bus.clint.msip {
             mip |= MIP_MSIP;
@@ -268,8 +284,9 @@ impl Cpu {
     #[inline]
     pub fn pending_interrupt(&self) -> Option<u64> {
         if let Some(c) = &self.bus.ch32 {
-            // CH32V003: the PFIC's interrupts, in machine mode
-            return if self.csr.mstatus & MSTATUS_MIE != 0 { c.pending_irq().map(|n| n as u64) } else { None };
+            // CH32V: the PFIC's interrupts, in machine mode
+            let on = self.csr.mstatus & MSTATUS_MIE != 0 && self.csr.intsyscr & INTSYSCR_GIHWSTKNEN == 0;
+            return if on { c.pending_irq().map(|n| n as u64) } else { None };
         }
         let pending = self.csr.mip & self.csr.mie;
         if pending == 0 {
@@ -319,11 +336,51 @@ impl Cpu {
             self.prv = PRV_M;
             let base = self.csr.mtvec & !3;
             self.pc = if interrupt && self.csr.mtvec & 1 != 0 { base + 4 * cause } else { base };
+            if self.bus.ch32.is_some() {
+                self.ch32_trap(cause, interrupt);
+            }
         }
         self.stop_batch = true;
     }
 
+    /// CH32V (QingKe) traps: HPE saves the caller-saved registers of
+    /// interrupts, and in vector table mode (mtvec bit 0) exceptions have
+    /// table entries too (ecall from M: 5, from U: 8, breakpoint: 9, the rest
+    /// HardFault: 3); with mtvec bit 1 the table holds handler addresses,
+    /// else instructions to jump to.
+    fn ch32_trap(&mut self, cause: u64, interrupt: bool) {
+        let frame = (interrupt && self.csr.intsyscr & INTSYSCR_HWSTKEN != 0).then(|| HPE_REGS.map(|r| self.x[r]));
+        self.hpe_stack.push(frame);
+        let mtvec = self.csr.mtvec;
+        if mtvec & 1 == 0 {
+            return;
+        }
+        let entry = if interrupt {
+            cause
+        } else {
+            match cause {
+                cause::ECALL_M => 5,
+                cause::ECALL_U => 8,
+                cause::BREAKPOINT => 9,
+                _ => 3,
+            }
+        };
+        let addr = (mtvec & !3) + 4 * entry;
+        self.pc = if mtvec & 2 != 0 { self.bus.read(addr, 4) & !1 } else { addr };
+    }
+
     pub fn mret(&mut self) {
+        if self.bus.ch32.is_some() {
+            // HPE: restore what the trap saved, unless GIHWSTKNEN says not to
+            let frame = self.hpe_stack.pop().flatten();
+            if self.csr.intsyscr & INTSYSCR_GIHWSTKNEN != 0 {
+                self.csr.intsyscr &= !INTSYSCR_GIHWSTKNEN;
+            } else if let Some(regs) = frame {
+                for (k, &r) in HPE_REGS.iter().enumerate() {
+                    self.x[r] = regs[k];
+                }
+            }
+        }
         let s = self.csr.mstatus;
         let mpp = (s & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT;
         let mut s = (s & !MSTATUS_MIE) | if s & MSTATUS_MPIE != 0 { MSTATUS_MIE } else { 0 };
