@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v86 ports: ARM64 and RISC-V</title>
+<meta name="description" content="A fork of v86 that adds AArch64 and RISC-V machines: boot Linux in your browser.">
+<link rel="icon" href="riscv.svg" type="image/svg+xml">
+<style>
+:root {
+    color-scheme: dark;
+    --bg: #0f1216;
+    --panel: #171b22;
+    --line: #2a313d;
+    --fg: #e3e7ee;
+    --muted: #97a1b0;
+    --accent: #6cc8ff;
+    --arm: #38c6d6;
+    --riscv: #f2c94c;
+    --x86: #aab3c2;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); }
+code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; background: #222834; padding: 1px 5px; border-radius: 4px; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+
+header { padding: 56px 0 32px; border-bottom: 1px solid var(--line);
+    background: radial-gradient(1000px 300px at 20% -20%, rgba(56, 198, 214, 0.18), transparent),
+                radial-gradient(900px 300px at 90% -10%, rgba(242, 201, 76, 0.14), transparent); }
+.kicker { color: var(--muted); font-size: 14px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 8px; }
+h1 { font-size: clamp(30px, 6vw, 48px); line-height: 1.1; margin: 0 0 16px; }
+.lead { font-size: clamp(17px, 2.4vw, 20px); color: #c9d0db; max-width: 760px; margin: 0; }
+
+section { padding: 40px 0; border-bottom: 1px solid var(--line); }
+h2 { font-size: 24px; margin: 0 0 16px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px;
+    display: flex; flex-direction: column; gap: 12px; }
+.card img { width: 140px; height: 140px; align-self: center; }
+.card h3 { margin: 0; font-size: 21px; }
+.card p { margin: 0; color: #c9d0db; }
+.card ul { margin: 0; padding-left: 20px; color: #c9d0db; font-size: 15px; }
+.card .go { margin-top: auto; display: inline-block; text-align: center; padding: 10px 16px; border-radius: 10px;
+    font-weight: 600; text-decoration: none; color: #0f1216; }
+.arm { border-top: 3px solid var(--arm); }
+.arm .go { background: var(--arm); }
+.riscv { border-top: 3px solid var(--riscv); }
+.riscv .go { background: var(--riscv); }
+.x86 { border-top: 3px solid var(--x86); }
+.x86 .go { background: var(--x86); }
+.tag { font-size: 13px; color: var(--muted); }
+
+.claude { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.claude p { margin: 0; color: #c9d0db; max-width: 820px; }
+.note { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; padding: 16px 18px; }
+
+.links { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; padding: 0; margin: 0; list-style: none; }
+.links li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.links a { font-weight: 600; }
+.links span { display: block; color: var(--muted); font-size: 14px; }
+
+footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
+</style>
+
+<header>
+  <div class="wrap">
+    <p class="kicker">A fork of v86</p>
+    <h1>Linux on ARM64 and RISC-V,<br>in your browser</h1>
+    <p class="lead">
+      <a href="https://github.com/copy/v86">v86</a> emulates an x86 PC in WebAssembly.
+      This fork adds two more machines to it: a 64-bit ARM (AArch64) computer and a RISC-V
+      computer (64- and 32-bit), each booting real Linux images built with Buildroot, with a
+      serial console, a virtual disk and networking, entirely client-side.
+    </p>
+  </div>
+</header>
+
+<main>
+  <section>
+    <div class="wrap">
+      <h2>Pick a machine</h2>
+      <div class="cards">
+        <article class="card arm">
+          <img src="arm64.svg" alt="Illustration of an AArch64 processor chip">
+          <h3>ARM64 (AArch64)</h3>
+          <p>An ARMv8-A CPU with a QEMU <code>virt</code>-like machine: GIC interrupt controller, PL011 UART, virtio disk, network and input devices, and a framebuffer.</p>
+          <ul>
+            <li>Buildroot Linux (ext4 and squashfs)</li>
+            <li>OpenWrt 24.10 with the LuCI web interface</li>
+            <li>U-Boot booting Linux from the disk</li>
+            <li>X11 desktop: openbox, xterm, on-screen keyboard</li>
+            <li>JIT: hot code compiled to WebAssembly</li>
+          </ul>
+          <a class="go" href="https://v86-arm.turret13.workers.dev/">Boot ARM64 Linux</a>
+        </article>
+
+        <article class="card riscv">
+          <img src="riscv.svg" alt="Illustration of a RISC-V processor chip">
+          <h3>RISC-V (RV64GC and RV32GC)</h3>
+          <p>A RISC-V hart with machine, supervisor and user modes, Sv39 and Sv32 paging, CLINT, PLIC, 16550 UART and virtio devices, started by OpenSBI.</p>
+          <ul>
+            <li>Buildroot Linux, riscv64 and riscv32</li>
+            <li>Passes the riscv-tests ISA suites (rv64 and rv32)</li>
+            <li>Checked instruction by instruction against QEMU</li>
+            <li>JIT: hot code compiled to WebAssembly</li>
+          </ul>
+          <a class="go" href="https://v86-riscv.turret13.workers.dev/">Boot RISC-V Linux</a>
+        </article>
+
+        <article class="card x86">
+          <img src="x86.svg" alt="Illustration of an x86 processor chip">
+          <h3>x86 (the original)</h3>
+          <p>The original v86 by its upstream authors: a 32-bit x86 PC that runs Linux, Windows, BSDs, DOS and more, with its own JIT. This fork doesn't change it.</p>
+          <ul>
+            <li>Many ready-made operating systems</li>
+            <li>VGA graphics, sound, networking</li>
+          </ul>
+          <a class="go" href="https://copy.sh/v86/">Open copy.sh/v86</a>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap claude">
+      <h2>Built with Claude</h2>
+      <div class="note">
+        <p>
+          The ARM64 and RISC-V ports were done entirely using <strong>Claude Opus 5.5</strong>, Anthropic's
+          model, working in <a href="https://claude.com/claude-code">Claude Code</a>: the CPU cores and their
+          JIT compilers (in Rust, compiled to WebAssembly), the device models, the test harnesses that run
+          the cores in lockstep with QEMU, the scripts that build the OpenWrt, U-Boot and X11 images, and these sites.
+        </p>
+      </div>
+      <p>
+        The original v86 and its x86 emulation are the work of the upstream project's authors.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Links</h2>
+      <ul class="links">
+        <li><a href="https://github.com/retrocpugeek/v86/tree/ports">The fork: ports branch</a><span>ARM64 port, shared plumbing, the ARM site</span></li>
+        <li><a href="https://github.com/retrocpugeek/v86/tree/riscv-port">The fork: riscv-port branch</a><span>RISC-V port and the RISC-V site</span></li>
+        <li><a href="https://github.com/copy/v86">copy/v86 on GitHub</a><span>The upstream project</span></li>
+        <li><a href="https://copy.sh/v86/">copy.sh/v86</a><span>The original x86 emulator site</span></li>
+        <li><a href="https://buildroot.org/">Buildroot</a><span>Builds the Linux kernels and root filesystems the machines boot</span></li>
+        <li><a href="https://buildroot.org/downloads/manual/manual.html">Buildroot manual</a><span>The images start from <code>qemu_aarch64_virt</code>, <code>qemu_riscv64_virt</code> and <code>qemu_riscv32_virt</code> defconfigs</span></li>
+        <li><a href="https://github.com/buildroot/buildroot">Buildroot on GitHub</a><span>Source mirror</span></li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    The emulators run entirely in your browser; disk changes stay in your tab. Guest networking goes
+    through each site's HTTP proxy (plain HTTP only). Arm is a trademark of Arm Limited; RISC-V is a
+    trademark of RISC-V International. This fork is not affiliated with either, or with the upstream v86 project.
+  </div>
+</footer>
