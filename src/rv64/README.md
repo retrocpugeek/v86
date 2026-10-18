@@ -3,7 +3,8 @@
 An RV64GC system emulator core (RV64IMAFDC, Zicsr, Zifencei; machine,
 supervisor and user mode; Sv39), modelled on QEMU's riscv64 `virt` machine.
 It boots OpenSBI (`fw_dynamic`) and Linux from a Buildroot
-`qemu_riscv64_virt_defconfig` image. Like `src/a64`, it's a standalone crate:
+`qemu_riscv64_virt_defconfig` image. It also runs as RV32GC (Sv32), QEMU's
+riscv32 `virt`, for `qemu_riscv32_virt_defconfig` images: `Cpu::xlen32`. Like `src/a64`, it's a standalone crate:
 a native runner, and the browser build (`v86-rv64.wasm`) that v86 runs as
 `arch: "riscv64"` (`src/rv64_cpu.js`).
 
@@ -23,6 +24,15 @@ a native runner, and the browser build (`v86-rv64.wasm`) that v86 runs as
 | `jit.rs` | Browser build: compiles hot pages of S/U-mode code to WebAssembly (see its module comment) |
 | `wasm.rs` | Browser build exports; virtio devices are v86's (JS), reached through MMIO imports |
 
+## RV32
+
+With `xlen32`, registers hold their 32-bit values sign-extended to 64 bits,
+which most RV64 instructions preserve; ADD, ADDI, the shifts, MUL and the
+divisions run as their RV64 W forms (`Cpu::exec32`, and likewise in the
+JIT). pc-relative results, jump targets and load/store addresses are 32
+bits, CSRs read sign-extended (with the `h` halves of 64-bit ones), and
+paging is Sv32. The C extension has RV32C's C.JAL, C.FLW etc. (`rvc::expand32`).
+
 ## Running
 
 ```sh
@@ -31,7 +41,7 @@ dtc -I dts -O dtb -o virt.dtb ../../tools/rv64-ref/virt.dts
 target/release/rv64run --bios fw_dynamic.bin --kernel Image --dtb virt.dtb --disk rootfs.squashfs
 ```
 
-The console (16550) is on stdin/stdout; Ctrl-A x quits. `RV64_UART_TRACE=1`
+For RV32, add `--xlen 32` and use `tools/rv64-ref/virt32.dts`. The console (16550) is on stdin/stdout; Ctrl-A x quits. `RV64_UART_TRACE=1`
 logs console input as the guest receives it.
 
 ## Tests
@@ -39,10 +49,12 @@ logs console input as the guest receives it.
 `target/release/rvtest <elf>...` runs riscv-tests ISA tests
 (github.com/riscv-software-src/riscv-tests, `isa/`): each test starts in M mode
 and reports through `tohost`. All of rv64ui, um, ua, uc, uf, ud, mi and si
-pass, in both the -p (physical) and -v (virtual memory) environments.
+pass, in both the -p (physical) and -v (virtual memory) environments, and the
+same for rv32 (ELF32 tests run as RV32).
 
 `tools/rv64-ref/lockstep.sh fw_dynamic.bin Image [max-insns]` runs the core
-in lockstep with `qemu-system-riscv64` (Ubuntu: `qemu-system-riscv`), comparing
+in lockstep with `qemu-system-riscv64` (`XLEN=32`: `qemu-system-riscv32`;
+Ubuntu: `qemu-system-riscv`), comparing
 pc, the general registers and the trap CSRs before every instruction. QEMU's
 CPU is configured with the same extensions; where the two legitimately differ
 (debug triggers, RV32 user mode, device and timer reads), lockstep adopts
@@ -57,7 +69,7 @@ RV64_BIOS=fw_dynamic.bin RV64_KERNEL=Image RV64_ROOTFS=rootfs.squashfs tests/rv6
 
 ```js
 new V86({
-    arch: "riscv64",
+    arch: "riscv64",                         // or "riscv32"
     wasm_path: "v86-rv64.wasm",
     bios: { url: "fw_dynamic.bin" },          // OpenSBI
     kernel: { url: "Image" },

@@ -80,7 +80,7 @@ code { color: var(--fg); }
   </section>
 </main>
 <footer>
-  Buildroot riscv64 Linux running on v86's RISC-V core (RV64GC, OpenSBI, QEMU <code>virt</code>-like machine), entirely in your browser.
+  Buildroot Linux running on v86's RISC-V core (RV64GC or RV32GC, OpenSBI, QEMU <code>virt</code>-like machine), entirely in your browser.
   Log in as <code>root</code>. Disk changes stay in this tab.
   Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
   isn't supported (<code>?relay=wisps://…</code> selects a full network relay).
@@ -126,7 +126,8 @@ code { color: var(--fg); }
     const kernel = await fetch_kernel(base + build.kernel, status);
 
     const emulator = window.emulator = new V86({
-        arch: "riscv64",
+        // riscv64, or riscv32 for an RV32 image (add-image.sh ARCH=riscv32)
+        arch: build.arch || "riscv64",
         wasm_path: "v86-rv64.wasm",
         // ?jit=0 turns off the JIT (compiled blocks; src/rv64/src/jit.rs)
         rv64_jit: params.get("jit") !== "0",
@@ -234,7 +235,7 @@ function setup_console_log(emulator, build)
             .replace(/\r+\n/g, "\n")
             .replace(/[^\n]*\r/g, "");  // overwritten parts of lines
         return [
-            "v86 riscv64 console log",
+            "v86 " + (build.arch || "riscv64") + " console log",
             "image: " + build.id + " (" + build.label + ")",
             "page: " + location.href,
             "browser: " + navigator.userAgent,

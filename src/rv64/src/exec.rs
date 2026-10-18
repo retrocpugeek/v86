@@ -18,11 +18,77 @@ impl Cpu {
     #[inline(always)]
     pub fn rx(&self, r: u32) -> u64 { self.x[r as usize] }
 
-    /// Execute `raw` (len 2: compressed), whose pc is insn_pc; self.pc is
-    /// already the next instruction's.
     /// Execute instruction `i` (compressed ones already expanded; `raw` is the
-    /// encoding as fetched, for illegal-instruction tval).
+    /// encoding as fetched, for illegal-instruction tval), whose pc is
+    /// insn_pc; self.pc is already the next instruction's.
+    #[inline(always)]
     pub fn exec(&mut self, i: u32, raw: u32) -> Res<()> {
+        if self.xlen32 {
+            self.exec32(i, raw)
+        } else {
+            self.exec64(i, raw)
+        }
+    }
+
+    /// RV32: registers hold their 32-bit values sign-extended to 64 bits,
+    /// which most RV64 instructions keep that way. Those that don't have
+    /// RV64 equivalents that do: ADD is ADDW, SLL is SLLW, DIVU is DIVUW,
+    /// etc. The rest is handled here: 64-bit only instructions are illegal,
+    /// pc-relative results and jump targets are 32 bits, and so are the
+    /// addresses of loads and stores (load(), store() and amo_addr()).
+    fn exec32(&mut self, i: u32, raw: u32) -> Res<()> {
+        let ill = || illegal(raw);
+        let rd = i >> 7 & 31;
+        let f3 = i >> 12 & 7;
+        let rs1 = i >> 15 & 31;
+        let rs2 = i >> 20 & 31;
+        let f7 = i >> 25;
+        let pc = self.insn_pc;
+        let w = |op: u32| i & !0x7f | op;
+        match i & 0x7f {
+            0x17 => self.wx(rd, sx32(pc.wrapping_add((i & 0xffff_f000) as i32 as i64 as u64))), // AUIPC
+            0x6f | 0x67 => {
+                // JAL, JALR: the link is sign-extended, the target 32 bits
+                let link = sx32(self.pc);
+                self.exec64(i, raw)?;
+                self.pc &= 0xffff_ffff;
+                self.wx(rd, link);
+            }
+            0x63 => {
+                self.exec64(i, raw)?;
+                self.pc &= 0xffff_ffff;
+            }
+            0x03 if f3 == 3 || f3 == 6 => return Err(ill()), // LD, LWU
+            0x23 if f3 == 3 => return Err(ill()),             // SD
+            0x13 if matches!(f3, 0 | 1 | 5) => return self.exec64(w(0x1b), raw), // ADDI, shifts: as ADDIW etc.
+            0x33 => match (f7, f3) {
+                (0, 0) | (0x20, 0) | (0, 1) | (0, 5) | (0x20, 5) | (1, 0) | (1, 4..=7) => return self.exec64(w(0x3b), raw),
+                (1, 1..=3) => {
+                    // MULH, MULHSU, MULHU
+                    let (a, b) = (self.rx(rs1), self.rx(rs2));
+                    let (sa, ua) = (a as i32 as i64, a as u32 as i64);
+                    let (sb, ub) = (b as i32 as i64, b as u32 as i64);
+                    let p = match f3 {
+                        1 => sa * sb,
+                        2 => sa * ub,
+                        _ => ua * ub,
+                    };
+                    self.wx(rd, sx32((p >> 32) as u64));
+                }
+                _ => return self.exec64(i, raw),
+            },
+            0x1b | 0x3b => return Err(ill()),
+            0x2f if f3 != 2 => return Err(ill()), // AMOs: .W only
+            // FMV.X.D, FMV.D.X, FCVT to and from L and LU
+            0x53 if (f7 == 0x71 && f3 == 0) || f7 == 0x79 => return Err(ill()),
+            0x53 if matches!(f7, 0x60 | 0x61 | 0x68 | 0x69) && rs2 >= 2 => return Err(ill()),
+            _ => return self.exec64(i, raw),
+        }
+        Ok(())
+    }
+
+    /// exec() for RV64.
+    fn exec64(&mut self, i: u32, raw: u32) -> Res<()> {
         let ill = || illegal(raw);
         let rd = i >> 7 & 31;
         let f3 = i >> 12 & 7;
@@ -295,7 +361,7 @@ impl Cpu {
                         return Err(illegal(raw));
                     }
                     if rs1 != 0 {
-                        let va = self.rx(rs1);
+                        let va = self.xva(self.rx(rs1));
                         self.tlb.flush_va(va);
                     } else {
                         self.tlb.flush();

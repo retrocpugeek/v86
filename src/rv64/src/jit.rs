@@ -335,7 +335,7 @@ impl Cpu {
         let Some(compile) = self.jit.compile else { return set(self, NEVER) };
         let mut code = [0u8; 0x1000];
         code.copy_from_slice(&self.bus.ram[page << 12..(page + 1) << 12]);
-        if slot_insn(&code, slot).is_none() {
+        if slot_insn(&code, slot, self.xlen32).is_none() {
             return set(self, NEVER);
         }
         let (code_pages, ptrs) = self.jit_tables();
@@ -349,7 +349,7 @@ impl Cpu {
                 s == slot || is_installed(j) || (j != NEVER && j != 0 && j >= threshold / 2)
             })
             .collect();
-        let blocks = build_region(&code, &entries);
+        let blocks = build_region(&code, &entries, self.xlen32);
         let Some(index) = self.jit.free.pop().or_else(|| {
             (self.jit.next_func < MAX_FUNCS).then(|| {
                 self.jit.next_func += 1;
@@ -362,6 +362,7 @@ impl Cpu {
             ram_addr: self.bus.ram.as_ptr() as u32,
             tlb_addr: self.tlb.entries_addr() as u32,
             prv: self.prv,
+            xlen32: self.xlen32,
             ptrs_addr: ptrs as u32,
             code_pages_addr: code_pages as u32,
             table_base: self.jit.table_base,
@@ -480,17 +481,37 @@ pub struct Insn {
 }
 
 /// The instruction at `slot` of a page, if it can be compiled.
-pub fn slot_insn(code: &[u8; 0x1000], slot: usize) -> Option<Insn> {
+pub fn slot_insn(code: &[u8; 0x1000], slot: usize, xlen32: bool) -> Option<Insn> {
     let b = 2 * slot;
     let lo = u16::from_le_bytes([code[b], code[b + 1]]) as u32;
     let (i, len) = if lo & 3 != 3 {
-        (rvc::expand(lo)?, 2)
+        (rvc::expand_xlen(lo, xlen32)?, 2)
     } else if b + 4 <= 0x1000 {
         (lo | (u16::from_le_bytes([code[b + 2], code[b + 3]]) as u32) << 16, 4)
     } else {
         return None;
     };
-    compilable(i).then_some(Insn { slot, i, len })
+    Some(Insn { slot, i: jit_form(i, xlen32)?, len })
+}
+
+/// The form an instruction is compiled as, if it can be: for RV32 (see
+/// Cpu::exec32), ADDI, ADD, the shifts, MUL and the divisions become their
+/// RV64 W forms; 64-bit only instructions can't be compiled.
+pub fn jit_form(i: u32, xlen32: bool) -> Option<u32> {
+    if !xlen32 {
+        return compilable(i).then_some(i);
+    }
+    let f3 = i >> 12 & 7;
+    let f7 = i >> 25;
+    let w = |op: u32| i & !0x7f | op;
+    match i & 0x7f {
+        0x1b | 0x3b => None,
+        0x03 if f3 == 3 || f3 == 6 => None,
+        0x23 if f3 == 3 => None,
+        0x13 if matches!(f3, 0 | 1 | 5) => compilable(w(0x1b)).then(|| w(0x1b)),
+        0x33 if matches!((f7, f3), (0, 0) | (0x20, 0) | (0, 1) | (0, 5) | (0x20, 5) | (1, 0) | (1, 4..=7)) => Some(w(0x3b)),
+        _ => compilable(i).then_some(i),
+    }
 }
 
 /// Can the (32-bit form of the) instruction be compiled? The same encodings
@@ -561,7 +582,7 @@ pub struct RBlock {
 }
 
 /// The basic blocks reachable within the page (`code`) from `entries`.
-pub fn build_region(code: &[u8; 0x1000], entries: &[usize]) -> Vec<RBlock> {
+pub fn build_region(code: &[u8; 0x1000], entries: &[usize], xlen32: bool) -> Vec<RBlock> {
     let mut leader = vec![false; PAGE_SLOTS];
     let mut work: Vec<usize> = Vec::new();
     let add = |s: usize, leader: &mut [bool], work: &mut Vec<usize>| {
@@ -576,7 +597,7 @@ pub fn build_region(code: &[u8; 0x1000], entries: &[usize]) -> Vec<RBlock> {
     while let Some(s) = work.pop() {
         let mut k = s;
         while k < PAGE_SLOTS {
-            let Some(ins) = slot_insn(code, k) else { break };
+            let Some(ins) = slot_insn(code, k, xlen32) else { break };
             let next = k + ins.len as usize / 2;
             if ends_block(ins.i) {
                 if let Some(t) = branch_slot(&ins) {
@@ -599,7 +620,7 @@ pub fn build_region(code: &[u8; 0x1000], entries: &[usize]) -> Vec<RBlock> {
         let mut ops = Vec::new();
         let mut k = s;
         while k < PAGE_SLOTS && (k == s || !leader[k]) {
-            let Some(ins) = slot_insn(code, k) else { break };
+            let Some(ins) = slot_insn(code, k, xlen32) else { break };
             ops.push(ins);
             k += ins.len as usize / 2;
             if ends_block(ins.i) {
@@ -825,6 +846,8 @@ pub struct Target {
     pub tlb_addr: u32,
     /// Privilege mode (S or U) the code runs in; checked on entry.
     pub prv: u64,
+    /// RV32 (Cpu::xlen32, fixed for a machine).
+    pub xlen32: bool,
     /// Address of Jit::ptrs, and the function table index of region 0 (to
     /// call other regions).
     pub ptrs_addr: u32,
@@ -949,6 +972,7 @@ impl Gen<'_> {
             self.a.get(PAGE);
             self.a.i64c(target);
             self.a.op(I64_ADD);
+            self.mask32();
             self.a.set(T);
             self.chain(count);
         }
@@ -1206,6 +1230,22 @@ impl Gen<'_> {
         self.end();
     }
 
+    /// RV32: truncate the address on the stack to 32 bits.
+    fn mask32(&mut self) {
+        if self.t.xlen32 {
+            self.a.i64c(0xffff_ffff);
+            self.a.op(I64_AND);
+        }
+    }
+
+    /// RV32: sign-extend the value on the stack from 32 bits (as registers
+    /// hold values).
+    fn sext32(&mut self) {
+        if self.t.xlen32 {
+            self.a.op(I64_EXTEND32_S);
+        }
+    }
+
     /// x[rd] = the value on the stack.
     fn set_rd(&mut self, rd: u8) {
         self.a.set(R);
@@ -1360,12 +1400,14 @@ impl Gen<'_> {
                 self.pc_k(k);
                 self.a.i64c(imm_u(i));
                 self.a.op(I64_ADD);
+                self.sext32();
                 self.set_rd(rd);
             }
             0x6f => {
                 // JAL
                 if rd != 0 {
                     self.pc_k(k + 1);
+                    self.sext32();
                     self.set_rd(rd);
                 }
                 let target = self.off_k(k).wrapping_add(imm_j(i));
@@ -1377,11 +1419,12 @@ impl Gen<'_> {
                 self.x(rs1);
                 self.a.i64c(imm_i(i));
                 self.a.op(I64_ADD);
-                self.a.i64c(!1);
+                self.a.i64c(if self.t.xlen32 { 0xffff_fffe } else { !1 });
                 self.a.op(I64_AND);
                 self.a.set(T);
                 if rd != 0 {
                     self.pc_k(k + 1);
+                    self.sext32();
                     self.set_rd(rd);
                 }
                 self.goto_t(k + 1);
@@ -1401,6 +1444,7 @@ impl Gen<'_> {
                 self.x(rs1);
                 self.a.i64c(imm_i(i));
                 self.a.op(I64_ADD);
+                self.mask32();
                 self.a.set(T);
                 self.a.i32c(0);
                 self.a.set(F32);
@@ -1418,6 +1462,7 @@ impl Gen<'_> {
                 self.x(rs1);
                 self.a.i64c(imm_s(i));
                 self.a.op(I64_ADD);
+                self.mask32();
                 self.a.set(T);
                 self.x(rs2);
                 self.a.set(B);
@@ -1493,6 +1538,21 @@ impl Gen<'_> {
                             self.a.get(A);
                             self.a.get(B);
                             self.a.op(I64_MUL);
+                        }
+                        1..=3 if self.t.xlen32 => {
+                            // RV32: the high half of the 64-bit product of
+                            // the (sign- or zero-extended) operands
+                            for (l, signed) in [(A, true), (B, f3 != 3 && f3 != 2)] {
+                                self.a.get(l);
+                                if !signed || (l == A && f3 == 3) {
+                                    self.a.i64c(0xffff_ffff);
+                                    self.a.op(I64_AND);
+                                }
+                            }
+                            self.a.op(I64_MUL);
+                            self.a.i64c(32);
+                            self.a.op(I64_SHR_S);
+                            self.a.op(I64_EXTEND32_S);
                         }
                         1 => self.mul_high(true, true),
                         2 => self.mul_high(true, false),
@@ -1765,6 +1825,7 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
     };
     let (mut skipped, mut not_run) = (0, 0);
     for iter in 0..iterations {
+        let xlen32 = next() % 3 == 0;
         // Two runs of compilable instructions: one in page 0 and one in page
         // 1, branching within themselves and to each other
         let mut br_regs = 0u32;
@@ -1802,8 +1863,8 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                     }
                     (w, 4)
                 };
-                let i = if n == 2 { rvc::expand(w) } else { Some(w) };
-                let Some(i) = i.filter(|&i| compilable(i)) else { continue };
+                let i = if n == 2 { rvc::expand_xlen(w, xlen32) } else { Some(w) };
+                let Some(i) = i.and_then(|i| jit_form(i, xlen32)) else { continue };
                 if (is_jal(i) || is_jalr(i)) && !next().is_multiple_of(4) {
                     continue;
                 }
@@ -1896,6 +1957,12 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
                     c.bus.ram[at[k]..at[k] + n as usize].copy_from_slice(&w.to_le_bytes()[..n as usize]);
                 }
             }
+            if xlen32 {
+                c.xlen32 = true;
+                for x in c.x.iter_mut() {
+                    *x = *x as i32 as i64 as u64;
+                }
+            }
             c.pc = RAM_BASE + start as u64;
             c.ns_per_insn = 1;
             c.csr.mtvec = RAM_BASE + 0xe000;
@@ -1906,7 +1973,7 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
             if mmu {
                 // satp: Sv39 with an empty root table (TLB misses fault);
                 // RAM mapped 1:1 in the TLB with random permissions
-                c.csr.satp = 8 << 60 | (RAM_BASE + 0xf000) >> 12;
+                c.csr.satp = if xlen32 { 1 << 31 } else { 8 << 60 } | (RAM_BASE + 0xf000) >> 12;
                 if rn() % 4 == 0 {
                     c.prv = PRV_U;
                 }
@@ -1949,7 +2016,7 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
             let at = targets[(next() % targets.len() as u64) as usize] & !1;
             let w = loop {
                 let w = next() as u32 | 3;
-                if compilable(w) {
+                if jit_form(w, xlen32).is_some() {
                     break w;
                 }
             };
@@ -1998,7 +2065,7 @@ pub fn selftest(seed: u64, iterations: u32, table_base: u32, compile: CompileFn)
         };
         if state(&a) != state(&b) || a.bus.ram != b.bus.ram {
             let mut d = format!(
-                "iteration {iter}: state differs after code {:08x?} at {:#x} and {:08x?} at {:#x} (mmu {mmu}, limit {limit}, used {used})\n",
+                "iteration {iter}: state differs after code {:08x?} at {:#x} and {:08x?} at {:#x} (xlen32 {xlen32}, mmu {mmu}, limit {limit}, used {used})\n",
                 insns,
                 RAM_BASE + start as u64,
                 insns1,

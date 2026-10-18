@@ -1,7 +1,8 @@
 //! Native runner for the RISC-V core.
 //!
 //!   rv64run --bios fw_dynamic.bin --kernel Image --dtb virt.dtb [--disk rootfs]
-//!           [--mem 256] [--steps N] [--log-illegal] [--lockstep qemu-cpu.log]
+//!           [--mem 256] [--steps N] [--log-illegal] [--lockstep qemu-cpu.log] [--xlen 32]
+//!           [--disk-slot N]
 //!
 //! Boots like `qemu-system-riscv64 -M virt -bios ... -kernel ...`. The serial
 //! console (16550) is on stdin/stdout; Ctrl-A x quits.
@@ -35,10 +36,14 @@ struct Args {
     steps: u64,
     log_illegal: bool,
     lockstep: Option<String>,
+    xlen32: bool,
+    /// virtio-mmio transport of the disk (QEMU's -device virtio-blk-device
+    /// takes the last one, 7)
+    disk_slot: u64,
 }
 
 fn usage() -> ! {
-    eprintln!("usage: rv64run --bios fw_dynamic.bin --kernel Image --dtb virt.dtb [--disk rootfs] [--mem MB] [--steps N] [--log-illegal] [--lockstep qemu.log]");
+    eprintln!("usage: rv64run --bios fw_dynamic.bin --kernel Image --dtb virt.dtb [--disk rootfs] [--mem MB] [--steps N] [--log-illegal] [--lockstep qemu.log] [--xlen 32] [--disk-slot N]");
     exit(2)
 }
 
@@ -52,6 +57,8 @@ fn parse_args() -> Args {
         steps: u64::MAX,
         log_illegal: false,
         lockstep: None,
+        xlen32: false,
+        disk_slot: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -65,6 +72,14 @@ fn parse_args() -> Args {
             "--steps" => a.steps = val().parse().unwrap_or_else(|_| usage()),
             "--log-illegal" => a.log_illegal = true,
             "--lockstep" => a.lockstep = Some(val()),
+            "--disk-slot" => a.disk_slot = val().parse().ok().filter(|&n| n < 8).unwrap_or_else(|| usage()),
+            "--xlen" => {
+                a.xlen32 = match val().as_str() {
+                    "32" => true,
+                    "64" => false,
+                    _ => usage(),
+                }
+            }
             _ => usage(),
         }
     }
@@ -111,12 +126,18 @@ fn main() {
         Some(p) => Box::new(VirtioBlk::new(read(p))),
         None => Box::new(Empty),
     };
-    bus.map(0x1000_1000, 0x1000, Box::new(VirtioMmio::new(1, disk)));
-    bus.map(0x1000_2000, 0x1000, Box::new(VirtioMmio::new(2, Box::new(Empty))));
+    // virtio-mmio transports (slot n: 0x1000_1000 + n * 0x1000, interrupt
+    // n + 1): the disk's, and empty ones at slots 0 and 1 (the device tree's)
+    let n = args.disk_slot;
+    bus.map(0x1000_1000 + n * 0x1000, 0x1000, Box::new(VirtioMmio::new(n as u32 + 1, disk)));
+    for k in [0, 1].into_iter().filter(|&k| k != n) {
+        bus.map(0x1000_1000 + k * 0x1000, 0x1000, Box::new(VirtioMmio::new(k as u32 + 1, Box::new(Empty))));
+    }
 
     let mut cpu = Cpu::new(bus);
     cpu.ns_per_insn = 1;
     cpu.log_illegal = args.log_illegal;
+    cpu.xlen32 = args.xlen32;
     let info = boot::load(&mut cpu, &read(&args.bios), &read(&args.kernel), &read(&args.dtb)).unwrap_or_else(|e| {
         eprintln!("boot: {e}");
         exit(1)
@@ -257,8 +278,12 @@ fn read_record(rdr: &mut impl BufRead) -> Option<Record> {
         }
         if let Some(rest) = line.strip_prefix("riscv_cpu_do_interrupt:") {
             if rest.contains("async:1") {
-                let c = rest.split("cause:").nth(1).and_then(|c| u64::from_str_radix(&c[..16], 16).ok());
-                rec.irq = c.map(|c| c & !(1 << 63));
+                // (16 hex digits for RV64, 8 for RV32)
+                let c = rest.split("cause:").nth(1).and_then(|c| {
+                    let hex: String = c.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+                    u64::from_str_radix(&hex, 16).ok()
+                });
+                rec.irq = c.map(|c| c & 0x7fff_ffff);
             }
             continue;
         }
@@ -362,18 +387,22 @@ fn lockstep(cpu: &mut Cpu, path: &str, steps: u64) {
 
 fn compare(cpu: &mut Cpu, rec: &Record, prev_text: &str, recent: &VecDeque<u64>, n: u64, last_insn: u32) {
     let get = |k: &str| rec.vals.iter().find(|(name, _)| name == k).map(|&(_, v)| v);
+    // RV32: QEMU logs 32-bit values; our registers hold them sign-extended
+    let xlen32 = cpu.xlen32;
+    let reg = |v: u64| if xlen32 { v as i32 as i64 as u64 } else { v };
+    let low = |v: u64| if xlen32 { v & 0xffff_ffff } else { v };
     // Device models and clocks may differ from QEMU's: after a device or
     // counter read, adopt QEMU's general registers.
     let mmio = cpu.bus.last_mmio_read;
     if (mmio.is_some() || reads_counter(last_insn)) && rec.pc == cpu.pc {
         for r in 1..32 {
             if let Some(q) = get(&format!("x{r}")) {
-                if q != cpu.x[r] {
+                if reg(q) != cpu.x[r] {
                     // (rdtime reads one tick ahead of QEMU: RV64_LOG_FOLLOW shows those)
                     if mmio.is_some() || std::env::var_os("RV64_LOG_FOLLOW").is_some() {
                         eprintln!("lockstep: #{n} follow {mmio:x?} insn {last_insn:08x} -> x{r}={q:#x} (ours {:#x})", cpu.x[r]);
                     }
-                    cpu.x[r] = q;
+                    cpu.x[r] = reg(q);
                 }
             }
         }
@@ -381,13 +410,14 @@ fn compare(cpu: &mut Cpu, rec: &Record, prev_text: &str, recent: &VecDeque<u64>,
     // Linux probes for RV32 user mode by writing UXL; QEMU has it, we don't.
     let uxl = |v: u64| v >> 32 & 3;
     let writes_status = last_insn & 0x7f == 0x73 && last_insn >> 12 & 7 != 0 && matches!(last_insn >> 20, 0x100 | 0x300);
-    let uxl_probe = writes_status && get("mstatus").is_some_and(|q| uxl(q) != uxl(cpu.csr.mstatus));
+    let uxl_probe = !xlen32 && writes_status && get("mstatus").is_some_and(|q| uxl(q) != uxl(cpu.csr.mstatus));
     if uxl_probe || probes_optional(last_insn) {
         let trapped = get("mcause") != Some(cpu.csr.mcause) || get("mepc") != Some(cpu.csr.mepc);
         for (k, v) in &rec.vals {
             let c = &mut cpu.csr;
             match k.as_str() {
                 "pc" => cpu.pc = *v,
+                "mstatus" if xlen32 => c.mstatus = (c.mstatus & !0xffff_ffff) | (v & 0x7fff_ffff),
                 "mstatus" => c.mstatus = v & !(1 << 63),
                 "mepc" => c.mepc = *v,
                 "mcause" => c.mcause = *v,
@@ -395,7 +425,7 @@ fn compare(cpu: &mut Cpu, rec: &Record, prev_text: &str, recent: &VecDeque<u64>,
                 _ => {
                     if let Some(r) = k.strip_prefix('x').and_then(|r| r.parse::<usize>().ok()) {
                         if r != 0 {
-                            cpu.x[r] = *v;
+                            cpu.x[r] = reg(*v);
                         }
                     }
                 }
@@ -408,7 +438,12 @@ fn compare(cpu: &mut Cpu, rec: &Record, prev_text: &str, recent: &VecDeque<u64>,
     }
     let c = &cpu.csr;
     let fs = 3u64 << 13;
-    let mstatus = if c.mstatus & fs == fs { c.mstatus | 1 << 63 } else { c.mstatus };
+    let sd = c.mstatus & fs == fs;
+    let mstatus = if xlen32 {
+        (c.mstatus & 0x7fff_ffff) | (sd as u64) << 31
+    } else {
+        c.mstatus | (sd as u64) << 63
+    };
     let mut ours: Vec<(String, u64)> = vec![
         ("pc".into(), cpu.pc),
         ("mstatus".into(), mstatus),
@@ -428,7 +463,7 @@ fn compare(cpu: &mut Cpu, rec: &Record, prev_text: &str, recent: &VecDeque<u64>,
         ("satp".into(), c.satp),
     ];
     for r in 1..32 {
-        ours.push((format!("x{r}"), cpu.x[r]));
+        ours.push((format!("x{r}"), low(cpu.x[r])));
     }
     let diffs: Vec<String> = ours
         .iter()

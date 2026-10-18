@@ -1,4 +1,5 @@
-// RISC-V machine for v86: QEMU-style riscv64 "virt" board with one hart.
+// RISC-V machine for v86: QEMU-style riscv64 (or, for arch "riscv32",
+// riscv32) "virt" board with one hart.
 //
 // The hart, MMU, CLINT, PLIC, 16550 UART and goldfish RTC run in
 // v86-rv64.wasm (src/rv64). The virtio-mmio slots are JS: virtio-blk (hda),
@@ -43,7 +44,7 @@ const now = typeof performance === "object" ? () => performance.now() : () => Da
 /**
  * @constructor
  * @param {BusConnector} bus
- * @param {?} wasm {exports, ...} from the instantiated v86-rv64.wasm
+ * @param {?} wasm {exports, arch, ...} from the instantiated v86-rv64.wasm
  * @param {function()} stop_idling called when a device needs the CPU to wake up
  */
 export function RV64CPU(bus, wasm, stop_idling)
@@ -51,6 +52,8 @@ export function RV64CPU(bus, wasm, stop_idling)
     this.bus = bus;
     this.wasm = wasm.exports;
     this.wasm_memory = this.wasm["memory"];
+    /** RV32 (arch "riscv32"): see Cpu::xlen32 in src/rv64/src/cpu.rs */
+    this.xlen32 = wasm.arch === "riscv32";
     this.stop_idling = stop_idling;
 
     /** Devices by role; virtio_net reads devices.net to pick its id. */
@@ -332,6 +335,7 @@ RV64CPU.prototype.reset_core = function(ram_mb)
 {
     this.ram_size = ram_mb * 1024 * 1024;
     this.ram_ptr = this.wasm["rv64_init"](ram_mb, Date.now() / 1000);
+    this.wasm["rv64_set_xlen32"](+this.xlen32);
     this.mem8 = null;
     this.irq_lines = null;
     this.powered_off = false;
@@ -403,10 +407,10 @@ RV64CPU.prototype.build_dtb = function()
         .prop("reg", [0])
         .prop("status", "okay")
         .prop("compatible", "riscv")
-        .prop("riscv,isa", "rv64imafdc_zicsr_zifencei")
-        .prop("riscv,isa-base", "rv64i")
+        .prop("riscv,isa", (this.xlen32 ? "rv32" : "rv64") + "imafdc_zicsr_zifencei")
+        .prop("riscv,isa-base", this.xlen32 ? "rv32i" : "rv64i")
         .prop("riscv,isa-extensions", ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"])
-        .prop("mmu-type", "riscv,sv39")
+        .prop("mmu-type", this.xlen32 ? "riscv,sv32" : "riscv,sv39")
         .prop("phandle", [CPU0]);
     cpu0.child("interrupt-controller")
         .prop("#interrupt-cells", [1])

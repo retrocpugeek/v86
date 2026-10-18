@@ -1,4 +1,4 @@
-//! Boot like QEMU's riscv64 virt machine with `-bios fw_dynamic.bin -kernel
+//! Boot like QEMU's riscv64 (or riscv32) virt machine with `-bios fw_dynamic.bin -kernel
 //! Image`: the reset vector in the boot ROM at 0x1000 jumps to the firmware
 //! (OpenSBI) at the start of RAM with a0 = hart id, a1 = DTB and
 //! a2 = fw_dynamic_info, which tells OpenSBI to start the kernel in S mode.
@@ -25,8 +25,10 @@ pub fn dtb_addr(ram_size: u64, dtb_len: u64) -> u64 {
 pub fn load(cpu: &mut Cpu, firmware: &[u8], kernel: &[u8], dtb: &[u8]) -> Result<BootInfo, String> {
     let ram_size = cpu.bus.ram.len() as u64;
     let fw = RAM_BASE;
+    let rv32 = cpu.xlen32;
     // riscv_calc_kernel_start_addr: the firmware's end, aligned to 2 MB
-    let kernel_addr = (fw + firmware.len() as u64).next_multiple_of(2 * MIB);
+    // (4 MB, a megapage, for RV32)
+    let kernel_addr = (fw + firmware.len() as u64).next_multiple_of(if rv32 { 4 * MIB } else { 2 * MIB });
     let dtb_addr = dtb_addr(ram_size, dtb.len() as u64);
     if kernel_addr + kernel.len() as u64 > dtb_addr {
         return Err("kernel overlaps the DTB".into());
@@ -40,8 +42,8 @@ pub fn load(cpu: &mut Cpu, firmware: &[u8], kernel: &[u8], dtb: &[u8]) -> Result
         0x0000_0297, // 1: auipc t0, %pcrel_hi(fw_dyn)
         0x0282_8613, //    addi  a2, t0, %pcrel_lo(1b)
         0xf140_2573, //    csrr  a0, mhartid
-        0x0202_b583, //    ld    a1, 32(t0)
-        0x0182_b283, //    ld    t0, 24(t0)
+        if rv32 { 0x0202_a583 } else { 0x0202_b583 }, // ld (RV32: lw) a1, 32(t0)
+        if rv32 { 0x0182_a283 } else { 0x0182_b283 }, // ld (RV32: lw) t0, 24(t0)
         0x0002_8067, //    jr    t0
         fw as u32,
         (fw >> 32) as u32,
@@ -53,8 +55,13 @@ pub fn load(cpu: &mut Cpu, firmware: &[u8], kernel: &[u8], dtb: &[u8]) -> Result
         rom.extend_from_slice(&w.to_le_bytes());
     }
     // magic "OSBI", version 2, next_addr, next_mode (S), options, boot_hart
+    // (XLEN-sized fields)
     for v in [0x4942_534f, 2, kernel_addr, 1, 0, 0u64] {
-        rom.extend_from_slice(&v.to_le_bytes());
+        if rv32 {
+            rom.extend_from_slice(&(v as u32).to_le_bytes());
+        } else {
+            rom.extend_from_slice(&v.to_le_bytes());
+        }
     }
     cpu.bus.rom = rom;
     cpu.pc = ROM_BASE;

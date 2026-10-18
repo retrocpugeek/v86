@@ -3,7 +3,10 @@
 use crate::cpu::*;
 
 /// misa: RV64 with A C D F I M S U.
-pub const MISA: u64 = 2 << 62 | 1 << 0 | 1 << 2 | 1 << 3 | 1 << 5 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
+pub const MISA: u64 = 2 << 62 | MISA_EXT;
+/// misa for RV32.
+pub const MISA32: u64 = 1 << 30 | MISA_EXT;
+const MISA_EXT: u64 = 1 << 0 | 1 << 2 | 1 << 3 | 1 << 5 | 1 << 8 | 1 << 12 | 1 << 18 | 1 << 20;
 
 /// mstatus bits M mode can write.
 const MSTATUS_WMASK: u64 = MSTATUS_SIE
@@ -127,7 +130,74 @@ impl Cpu {
     }
 
     /// Read CSR `n`; Err is illegal instruction (the caller fills in tval).
+    /// For RV32, the value is sign-extended (as registers hold it).
     pub fn csr_read(&mut self, n: u32) -> Result<u64, ()> {
+        if !self.xlen32 {
+            return self.csr_read64(n);
+        }
+        if (n >> 8 & 3) as u64 > self.prv {
+            return Err(());
+        }
+        let hi = |v: u64| v >> 32;
+        let v = match n {
+            // mstatus, sstatus: SD is bit 31; mstatush (MBE, SBE) is 0
+            0x300 | 0x100 => {
+                let v = self.csr_read64(n)?;
+                (v & 0x7fff_ffff) | (v >> 63) << 31
+            }
+            0x310 | 0x31a => 0, // mstatush, menvcfgh
+            0x301 => MISA32,
+            0xc80..=0xc82 => hi(self.csr_read64(n - 0x80)?), // cycleh, timeh, instreth
+            0xb80 | 0xb82 => hi(self.csr_read64(n - 0x80)?), // mcycleh, minstreth
+            // pmpcfg0..3: the halves of RV64's pmpcfg0 and pmpcfg2
+            0x3a0..=0x3a3 => self.csr.pmpcfg[(n as usize - 0x3a0) / 2] >> (32 * (n & 1)),
+            _ => self.csr_read64(n)?,
+        };
+        Ok(v as i32 as i64 as u64)
+    }
+
+    /// Write CSR `n` (csr_write64 for RV64).
+    pub fn csr_write(&mut self, n: u32, v: u64) -> Result<(), ()> {
+        if !self.xlen32 {
+            return self.csr_write64(n, v);
+        }
+        if (n >> 8 & 3) as u64 > self.prv || n >> 10 == 3 {
+            return Err(());
+        }
+        let v = v & 0xffff_ffff;
+        // Replace the low or high half of a 64-bit value
+        let half = |old: u64, high: bool| if high { (old & 0xffff_ffff) | v << 32 } else { (old & !0xffff_ffff) | v };
+        match n {
+            0x300 | 0x100 => self.csr_write64(n, v & 0x7fff_ffff),
+            0x310 | 0x31a => Ok(()),
+            0x301 => Ok(()),
+            0x180 => {
+                if self.prv == PRV_S && self.csr.mstatus & MSTATUS_TVM != 0 {
+                    return Err(());
+                }
+                // Bare or Sv32
+                self.csr.satp = v;
+                self.tlb.flush();
+                self.icache_flush();
+                Ok(())
+            }
+            0xb00 | 0xb02 | 0xb80 | 0xb82 => {
+                // As csr_write64: the next instruction reads the new value
+                let old = self.icount.wrapping_sub(1).wrapping_add(self.csr.counter_offset);
+                self.csr.counter_offset = half(old, n >= 0xb80).wrapping_sub(self.icount);
+                Ok(())
+            }
+            0x3a0..=0x3a3 => {
+                let k = (n as usize - 0x3a0) / 2;
+                self.csr.pmpcfg[k] = half(self.csr.pmpcfg[k], n & 1 != 0);
+                Ok(())
+            }
+            _ => self.csr_write64(n, v),
+        }
+    }
+
+    /// csr_read() for RV64.
+    fn csr_read64(&mut self, n: u32) -> Result<u64, ()> {
         if (n >> 8 & 3) as u64 > self.prv {
             return Err(());
         }
@@ -204,7 +274,7 @@ impl Cpu {
     }
 
     /// Write CSR `n`; Err is illegal instruction.
-    pub fn csr_write(&mut self, n: u32, v: u64) -> Result<(), ()> {
+    fn csr_write64(&mut self, n: u32, v: u64) -> Result<(), ()> {
         if (n >> 8 & 3) as u64 > self.prv || n >> 10 == 3 {
             return Err(());
         }

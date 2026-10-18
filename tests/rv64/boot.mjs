@@ -10,7 +10,8 @@
 // virtio-net device backed by v86's fetch network adapter is added and the
 // test checks that the guest gets a DHCP lease.
 //
-// RV64_JIT=0 turns the JIT off. Requires build/v86-rv64.wasm (make build/v86-rv64.wasm).
+// RV64_ARCH=riscv32 boots a riscv32 image (qemu_riscv32_virt_defconfig)
+// instead. RV64_JIT=0 turns the JIT off. Requires build/v86-rv64.wasm (make build/v86-rv64.wasm).
 
 import url from "node:url";
 import assert from "node:assert/strict";
@@ -33,7 +34,7 @@ const TIMEOUT_MS = 10 * 60 * 1000;
 const start = Date.now();
 
 const emulator = new V86({
-    arch: "riscv64",
+    arch: process.env.RV64_ARCH || "riscv64",
     wasm_path: __dirname + "/../../build/v86-rv64.wasm",
     bios: { url: bios },
     kernel: { url: kernel },
@@ -81,7 +82,7 @@ emulator.add_listener("serial0-output-byte", byte =>
         const stats = emulator.v86.cpu.jit_stats();
         const total = emulator.v86.cpu.get_instruction_counter();
         const jit = stats.map(n => n.toFixed(0)).join("/") + `, ${(100 * stats[4] / total).toFixed(1)}% of ${(total / 1e6).toFixed(0)}M`;
-        console.error(`\n[rv64] PASS: booted, logged in, ran commands and powered off in ${secs.toFixed(1)}s (JIT compiled/entered/stale/failed/insns/slow: ${jit})`);
+        console.error(`\n[${process.env.RV64_ARCH || "riscv64"}] PASS: booted, logged in, ran commands and powered off in ${secs.toFixed(1)}s (JIT compiled/entered/stale/failed/insns/slow: ${jit})`);
         emulator.destroy();
         process.exit(0);
     }

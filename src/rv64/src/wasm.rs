@@ -109,6 +109,10 @@ pub extern "C" fn rv64_init(ram_mb: u32, epoch_secs: f64) -> u32 {
     ptr
 }
 
+/// RV32 (riscv32 machine) instead of RV64; before rv64_boot.
+#[no_mangle]
+pub extern "C" fn rv64_set_xlen32(on: u32) { cpu().xlen32 = on != 0 }
+
 #[no_mangle]
 pub extern "C" fn rv64_irq_lines_ptr() -> u32 { addr_of!(IRQ_LINES) as u32 }
 

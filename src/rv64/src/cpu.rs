@@ -135,6 +135,9 @@ pub struct Cpu {
     /// pc is a block start: a branch went there, or the instruction before
     /// it trapped or isn't compiled (see jit.rs).
     pub block_start: bool,
+    /// RV32 (XLEN 32): registers hold sign-extended 32-bit values, pc and
+    /// addresses are 32 bits, Sv32 paging (see exec32).
+    pub xlen32: bool,
 }
 
 const ICACHE_ENTRIES: usize = 1 << 14;
@@ -185,6 +188,7 @@ impl Cpu {
             jit_exc: Exception { cause: 0, tval: 0 },
             jit_hops: 0,
             block_start: true,
+            xlen32: false,
         }
     }
 
@@ -270,7 +274,7 @@ impl Cpu {
     pub fn trap(&mut self, cause: u64, tval: u64, interrupt: bool, pc: u64) {
         self.trap_counts[!interrupt as usize][(cause & 15) as usize] += 1;
         let deleg = if interrupt { self.csr.mideleg } else { self.csr.medeleg };
-        let mcause = cause | (interrupt as u64) << 63;
+        let mcause = cause | (interrupt as u64) << if self.xlen32 { 31 } else { 63 };
         self.reservation = None;
         if self.prv <= PRV_S && deleg >> cause & 1 != 0 {
             self.csr.scause = mcause;
@@ -369,9 +373,9 @@ impl Cpu {
             (self.exec(e.insn, e.raw), e.len, e.jit)
         } else {
             match self.fetch(pc) {
-                Ok((raw, len)) => match if len == 2 { rvc::expand(raw) } else { Some(raw) } {
+                Ok((raw, len)) => match if len == 2 { rvc::expand_xlen(raw, self.xlen32) } else { Some(raw) } {
                     Some(insn) => {
-                        let jit = jit::compilable(insn);
+                        let jit = jit::jit_form(insn, self.xlen32).is_some();
                         self.icache[slot] =
                             ICacheEntry { pc, gen: self.icache_gen, insn, raw, len: len as u8, prv: self.prv as u8, jit };
                         self.pc = pc.wrapping_add(len);

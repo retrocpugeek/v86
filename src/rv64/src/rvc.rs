@@ -47,6 +47,36 @@ const OP_LUI: u32 = 0x37;
 const OP_32: u32 = 0x3b;
 const OP_JALR: u32 = 0x67;
 
+/// expand() for RV32 (`xlen32`) or RV64.
+#[inline]
+pub fn expand_xlen(i: u32, xlen32: bool) -> Option<u32> { if xlen32 { expand32(i) } else { expand(i) } }
+
+/// The 32-bit instruction an RV32C instruction stands for, or None
+/// (illegal). Where RV64C has C.LD, C.SD, C.LDSP, C.SDSP and C.ADDIW, RV32C
+/// has C.FLW, C.FSW, C.FLWSP, C.FSWSP and C.JAL; C.SUBW and C.ADDW and
+/// shift amounts over 31 are reserved.
+pub fn expand32(i: u32) -> Option<u32> {
+    let rd = b(i, 11, 7);
+    let rs2 = b(i, 6, 2);
+    let rdp = b(i, 4, 2) + 8;
+    let rs1p = b(i, 9, 7) + 8;
+    Some(match (i & 3, b(i, 15, 13)) {
+        (0, 3) => itype((b(i, 12, 10) << 3 | b(i, 6, 6) << 2 | b(i, 5, 5) << 6) as i32, rs1p, 2, rdp, OP_LOAD_FP), // C.FLW
+        (0, 7) => stype((b(i, 12, 10) << 3 | b(i, 6, 6) << 2 | b(i, 5, 5) << 6) as i32, rdp, rs1p, 2, OP_STORE_FP), // C.FSW
+        (1, 1) => {
+            // C.JAL: the offset as C.J's
+            let j = expand(i & !0xe000 | 0xa000)?;
+            j | 1 << 7
+        }
+        (1, 4) if b(i, 11, 10) < 2 && b(i, 12, 12) != 0 => return None,
+        (1, 4) if b(i, 11, 10) == 3 && b(i, 12, 12) != 0 => return None,
+        (2, 0) if b(i, 12, 12) != 0 => return None,
+        (2, 3) => itype((b(i, 12, 12) << 5 | b(i, 6, 4) << 2 | b(i, 3, 2) << 6) as i32, 2, 2, rd, OP_LOAD_FP), // C.FLWSP
+        (2, 7) => stype((b(i, 12, 9) << 2 | b(i, 8, 7) << 6) as i32, rs2, 2, 2, OP_STORE_FP), // C.FSWSP
+        _ => return expand(i),
+    })
+}
+
 /// The 32-bit instruction a compressed one stands for, or None (illegal).
 pub fn expand(i: u32) -> Option<u32> {
     let rd = b(i, 11, 7);
@@ -165,7 +195,29 @@ pub fn expand(i: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::expand;
+    use super::{expand, expand32};
+
+    /// RV32C's own encodings (GNU as, -march=rv32gc).
+    #[test]
+    fn rv32c_matches_assembler() {
+        let pairs: [(u32, u32); 7] = [
+            (0x2ffd, 0x7fe000ef), // jal ra, .+2046
+            (0x3001, 0x801ff0ef), // jal ra, .-2048
+            (0x2009, 0x002000ef), // jal ra, .+2
+            (0x7de8, 0x07c5a507), // flw fa0, 124(a1)
+            (0xe3a4, 0x0497a027), // fsw fs1, 64(a5)
+            (0x707e, 0x0fc12007), // flw ft0, 252(sp)
+            (0xffc6, 0x0f112e27), // fsw fa7, 252(sp)
+        ];
+        for (c, n) in pairs {
+            assert_eq!(expand32(c), Some(n), "{c:04x}");
+        }
+        // The rest is shared; C.ADDW, and shift amounts over 31, are reserved
+        assert_eq!(expand32(0x5ef8), expand(0x5ef8));
+        for c in [0x9ca9, 0x1286, 0x917d] {
+            assert_eq!(expand32(c), None, "{c:04x}");
+        }
+    }
 
     /// Compressed encodings and the same instructions assembled uncompressed
     /// (GNU as, -march=rv64gc with .option rvc / norvc).

@@ -48,12 +48,12 @@ struct TlbEntry {
     ram: u32,
     /// P_* bits.
     perm: u8,
-    /// Level of the leaf PTE: 0 for a 4 KB page, 1 or 2 for a superpage
-    /// (cached a 4 KB page at a time).
-    level: u8,
+    /// log2 of the pages the leaf PTE maps: 0 for a 4 KB page, else a
+    /// superpage (cached a 4 KB page at a time): 9 or 18 (Sv39), 10 (Sv32).
+    shift: u8,
 }
 
-const INVALID: TlbEntry = TlbEntry { vpn: u64::MAX, pa: 0, pte: 0, ram: NOT_RAM, perm: 0, level: 0 };
+const INVALID: TlbEntry = TlbEntry { vpn: u64::MAX, pa: 0, pte: 0, ram: NOT_RAM, perm: 0, shift: 0 };
 
 /// TLB layout, for the inline lookups in compiled code (jit.rs).
 pub(crate) mod layout {
@@ -130,8 +130,8 @@ impl Tlb {
     /// mapping va may be cached in.
     pub fn flush_va(&mut self, va: u64) {
         let vpn = va >> 12;
-        let mut drop = |e: &mut TlbEntry| {
-            let shift = 9 * e.level as u32;
+        let drop = |e: &mut TlbEntry| {
+            let shift = e.shift as u32;
             if e.vpn >> shift == vpn >> shift {
                 e.vpn = u64::MAX;
             }
@@ -157,7 +157,7 @@ impl Tlb {
             pte,
             ram: ram.map_or(NOT_RAM, |r| r as u32),
             perm: pte_perm(pte),
-            level: 0,
+            shift: 0,
         });
     }
 }
@@ -208,11 +208,25 @@ impl Cpu {
         }
     }
 
+    /// Is paging on (Sv39, or Sv32 for RV32)?
+    #[inline(always)]
+    pub fn paging(&self) -> bool {
+        if self.xlen32 {
+            self.csr.satp >> 31 & 1 != 0
+        } else {
+            self.csr.satp >> 60 == SATP_MODE_SV39
+        }
+    }
+
+    /// An address computed for a load or store: 32 bits for RV32.
+    #[inline(always)]
+    pub fn xva(&self, va: u64) -> u64 { if self.xlen32 { va & 0xffff_ffff } else { va } }
+
     /// Translate va for an access; physical address.
     #[inline]
     pub fn translate(&mut self, va: u64, acc: Acc) -> Res<u64> {
         let prv = if acc == Acc::Exec { self.prv } else { self.data_prv() };
-        if prv == PRV_M || self.csr.satp >> 60 != SATP_MODE_SV39 {
+        if prv == PRV_M || !self.paging() {
             return Ok(va);
         }
         let vpn = va >> 12;
@@ -223,8 +237,51 @@ impl Cpu {
         self.walk(va, acc, prv)
     }
 
+    /// Sv32: two levels of 4-byte PTEs, 34-bit physical addresses.
+    #[inline(never)]
+    fn walk32(&mut self, va: u64, acc: Acc, prv: u64) -> Res<u64> {
+        let mut table = (self.csr.satp & 0x3f_ffff) << 12;
+        for level in (0..2).rev() {
+            let idx = va >> (12 + 10 * level) & 0x3ff;
+            let pte_addr = table + idx * 4;
+            let Some(off) = self.bus.ram_offset(pte_addr, 4) else { return Err(access_fault(acc, va)) };
+            let pte = self.bus.read_ram(off, 4);
+            if pte & PTE_V == 0 || (pte & PTE_R == 0 && pte & PTE_W != 0) {
+                return Err(page_fault(acc, va));
+            }
+            let ppn = pte >> 10;
+            if pte & (PTE_R | PTE_X) == 0 {
+                table = ppn << 12;
+                continue;
+            }
+            // Leaf: megapages must be aligned
+            if ppn & ((1 << (10 * level)) - 1) != 0 {
+                return Err(page_fault(acc, va));
+            }
+            if !self.pte_allows(pte, acc, prv) {
+                return Err(page_fault(acc, va));
+            }
+            let mut new = pte | PTE_A;
+            if acc == Acc::Write {
+                new |= PTE_D;
+            }
+            if new != pte {
+                self.bus.write_ram(off, 4, new);
+            }
+            let page_mask = (1u64 << (12 + 10 * level)) - 1;
+            let pa_page = ((ppn << 12) & !page_mask) | (va & page_mask & !0xfff);
+            let ram = self.bus.ram_offset(pa_page, 0x1000).map_or(NOT_RAM, |o| o as u32);
+            self.tlb.set(TlbEntry { vpn: va >> 12, pa: pa_page, pte: new, ram, perm: pte_perm(new), shift: 10 * level as u8 });
+            return Ok(pa_page | (va & 0xfff));
+        }
+        Err(page_fault(acc, va))
+    }
+
     #[inline(never)]
     fn walk(&mut self, va: u64, acc: Acc, prv: u64) -> Res<u64> {
+        if self.xlen32 {
+            return self.walk32(va, acc, prv);
+        }
         // va must be the sign extension of bit 38
         if ((va as i64) << 25 >> 25) as u64 != va {
             return Err(page_fault(acc, va));
@@ -261,7 +318,7 @@ impl Cpu {
             let page_mask = (1u64 << (12 + 9 * level)) - 1;
             let pa_page = ((ppn << 12) & !page_mask) | (va & page_mask & !0xfff);
             let ram = self.bus.ram_offset(pa_page, 0x1000).map_or(NOT_RAM, |o| o as u32);
-            self.tlb.set(TlbEntry { vpn: va >> 12, pa: pa_page, pte: new, ram, perm: pte_perm(new), level: level as u8 });
+            self.tlb.set(TlbEntry { vpn: va >> 12, pa: pa_page, pte: new, ram, perm: pte_perm(new), shift: 9 * level as u8 });
             return Ok(pa_page | (va & 0xfff));
         }
         Err(page_fault(acc, va))
@@ -304,13 +361,14 @@ impl Cpu {
     /// handled here, a byte at a time if they cross a page.
     #[inline]
     pub fn load(&mut self, va: u64, size: u32) -> Res<u64> {
+        let va = self.xva(va);
         if va & (size as u64 - 1) == 0 || (va & 0xfff) + size as u64 <= 0x1000 {
             let pa = self.translate(va, Acc::Read)?;
             return self.phys_read(pa, size, va, Acc::Read);
         }
         let mut v = 0;
         for i in 0..size as u64 {
-            let a = va.wrapping_add(i);
+            let a = self.xva(va.wrapping_add(i));
             let pa = self.translate(a, Acc::Read)?;
             v |= self.phys_read(pa, 1, a, Acc::Read)? << (8 * i);
         }
@@ -319,15 +377,16 @@ impl Cpu {
 
     #[inline]
     pub fn store(&mut self, va: u64, size: u32, v: u64) -> Res<()> {
+        let va = self.xva(va);
         if va & (size as u64 - 1) == 0 || (va & 0xfff) + size as u64 <= 0x1000 {
             let pa = self.translate(va, Acc::Write)?;
             return self.phys_write(pa, size, v, va);
         }
         // Translate both pages first so a fault leaves memory unchanged
         self.translate(va, Acc::Write)?;
-        self.translate(va.wrapping_add(size as u64 - 1), Acc::Write)?;
+        self.translate(self.xva(va.wrapping_add(size as u64 - 1)), Acc::Write)?;
         for i in 0..size as u64 {
-            let a = va.wrapping_add(i);
+            let a = self.xva(va.wrapping_add(i));
             let pa = self.translate(a, Acc::Write)?;
             self.phys_write(pa, 1, v >> (8 * i) & 0xff, a)?;
         }
@@ -336,6 +395,7 @@ impl Cpu {
 
     /// Translate an aligned atomic access (AMO, LR, SC); physical address.
     pub fn amo_addr(&mut self, va: u64, size: u32, acc: Acc) -> Res<u64> {
+        let va = self.xva(va);
         if va & (size as u64 - 1) != 0 {
             let cause = if acc == Acc::Read { cause::LOAD_MISALIGNED } else { cause::STORE_MISALIGNED };
             return Err(Exception { cause, tval: va });
