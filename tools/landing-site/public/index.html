@@ -41,6 +41,7 @@ h2 { font-size: 24px; margin: 0 0 16px; }
 .card h3 { margin: 0; font-size: 21px; }
 .card p { margin: 0; color: #c9d0db; }
 .card ul { margin: 0; padding-left: 20px; color: #c9d0db; font-size: 15px; }
+.card .alt { text-align: center; font-weight: 600; }
 .card .go { margin-top: auto; display: inline-block; text-align: center; padding: 10px 16px; border-radius: 10px;
     font-weight: 600; text-decoration: none; color: #0f1216; }
 .arm { border-top: 3px solid var(--arm); }
@@ -104,8 +105,10 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
             <li>Passes the riscv-tests ISA suites (rv64 and rv32)</li>
             <li>Checked instruction by instruction against QEMU</li>
             <li>JIT: hot code compiled to WebAssembly</li>
+            <li>A WCH CH32V003 microcontroller (RV32EC, 2 KB of RAM) running a bare-metal Tetris, with touch controls for phones</li>
           </ul>
           <a class="go" href="https://v86-riscv.turret13.workers.dev/">Boot RISC-V Linux</a>
+          <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris">Play Tetris on an emulated CH32V003</a>
         </article>
 
         <article class="card x86">
