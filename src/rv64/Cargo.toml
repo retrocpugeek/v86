@@ -1,0 +1,29 @@
+[package]
+name = "v86-rv64"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+# Standalone, like src/a64, so the x86 build (root Cargo.toml) is untouched.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+# cdylib produces the browser build (v86-rv64.wasm); rlib is used by rv64run.
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "rv64run"
+path = "src/bin/rv64run.rs"
+
+[profile.dev]
+opt-level = 2
+overflow-checks = false
+
+[profile.release]
+opt-level = 3
+debug = 1
+
+[[bin]]
+name = "rvtest"
+path = "src/bin/rvtest.rs"

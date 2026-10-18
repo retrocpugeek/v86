@@ -1,5 +1,6 @@
 import { CPU } from "./cpu.js";
 import { A64CPU } from "./a64_cpu.js";
+import { RV64CPU } from "./rv64_cpu.js";
 import { save_state, restore_state } from "./state.js";
 export { V86 } from "./browser/starter.js";
 
@@ -26,6 +27,8 @@ export function v86(bus, wasm)
     /** @type {CPU} */
     this.cpu = wasm.arch === "aarch64" ?
         /** @type {?} */ (new A64CPU(bus, wasm, stop_idling)) :
+        wasm.arch === "riscv64" ?
+        /** @type {?} */ (new RV64CPU(bus, wasm, stop_idling)) :
         new CPU(bus, wasm, stop_idling);
 
     this.bus = bus;

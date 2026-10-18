@@ -1,0 +1,14 @@
+// Hosting for v86's RISC-V machine on Cloudflare Workers, like the arm site
+// (tools/a64-site), whose /proxy Worker it shares. Build with
+// tools/rv64-site/build.sh and add-image.sh first.
+{
+  "name": "v86-riscv",
+  "main": "../a64-site/worker.js",
+  "compatibility_date": "2026-07-01",
+  "assets": {
+    "directory": "../../build/rv64-site",
+    "binding": "ASSETS",
+    "run_worker_first": ["/proxy"]
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 }
+}

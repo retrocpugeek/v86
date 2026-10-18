@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v86 RISC-V Linux</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="libv86.js"></script>
+<style>
+:root { color-scheme: dark; --bg: #111; --fg: #ddd; --muted: #888; --accent: #6cf; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 12px; }
+h1 { font-size: 18px; margin: 0; }
+#status { color: var(--muted); }
+select { background: #222; color: var(--fg); border: 1px solid #444; padding: 2px 4px; }
+main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
+#terminal { padding: 4px; background: #000; max-width: 100%; overflow-x: auto; align-self: flex-start; }
+#web { flex: 1 1 480px; min-width: min(480px, 100%); display: flex; flex-direction: column; gap: 4px; }
+#web[hidden] { display: none; }
+#web .bar { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+#web-status { color: var(--muted); }
+#guest-web { flex: 1; min-height: 480px; width: 100%; border: 1px solid #444; background: #fff; }
+#guest-web:not([src]) { visibility: hidden; }
+button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1px 8px; }
+.log-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.log-tools button { padding: 4px 10px; }
+#log-note { color: var(--muted); }
+#crash { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 12px; padding: 8px 12px;
+    border: 1px solid #a33; background: #311; }
+#crash[hidden], #log-share[hidden] { display: none; }
+#log-dialog { width: min(900px, 100% - 32px); max-width: none; padding: 12px; background: var(--bg); color: var(--fg); border: 1px solid #444; }
+#log-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+#log-text { box-sizing: border-box; width: 100%; height: 60vh; background: #000; color: var(--fg); font: 12px/1.3 monospace; white-space: pre; }
+#log-dialog .log-tools { margin-top: 8px; }
+footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
+a { color: var(--accent); }
+code { color: var(--fg); }
+</style>
+
+<header>
+  <h1>v86 RISC-V Linux</h1>
+  <label>Image <select id="build"></select></label>
+  <span id="status">Loading …</span>
+  <div class="log-tools">
+    <span>Console log:</span>
+    <button type="button" data-log="copy">Copy</button>
+    <button type="button" data-log="save">Save</button>
+    <button type="button" data-log="share" id="log-share" hidden>Share</button>
+    <button type="button" data-log="view">View</button>
+    <span id="log-note" role="status"></span>
+  </div>
+</header>
+<div id="crash" role="alert" hidden>
+  <strong>The guest kernel reported an error.</strong>
+  <span>To report it, send the console log:</span>
+  <div class="log-tools">
+    <button type="button" data-log="copy">Copy</button>
+    <button type="button" data-log="save">Save</button>
+    <button type="button" data-log="share" hidden>Share</button>
+  </div>
+</div>
+<dialog id="log-dialog">
+  <textarea id="log-text" readonly spellcheck="false" aria-label="Console log"></textarea>
+  <div class="log-tools">
+    <button type="button" data-log="select">Select all</button>
+    <button type="button" data-log="copy">Copy</button>
+    <button type="button" data-log="close">Close</button>
+  </div>
+</dialog>
+<main>
+  <div id="terminal"></div>
+  <section id="web" hidden>
+    <div class="bar">
+      <strong>Web interface</strong>
+      <span id="web-status"></span>
+      <button id="web-reload" type="button">Reload</button>
+      <a id="web-open" target="_blank">Open in new tab</a>
+    </div>
+    <iframe id="guest-web" title="Guest web interface"></iframe>
+  </section>
+</main>
+<footer>
+  Buildroot riscv64 Linux running on v86's RISC-V core (RV64GC, OpenSBI, QEMU <code>virt</code>-like machine), entirely in your browser.
+  Log in as <code>root</code>. Disk changes stay in this tab.
+  Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
+  isn't supported (<code>?relay=wisps://…</code> selects a full network relay).
+  <a href="https://github.com/retrocpugeek/v86/tree/riscv-port">Source</a>
+</footer>
+
+<script>
+"use strict";
+
+(async function()
+{
+    if(window.frameElement && window.frameElement.id === "guest-web")
+    {
+        // The guest's page navigated outside /cgi-bin/ (where sw.js serves it)
+        document.body.textContent = "This page isn't served by the guest's web server.";
+        return;
+    }
+
+    const params = new URLSearchParams(location.search);
+    const status = document.getElementById("status");
+    const select = document.getElementById("build");
+
+    const manifest = await (await fetch("images/manifest.json", { cache: "no-cache" })).json();
+    const build = manifest.builds.find(b => b.id === params.get("build")) || manifest.builds[0];
+
+    for(const b of manifest.builds)
+    {
+        select.add(new Option(b.label, b.id, false, b === build));
+    }
+    select.onchange = () =>
+    {
+        params.set("build", select.value);
+        location.search = params.toString();
+    };
+
+    const base = "images/" + build.id + "/";
+    // By default the guest's HTTP goes through this site's /proxy (worker.js);
+    // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
+    const relay = params.get("relay") || "fetch";
+    const cors_proxy = params.has("relay") ? undefined : location.origin + "/proxy?url=";
+
+    status.textContent = "Downloading kernel";
+    const kernel = await fetch_kernel(base + build.kernel, status);
+
+    const emulator = window.emulator = new V86({
+        arch: "riscv64",
+        wasm_path: "v86-rv64.wasm",
+        // OpenSBI (fw_dynamic), which starts the kernel in S mode
+        bios: { url: base + build.bios },
+        memory_size: (build.memory_mb || 256) * 1024 * 1024,
+        kernel: { buffer: kernel },
+        hda: {
+            url: base + "rootfs/" + build.rootfs.ext,
+            size: build.rootfs.size,
+            fixed_chunk_size: build.rootfs.chunk_size,
+            use_parts: true,
+            async: true,
+        },
+        cmdline: build.cmdline,
+        net_device: { type: "virtio", relay_url: relay, cors_proxy },
+        serial_console: { type: "xtermjs", container: document.getElementById("terminal") },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+
+    setup_console_log(emulator, build);
+
+    emulator.add_listener("emulator-ready", () =>
+    {
+        status.textContent = "Booting";
+    });
+
+    if(build.web)
+    {
+        start_guest_web(emulator, build.web).catch(e =>
+        {
+            document.getElementById("web-status").textContent = "Unavailable: " + e.message;
+        });
+    }
+})().catch(e =>
+{
+    document.getElementById("status").textContent = "Error: " + e.message;
+    throw e;
+});
+
+// The kernel, decompressed if it's gzipped (Image.gz: Cloudflare's static
+// assets allow at most 25 MiB per file)
+async function fetch_kernel(url, status)
+{
+    const response = await fetch(url);
+    if(!response.ok) throw new Error(url + ": " + response.status);
+    const total = +response.headers.get("content-length") || 0;
+    let loaded = 0;
+    const progress = new TransformStream({
+        transform(chunk, controller)
+        {
+            loaded += chunk.length;
+            if(total) status.textContent = "Downloading kernel: " + Math.round(loaded / total * 100) + "%";
+            controller.enqueue(chunk);
+        },
+    });
+    let body = response.body.pipeThrough(progress);
+    if(url.endsWith(".gz")) body = body.pipeThrough(new DecompressionStream("gzip"));
+    return new Response(body).arrayBuffer();
+}
+
+// The console's output, for copying, saving or sharing (copying out of the
+// terminal is hard on phones). A banner offers it when the kernel reports an
+// error.
+
+const LOG_MAX = 4 << 20;
+const CRASH_PATTERN = /Kernel panic|Unable to handle kernel|Oops[: -]|BUG: |Call Trace:|sbi_trap_error/;
+
+function setup_console_log(emulator, build)
+{
+    let log = "";
+    let line = "";
+    let crashed = false;
+    const started = new Date();
+    const note = document.getElementById("log-note");
+    const dialog = document.getElementById("log-dialog");
+    const text = document.getElementById("log-text");
+
+    emulator.add_listener("serial0-output-byte", byte =>
+    {
+        const c = String.fromCharCode(byte);
+        log += c;
+        if(log.length > LOG_MAX) log = log.slice(-LOG_MAX / 2);
+        if(c !== "\n")
+        {
+            if(line.length < 400) line += c;
+            return;
+        }
+        if(!crashed && CRASH_PATTERN.test(line))
+        {
+            crashed = true;
+            document.getElementById("crash").hidden = false;
+        }
+        line = "";
+    });
+
+    function log_text()
+    {
+        const clean = log
+            .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "")  // terminal control sequences
+            .replace(/\x1b[()][0-9A-Za-z]|\x1b[=>78]/g, "")
+            .replace(/\r+\n/g, "\n")
+            .replace(/[^\n]*\r/g, "");  // overwritten parts of lines
+        return [
+            "v86 riscv64 console log",
+            "image: " + build.id + " (" + build.label + ")",
+            "page: " + location.href,
+            "browser: " + navigator.userAgent,
+            "started: " + started.toISOString() + ", saved: " + new Date().toISOString(),
+            "",
+            clean,
+        ].join("\n");
+    }
+    function file_name()
+    {
+        return "v86-" + build.id + "-" + new Date().toISOString().replace(/[:.]/g, "-") + ".txt";
+    }
+    function show_note(message)
+    {
+        note.textContent = message;
+        setTimeout(() => { if(note.textContent === message) note.textContent = ""; }, 4000);
+    }
+    function view()
+    {
+        text.value = log_text();
+        dialog.showModal();
+        text.scrollTop = text.scrollHeight;
+    }
+
+    const actions = {
+        async copy()
+        {
+            try
+            {
+                await navigator.clipboard.writeText(log_text());
+                show_note("Copied");
+            }
+            catch(e)
+            {
+                // No clipboard access: show it for copying by hand
+                view();
+                text.focus();
+                text.select();
+            }
+        },
+        save()
+        {
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(new Blob([log_text()], { type: "text/plain" }));
+            a.download = file_name();
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        },
+        async share()
+        {
+            const file = new File([log_text()], file_name(), { type: "text/plain" });
+            try
+            {
+                if(navigator.canShare && navigator.canShare({ files: [file] }))
+                {
+                    await navigator.share({ title: "v86 console log", files: [file] });
+                }
+                else
+                {
+                    await navigator.share({ title: "v86 console log", text: log_text() });
+                }
+            }
+            catch(e)
+            {
+                if(e.name !== "AbortError") show_note("Sharing failed: " + e.message);
+            }
+        },
+        view,
+        select()
+        {
+            text.focus();
+            text.select();
+        },
+        close()
+        {
+            dialog.close();
+        },
+    };
+
+    for(const button of document.querySelectorAll("[data-log]"))
+    {
+        if(button.dataset.log === "share") button.hidden = !navigator.share;
+        button.onclick = () => actions[button.dataset.log]();
+    }
+}
+
+// The guest's web interface (build.web, e.g. OpenWrt's /cgi-bin/luci/) in an
+// iframe. sw.js serves /cgi-bin/ by passing each request here; guest_http
+// sends it to the guest's port 80 over v86's virtual network (the "fetch"
+// adapter's TCP stack).
+
+const FORWARD_HEADERS = new Set(["accept", "accept-language", "authorization", "content-type", "x-requested-with"]);
+const DROP_RESPONSE_HEADERS = new Set(["connection", "content-length", "keep-alive", "set-cookie", "transfer-encoding"]);
+
+// Responses from sw.js can't set cookies, so LuCI's session cookie is kept here
+const guest_cookies = new Map();
+// The guest's static files, kept for this page's lifetime (they're slow to serve)
+const guest_static_cache = new Map();
+
+function concat(chunks)
+{
+    const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+    let offset = 0;
+    for(const c of chunks)
+    {
+        out.set(c, offset);
+        offset += c.length;
+    }
+    return out;
+}
+
+function decode_chunked(data)
+{
+    const chunks = [];
+    let i = 0;
+    for(;;)
+    {
+        const eol = data.indexOf(13, i);
+        if(eol < 0) break;
+        const size = parseInt(new TextDecoder().decode(data.subarray(i, eol)), 16);
+        if(!(size > 0)) break;
+        chunks.push(data.subarray(eol + 2, eol + 2 + size));
+        i = eol + 2 + size + 2;
+    }
+    return concat(chunks);
+}
+
+function update_cookie(set_cookie)
+{
+    const [pair, ...attributes] = set_cookie.split(";");
+    const eq = pair.indexOf("=");
+    if(eq < 1) return;
+    const name = pair.slice(0, eq).trim(), value = pair.slice(eq + 1).trim();
+    const expired = attributes.some(a =>
+    {
+        const [k, v = ""] = a.split("=").map(x => x.trim());
+        return k.toLowerCase() === "max-age" && +v <= 0 ||
+            k.toLowerCase() === "expires" && Date.parse(v) < Date.now();
+    });
+    if(expired || value === "") guest_cookies.delete(name);
+    else guest_cookies.set(name, value);
+}
+
+function parse_response(data)
+{
+    let end = -1;
+    for(let i = 0; i + 3 < data.length; i++)
+    {
+        if(data[i] === 13 && data[i + 1] === 10 && data[i + 2] === 13 && data[i + 3] === 10) { end = i; break; }
+    }
+    if(end < 0) return { error: "The guest's web server sent an incomplete response." };
+
+    const [status_line, ...lines] = new TextDecoder().decode(data.subarray(0, end)).split("\r\n");
+    const m = status_line.match(/^HTTP\/1\.[01] (\d{3}) ?(.*)$/);
+    if(!m) return { error: "The guest's web server sent an invalid response." };
+
+    let body = data.subarray(end + 4);
+    const headers = [];
+    for(const line of lines)
+    {
+        const colon = line.indexOf(":");
+        if(colon < 1) continue;
+        const name = line.slice(0, colon).trim().toLowerCase();
+        let value = line.slice(colon + 1).trim();
+        if(name === "set-cookie") update_cookie(value);
+        if(name === "transfer-encoding" && value.toLowerCase() === "chunked") body = decode_chunked(body);
+        if(name === "location") value = value.replace(/^https?:\/\/[^/]*/i, "");
+        if(!DROP_RESPONSE_HEADERS.has(name)) headers.push([name, value]);
+    }
+    return { status: +m[1], status_text: m[2], headers, body: body.slice().buffer };
+}
+
+function guest_http(adapter, request)
+{
+    const cacheable = request.method === "GET" && request.path.startsWith("/luci-static/");
+    if(cacheable && guest_static_cache.has(request.path))
+    {
+        return Promise.resolve(guest_static_cache.get(request.path));
+    }
+
+    // HTTP/1.0, so the server closes the connection after the response
+    const head = [`${request.method} ${request.path} HTTP/1.0`, `Host: ${location.host}`, "Connection: close"];
+    for(const [name, value] of request.headers)
+    {
+        if(FORWARD_HEADERS.has(name)) head.push(`${name}: ${value}`);
+    }
+    if(guest_cookies.size) head.push("Cookie: " + [...guest_cookies].map(([k, v]) => k + "=" + v).join("; "));
+    if(request.body) head.push("Content-Length: " + request.body.byteLength);
+    const data = [new TextEncoder().encode(head.join("\r\n") + "\r\n\r\n")];
+    if(request.body) data.push(new Uint8Array(request.body));
+
+    // v86's TCP stack doesn't retransmit, so a packet the guest drops (its
+    // receive ring is full when many requests arrive at once) stalls the
+    // connection: limit concurrent connections, and retry failed attempts
+    // (those that may have reached the server only for GET and HEAD).
+    const idempotent = request.method === "GET" || request.method === "HEAD";
+    return with_guest_connection_slot(async () =>
+    {
+        for(let attempt = 1; ; attempt++)
+        {
+            const result = await guest_http_attempt(adapter, data);
+            if(result.reply)
+            {
+                if(cacheable && result.reply.status === 200) guest_static_cache.set(request.path, result.reply);
+                return result.reply;
+            }
+            console.warn(`guest http: ${request.method} ${request.path}: ${result.error} (attempt ${attempt})`);
+            if(attempt === GUEST_HTTP_ATTEMPTS || result.sent && !idempotent)
+            {
+                return { error: result.error };
+            }
+            await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+        }
+    });
+}
+
+const GUEST_HTTP_ATTEMPTS = 3;
+const GUEST_CONNECT_TIMEOUT = 5000;
+const GUEST_IDLE_TIMEOUT = 30000;
+const GUEST_MAX_CONNECTIONS = 4;
+let guest_connections = 0;
+const guest_connection_queue = [];
+
+async function with_guest_connection_slot(f)
+{
+    if(guest_connections >= GUEST_MAX_CONNECTIONS)
+    {
+        await new Promise(resolve => guest_connection_queue.push(resolve));
+    }
+    else
+    {
+        guest_connections++;
+    }
+    try
+    {
+        return await f();
+    }
+    finally
+    {
+        // Hand the slot to the next waiting request, if any
+        const next = guest_connection_queue.shift();
+        if(next) next();
+        else guest_connections--;
+    }
+}
+
+// One connection to the guest's port 80: resolves to { reply } or
+// { error, sent } (sent: the request may have reached the server)
+function guest_http_attempt(adapter, data)
+{
+    return new Promise(resolve =>
+    {
+        const chunks = [];
+        let done = false, sent = false;
+        const conn = adapter.connect(80);
+        let timer = setTimeout(() => fail("no connection to the guest's web server"), GUEST_CONNECT_TIMEOUT);
+
+        function fail(error)
+        {
+            finish({ error, sent });
+        }
+        function finish(result)
+        {
+            if(done) return;
+            done = true;
+            clearTimeout(timer);
+            conn.close();
+            resolve(result);
+        }
+        function complete()
+        {
+            const reply = parse_response(concat(chunks));
+            if(reply.error) fail(reply.error);
+            else finish({ reply });
+        }
+        function wait_for_data()
+        {
+            clearTimeout(timer);
+            timer = setTimeout(() => fail("the guest's web server stopped answering"), GUEST_IDLE_TIMEOUT);
+        }
+
+        conn.on("connect", () =>
+        {
+            sent = true;
+            wait_for_data();
+            for(const d of data) conn.write(d);
+        });
+        conn.on("data", d =>
+        {
+            chunks.push(d.slice());
+            wait_for_data();
+        });
+        conn.on("shutdown", complete);
+        conn.on("close", () => chunks.length ? complete() : fail("the guest refused the connection"));
+    });
+}
+
+// Resolves to whether the guest accepts connections on port 80
+function guest_port_open(adapter)
+{
+    return new Promise(resolve =>
+    {
+        const conn = adapter.connect(80);
+        const timer = setTimeout(() => { conn.close(); resolve(false); }, 4000);
+        conn.on("connect", () => { clearTimeout(timer); conn.close(); resolve(true); });
+        conn.on("close", () => { clearTimeout(timer); resolve(false); });
+    });
+}
+
+function active_worker(registration)
+{
+    return new Promise(resolve =>
+    {
+        if(registration.active) return resolve(registration.active);
+        const worker = registration.installing || registration.waiting;
+        worker.addEventListener("statechange", () =>
+        {
+            if(worker.state === "activated") resolve(worker);
+        });
+    });
+}
+
+async function start_guest_web(emulator, path)
+{
+    const section = document.getElementById("web");
+    const status = document.getElementById("web-status");
+    const frame = document.getElementById("guest-web");
+    section.hidden = false;
+
+    if(!("serviceWorker" in navigator)) throw new Error("this browser has no service workers");
+    // The network adapter is created once the emulator has loaded
+    while(!emulator.network_adapter && !emulator.cpu_is_running)
+    {
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    const adapter = emulator.network_adapter;
+    if(!adapter || typeof adapter.connect !== "function") throw new Error("needs the default network (no ?relay=)");
+
+    status.textContent = "Starting …";
+    const registration = await navigator.serviceWorker.register("sw.js", { scope: new URL("cgi-bin/", location).pathname });
+    navigator.serviceWorker.onmessage = e =>
+    {
+        if(e.data && e.data.type === "v86-guest-http")
+        {
+            guest_http(adapter, e.data).then(reply => e.ports[0].postMessage(reply));
+        }
+    };
+    const claim = () => registration.active && registration.active.postMessage({ type: "v86-guest-web-owner" });
+    await active_worker(registration);
+    claim();
+    window.addEventListener("focus", claim);
+
+    status.textContent = "Waiting for the guest's web server …";
+    while(!await guest_port_open(adapter))
+    {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+    status.textContent = "Loading (the first page takes a while) …";
+    frame.onload = () => { status.textContent = ""; };
+    frame.src = path;
+    document.getElementById("web-open").href = path;
+    document.getElementById("web-reload").onclick = () =>
+    {
+        status.textContent = "Loading …";
+        frame.src = path;
+    };
+}
+</script>

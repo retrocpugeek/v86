@@ -53,7 +53,7 @@ export function V86(options)
     this.cpu_is_running = false;
     this.cpu_exception_hook = function(n) {};
 
-    /** "x86" (default) or "aarch64" */
+    /** "x86" (default), "aarch64" or "riscv64" */
     const arch = options.arch || "x86";
 
     const bus = Bus.create();
@@ -115,6 +115,10 @@ export function V86(options)
         "a64_mmio_read": function(addr, size) { return cpu.mmio_read(addr, size); },
         "a64_mmio_write": function(addr, size, value) { cpu.mmio_write(addr, size, value); },
         "a64_jit_compile": function(ptr, len, index, cookie) { return cpu.jit_compile(ptr, len, index, cookie); },
+        // riscv64 (v86-rv64.wasm): virtio-mmio is in JS, the UART talks to serial0
+        "rv64_mmio_read": function(addr, size) { return cpu.mmio_read(addr, size); },
+        "rv64_mmio_write": function(addr, size, value) { cpu.mmio_write(addr, size, value); },
+        "rv64_serial_out": function(byte) { cpu.serial_out(byte); },
     };
 
     let wasm_fn = options.wasm_fn;
@@ -126,7 +130,7 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" ? "v86-rv64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
                 if(options.wasm_path)
@@ -185,7 +189,7 @@ export function V86(options)
     wasm_fn({ "env": wasm_shared_funcs })
         .then((exports) => {
             wasm_memory = exports.memory;
-            if(arch !== "aarch64")
+            if(arch === "x86")
             {
                 exports["rust_init"]();
             }
