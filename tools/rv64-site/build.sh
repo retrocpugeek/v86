@@ -13,6 +13,12 @@ OUT=build/rv64-site
 
 make build/v86-rv64.wasm build/libv86.js
 mkdir -p "$OUT/images"
-cp tools/rv64-site/index.html tools/rv64-site/_headers tools/a64-site/sw.js build/libv86.js build/v86-rv64.wasm "$OUT/"
+cp tools/rv64-site/_headers tools/a64-site/sw.js build/libv86.js build/v86-rv64.wasm "$OUT/"
+# The page loads libv86.js and the wasm with their content hash as a query,
+# so a browser never runs a cached old one with the new page (they're cached
+# for an hour)
+V=$(cat build/libv86.js build/v86-rv64.wasm | sha256sum | cut -c1-12)
+sed -e "s|src=\"libv86.js\"|src=\"libv86.js?v=$V\"|" -e "s|wasm_path: \"v86-rv64.wasm\"|wasm_path: \"v86-rv64.wasm?v=$V\"|" \
+  tools/rv64-site/index.html > "$OUT/index.html"
 [ -f "$OUT/images/manifest.json" ] || echo '{ "builds": [] }' > "$OUT/images/manifest.json"
 echo "site in $OUT ($(find "$OUT" -type f | wc -l) files)"
