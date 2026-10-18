@@ -201,6 +201,12 @@ impl Cpu {
     pub fn timer_update(&mut self) {
         let now = self.now_ns();
         self.bus.now_ns = now;
+        if let Some(c) = self.bus.ch32.as_mut() {
+            // CH32V003: SysTick instead of the CLINT
+            c.update(now);
+            self.next_timer_ns = c.next_event_ns();
+            return;
+        }
         let cmp = self.bus.clint.mtimecmp;
         let period = 1_000_000_000 / crate::bus::TIMEBASE_HZ;
         if self.bus.mtime() >= cmp {
@@ -249,9 +255,22 @@ impl Cpu {
         self.stop_batch = true;
     }
 
+    /// Is an interrupt pending that ends WFI (whether or not it's enabled)?
+    #[inline]
+    pub fn wake_pending(&self) -> bool {
+        match &self.bus.ch32 {
+            Some(c) => c.pending_irq().is_some(),
+            None => self.csr.mip & self.csr.mie != 0,
+        }
+    }
+
     /// The interrupt to take now, if any.
     #[inline]
     pub fn pending_interrupt(&self) -> Option<u64> {
+        if let Some(c) = &self.bus.ch32 {
+            // CH32V003: the PFIC's interrupts, in machine mode
+            return if self.csr.mstatus & MSTATUS_MIE != 0 { c.pending_irq().map(|n| n as u64) } else { None };
+        }
         let pending = self.csr.mip & self.csr.mie;
         if pending == 0 {
             return None;
@@ -409,7 +428,7 @@ impl Cpu {
             self.timer_update();
         }
         while self.waiting {
-            if self.csr.mip & self.csr.mie != 0 {
+            if self.wake_pending() {
                 self.waiting = false;
             } else if self.next_timer_ns != u64::MAX && !self.realtime {
                 // Skip idle time straight to the next timer deadline.

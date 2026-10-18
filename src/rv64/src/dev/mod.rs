@@ -2,6 +2,7 @@
 //! the browser build these live on the JS side (v86's virtio stack); the
 //! register models follow QEMU's so both stay comparable against it.
 
+pub mod ch32;
 pub mod rtc;
 pub mod uart;
 pub mod virtio;

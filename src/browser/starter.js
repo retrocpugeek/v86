@@ -53,7 +53,7 @@ export function V86(options)
     this.cpu_is_running = false;
     this.cpu_exception_hook = function(n) {};
 
-    /** "x86" (default), "aarch64", "riscv64" or "riscv32" */
+    /** "x86" (default), "aarch64", "riscv64", "riscv32" or "ch32v003" */
     const arch = options.arch || "x86";
 
     const bus = Bus.create();
@@ -131,7 +131,7 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" ? "v86-rv64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch === "ch32v003" ? "v86-rv64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
                 if(options.wasm_path)

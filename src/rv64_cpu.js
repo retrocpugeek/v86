@@ -1,5 +1,7 @@
 // RISC-V machine for v86: QEMU-style riscv64 (or, for arch "riscv32",
-// riscv32) "virt" board with one hart.
+// riscv32) "virt" board with one hart. For arch "ch32v003", a WCH CH32V003
+// microcontroller instead: `bios` is its flash image, USART1 the serial
+// console (src/rv64/src/dev/ch32.rs).
 //
 // The hart, MMU, CLINT, PLIC, 16550 UART and goldfish RTC run in
 // v86-rv64.wasm (src/rv64). The virtio-mmio slots are JS: virtio-blk (hda),
@@ -54,6 +56,8 @@ export function RV64CPU(bus, wasm, stop_idling)
     this.wasm_memory = this.wasm["memory"];
     /** RV32 (arch "riscv32"): see Cpu::xlen32 in src/rv64/src/cpu.rs */
     this.xlen32 = wasm.arch === "riscv32";
+    /** A CH32V003 microcontroller (arch "ch32v003") rather than virt */
+    this.ch32 = wasm.arch === "ch32v003";
     this.stop_idling = stop_idling;
 
     /** Devices by role; virtio_net reads devices.net to pick its id. */
@@ -303,6 +307,11 @@ RV64CPU.prototype.init = function(settings, device_bus)
     this.settings = settings;
     const ram_mb = Math.max(64, (settings.memory_size || 128 * 1024 * 1024) / (1024 * 1024) | 0);
     this.reset_core(ram_mb);
+    if(this.ch32)
+    {
+        this.boot();
+        return;
+    }
 
     // The virtio devices are typed for the x86 CPU; this object provides the
     // parts they use (guest memory accessors, devices, virtio_mmio_register).
@@ -333,6 +342,13 @@ RV64CPU.prototype.init = function(settings, device_bus)
 /** (Re)create the wasm machine with `ram_mb` MB of RAM. */
 RV64CPU.prototype.reset_core = function(ram_mb)
 {
+    if(this.ch32)
+    {
+        // boot() creates the machine with its firmware
+        this.ram_size = 2048;
+        this.powered_off = false;
+        return;
+    }
     this.ram_size = ram_mb * 1024 * 1024;
     this.ram_ptr = this.wasm["rv64_init"](ram_mb, Date.now() / 1000);
     this.wasm["rv64_set_xlen32"](+this.xlen32);
@@ -352,6 +368,17 @@ RV64CPU.prototype.reset_core = function(ram_mb)
 RV64CPU.prototype.boot = function()
 {
     const settings = this.settings;
+    if(this.ch32)
+    {
+        dbg_assert(settings.bios, "ch32v003: a flash image (bios) is required");
+        const flash = new Uint8Array(settings.bios);
+        const ptr = this.wasm["rv64_alloc"](flash.length);
+        new Uint8Array(this.wasm_memory.buffer, ptr, flash.length).set(flash);
+        const result = this.wasm["rv64_init_ch32"](ptr, flash.length);
+        this.wasm["rv64_free"](ptr, flash.length);
+        dbg_assert(result === 0, "ch32v003: the flash image is over 16 KB");
+        return;
+    }
     dbg_assert(settings.bios, "riscv64: firmware (bios, OpenSBI fw_dynamic) is required");
     dbg_assert(settings.kernel, "riscv64: a kernel (Image) is required");
     const firmware = new Uint8Array(settings.bios);

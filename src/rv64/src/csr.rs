@@ -73,6 +73,9 @@ pub struct Csrs {
     pub counter_offset: u64,
     /// Debug trigger select (there are no triggers: tdata1 reads 0).
     pub tselect: u64,
+    /// CH32V003 (QingKe V2A) INTSYSCR: interrupt nesting and the hardware
+    /// prologue/epilogue, which isn't modelled (see dev/ch32.rs).
+    pub intsyscr: u64,
 }
 
 impl Default for Csrs {
@@ -105,6 +108,7 @@ impl Default for Csrs {
             fcsr: 0,
             counter_offset: 0,
             tselect: 0,
+            intsyscr: 0,
         }
     }
 }
@@ -146,6 +150,7 @@ impl Cpu {
                 (v & 0x7fff_ffff) | (v >> 63) << 31
             }
             0x310 | 0x31a => 0, // mstatush, menvcfgh
+            0x804 if self.bus.ch32.is_some() => self.csr.intsyscr,
             0x301 => MISA32,
             0xc80..=0xc82 => hi(self.csr_read64(n - 0x80)?), // cycleh, timeh, instreth
             0xb80 | 0xb82 => hi(self.csr_read64(n - 0x80)?), // mcycleh, minstreth
@@ -170,6 +175,10 @@ impl Cpu {
         match n {
             0x300 | 0x100 => self.csr_write64(n, v & 0x7fff_ffff),
             0x310 | 0x31a => Ok(()),
+            0x804 if self.bus.ch32.is_some() => {
+                self.csr.intsyscr = v & 3;
+                Ok(())
+            }
             0x301 => Ok(()),
             0x180 => {
                 if self.prv == PRV_S && self.csr.mstatus & MSTATUS_TVM != 0 {

@@ -113,6 +113,26 @@ pub extern "C" fn rv64_init(ram_mb: u32, epoch_secs: f64) -> u32 {
 #[no_mangle]
 pub extern "C" fn rv64_set_xlen32(on: u32) { cpu().xlen32 = on != 0 }
 
+/// Create a WCH CH32V003 (dev/ch32.rs) with `firmware` (`len` bytes at
+/// `ptr`) in its flash, instead of the virt machine; it starts at once.
+/// USART1 is the console (rv64_serial_out, rv64_serial_in). Returns 0, or -1
+/// if the firmware doesn't fit.
+#[no_mangle]
+pub extern "C" fn rv64_init_ch32(ptr: u32, len: u32) -> i32 {
+    unsafe {
+        *addr_of_mut!(CPU) = None;
+        *addr_of_mut!(IRQ_LINES) = [0; NUM_IRQ_LINES + 1];
+    }
+    let fw = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let out = Box::new(|b: u8| unsafe { rv64_serial_out(b as u32) });
+    let Ok(mut cpu) = crate::dev::ch32::machine(fw, out) else { return -1 };
+    cpu.bus.log_unmapped = false;
+    cpu.realtime = true;
+    unsafe { *addr_of_mut!(UART_RX) = Some(cpu.bus.ch32.as_ref().unwrap().rx.clone()) };
+    unsafe { *addr_of_mut!(CPU) = Some(Box::new(cpu)) };
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rv64_irq_lines_ptr() -> u32 { addr_of!(IRQ_LINES) as u32 }
 

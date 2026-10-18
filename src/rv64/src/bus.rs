@@ -205,7 +205,15 @@ pub enum PowerRequest {
 
 pub struct Bus {
     pub ram: Vec<u8>,
+    /// Where RAM starts (RAM_BASE; the CH32V003's SRAM is at 0x2000_0000).
+    pub ram_base: u64,
     pub rom: Vec<u8>,
+    /// Where the boot ROM is (ROM_BASE; the CH32V003's flash is at
+    /// 0x0800_0000, and also at 0 with rom_alias0).
+    pub rom_base: u64,
+    pub rom_alias0: bool,
+    /// The CH32V003's SysTick and interrupt controller (dev/ch32.rs).
+    pub ch32: Option<Box<crate::dev::ch32::Ch32>>,
     pub power_request: PowerRequest,
     pub clint: Clint,
     pub plic: Plic,
@@ -227,7 +235,11 @@ impl Bus {
     pub fn new(ram_size: usize) -> Bus {
         Bus {
             ram: vec![0; ram_size],
+            ram_base: RAM_BASE,
             rom: Vec::new(),
+            rom_base: ROM_BASE,
+            rom_alias0: false,
+            ch32: None,
             power_request: PowerRequest::None,
             clint: Clint::default(),
             plic: Plic::default(),
@@ -268,7 +280,7 @@ impl Bus {
     /// Offset of [pa, pa + len) in RAM, if it's all RAM.
     #[inline(always)]
     pub fn ram_offset(&self, pa: u64, len: u64) -> Option<usize> {
-        let off = pa.wrapping_sub(RAM_BASE);
+        let off = pa.wrapping_sub(self.ram_base);
         if off < self.ram.len() as u64 && len <= self.ram.len() as u64 - off {
             Some(off as usize)
         } else {
@@ -303,11 +315,24 @@ impl Bus {
         self.write_mmio(pa, size, value)
     }
 
-    pub fn has_rom(&self, pa: u64) -> bool { pa.wrapping_sub(ROM_BASE) < self.rom.len() as u64 }
+    pub fn has_rom(&self, pa: u64) -> bool { self.rom_offset(pa).is_some() }
+
+    fn rom_offset(&self, pa: u64) -> Option<usize> {
+        let len = self.rom.len() as u64;
+        let off = pa.wrapping_sub(self.rom_base);
+        if off < len {
+            Some(off as usize)
+        } else if self.rom_alias0 && pa < len {
+            Some(pa as usize)
+        } else {
+            None
+        }
+    }
 
     /// Does anything but RAM answer at pa? Other addresses are access faults.
     pub fn has_device(&self, pa: u64) -> bool {
         self.has_rom(pa)
+            || self.ch32.as_ref().is_some_and(|c| c.claims(pa))
             || pa.wrapping_sub(CLINT_BASE) < CLINT_SIZE
             || pa.wrapping_sub(PLIC_BASE) < PLIC_SIZE
             || pa.wrapping_sub(TEST_BASE) < TEST_SIZE
@@ -315,13 +340,17 @@ impl Bus {
     }
 
     fn read_mmio(&mut self, pa: u64, size: u32) -> u64 {
-        if self.has_rom(pa) {
-            let off = (pa - ROM_BASE) as usize;
+        if let Some(off) = self.rom_offset(pa) {
             let mut b = [0u8; 8];
             for (i, x) in b.iter_mut().enumerate().take(size as usize) {
                 *x = self.rom.get(off + i).copied().unwrap_or(0);
             }
             return read_le(&b, size);
+        }
+        if let Some(c) = self.ch32.as_mut() {
+            if let Some(v) = c.read(pa, size, self.now_ns) {
+                return v;
+            }
         }
         if pa.wrapping_sub(TEST_BASE) < TEST_SIZE {
             return 0;
@@ -355,6 +384,11 @@ impl Bus {
     fn write_mmio(&mut self, pa: u64, size: u32, value: u64) {
         if self.has_rom(pa) {
             return;
+        }
+        if let Some(c) = self.ch32.as_mut() {
+            if c.write(pa, size, value, self.now_ns) {
+                return;
+            }
         }
         if pa.wrapping_sub(TEST_BASE) < TEST_SIZE {
             if pa == TEST_BASE {

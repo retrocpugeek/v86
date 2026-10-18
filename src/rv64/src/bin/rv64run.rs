@@ -3,6 +3,10 @@
 //!   rv64run --bios fw_dynamic.bin --kernel Image --dtb virt.dtb [--disk rootfs]
 //!           [--mem 256] [--steps N] [--log-illegal] [--lockstep qemu-cpu.log] [--xlen 32]
 //!           [--disk-slot N]
+//!   rv64run --ch32v003 firmware.bin [--steps N]
+//!
+//! --ch32v003 runs a WCH CH32V003 (dev/ch32.rs) instead, in real time, with
+//! USART1 on stdin/stdout.
 //!
 //! Boots like `qemu-system-riscv64 -M virt -bios ... -kernel ...`. The serial
 //! console (16550) is on stdin/stdout; Ctrl-A x quits.
@@ -40,6 +44,7 @@ struct Args {
     /// virtio-mmio transport of the disk (QEMU's -device virtio-blk-device
     /// takes the last one, 7)
     disk_slot: u64,
+    ch32: Option<String>,
 }
 
 fn usage() -> ! {
@@ -59,6 +64,7 @@ fn parse_args() -> Args {
         lockstep: None,
         xlen32: false,
         disk_slot: 0,
+        ch32: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -72,6 +78,7 @@ fn parse_args() -> Args {
             "--steps" => a.steps = val().parse().unwrap_or_else(|_| usage()),
             "--log-illegal" => a.log_illegal = true,
             "--lockstep" => a.lockstep = Some(val()),
+            "--ch32v003" => a.ch32 = Some(val()),
             "--disk-slot" => a.disk_slot = val().parse().ok().filter(|&n| n < 8).unwrap_or_else(|| usage()),
             "--xlen" => {
                 a.xlen32 = match val().as_str() {
@@ -83,7 +90,7 @@ fn parse_args() -> Args {
             _ => usage(),
         }
     }
-    if a.bios.is_empty() || a.kernel.is_empty() || a.dtb.is_empty() {
+    if a.ch32.is_none() && (a.bios.is_empty() || a.kernel.is_empty() || a.dtb.is_empty()) {
         usage();
     }
     a
@@ -113,6 +120,19 @@ fn read(path: &str) -> Vec<u8> { std::fs::read(path).unwrap_or_else(|e| panic!("
 
 fn main() {
     let args = parse_args();
+    if let Some(fw) = &args.ch32 {
+        let out = |b: u8| {
+            let _ = std::io::stdout().write_all(&[b]);
+        };
+        let mut cpu = v86_rv64::dev::ch32::machine(&read(fw), Box::new(out)).unwrap_or_else(|e| {
+            eprintln!("ch32v003: {e}");
+            exit(1)
+        });
+        cpu.realtime = true;
+        let rx = cpu.bus.ch32.as_ref().unwrap().rx.clone();
+        interactive(&mut cpu, rx, args.steps);
+        return;
+    }
     let mut bus = Bus::new((args.mem_mb << 20) as usize);
     let out = |b: u8| {
         let _ = std::io::stdout().write_all(&[b]);
@@ -200,6 +220,9 @@ fn interactive(cpu: &mut Cpu, rx: Arc<Mutex<VecDeque<u8>>>, steps: u64) {
             break "step limit";
         }
         let n = 200_000.min(steps - done);
+        if cpu.realtime {
+            cpu.sync_host_ns(start.elapsed().as_nanos() as u64);
+        }
         let r = cpu.run(n);
         done += n;
         cpu.bus.now_ns = cpu.now_ns();
@@ -208,7 +231,10 @@ fn interactive(cpu: &mut Cpu, rx: Arc<Mutex<VecDeque<u8>>>, steps: u64) {
         let _ = std::io::stdout().flush();
         match r {
             RunExit::Budget => {}
-            RunExit::Idle => std::thread::sleep(std::time::Duration::from_millis(5)),
+            RunExit::Idle => {
+                let ns = cpu.ns_until_timer().unwrap_or(5_000_000).min(5_000_000);
+                std::thread::sleep(std::time::Duration::from_nanos(ns))
+            }
             RunExit::PowerOff => break "power off",
             RunExit::Reset => break "reset",
         }

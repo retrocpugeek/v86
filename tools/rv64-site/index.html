@@ -32,6 +32,16 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #log-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 #log-text { box-sizing: border-box; width: 100%; height: 60vh; background: #000; color: var(--fg); font: 12px/1.3 monospace; white-space: pre; }
 #log-dialog .log-tools { margin-top: 8px; }
+/* Touch controls (builds with "controls": "tetris") */
+#pad { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 440px; align-self: flex-start;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#pad[hidden] { display: none; }
+#pad .row { display: flex; gap: 10px; }
+#pad button { flex: 1; height: 64px; font-size: 22px; border-radius: 14px; background: #233041; border: 1px solid #3c4d66;
+    color: var(--fg); touch-action: none; padding: 0; }
+#pad .small button { height: 46px; font-size: 15px; }
+#pad button.down { background: #3d6290; border-color: #6c9bd2; }
+#pad-note { color: var(--muted); font-size: 13px; }
 footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
 a { color: var(--accent); }
 code { color: var(--fg); }
@@ -69,6 +79,21 @@ code { color: var(--fg); }
 </dialog>
 <main>
   <div id="terminal"></div>
+  <section id="pad" hidden aria-label="Game controls">
+    <div class="row"><button data-key="rotate" aria-label="Rotate">&#x27f3; Rotate</button></div>
+    <div class="row">
+      <button data-key="left" data-repeat aria-label="Left">&#x25c0;</button>
+      <button data-key="down" data-repeat aria-label="Down">&#x25bc;</button>
+      <button data-key="right" data-repeat aria-label="Right">&#x25b6;</button>
+    </div>
+    <div class="row"><button data-key="drop" aria-label="Hard drop">&#x2913; Drop</button></div>
+    <div class="row small">
+      <button data-key="rotate_back" aria-label="Rotate the other way">&#x27f2;</button>
+      <button data-key="pause">Pause</button>
+      <button data-key="new">New game</button>
+    </div>
+    <span id="pad-note">Keyboard: arrows, space (drop), z, p, r.</span>
+  </section>
   <section id="web" hidden>
     <div class="bar">
       <strong>Web interface</strong>
@@ -80,6 +105,11 @@ code { color: var(--fg); }
   </section>
 </main>
 <footer>
+  <p id="mcu-about" hidden>
+    A WCH CH32V003 microcontroller (RISC-V RV32EC, 48 MHz class, 2 KB of RAM, 16 KB of flash) emulated by
+    v86's RISC-V core, running a bare-metal Tetris that draws over its serial port
+    (<a href="https://github.com/retrocpugeek/v86/tree/riscv-port/tools/ch32v003">firmware source</a>).
+  </p>
   Buildroot Linux running on v86's RISC-V core (RV64GC or RV32GC, OpenSBI, QEMU <code>virt</code>-like machine), entirely in your browser.
   Log in as <code>root</code>. Disk changes stay in this tab.
   Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
@@ -121,6 +151,12 @@ code { color: var(--fg); }
     // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
     const relay = params.get("relay") || "fetch";
     const cors_proxy = params.has("relay") ? undefined : location.origin + "/proxy?url=";
+
+    if(build.arch === "ch32v003")
+    {
+        start_mcu(build, base, status);
+        return;
+    }
 
     status.textContent = "Downloading kernel";
     const kernel = await fetch_kernel(base + build.kernel, status);
@@ -170,6 +206,99 @@ code { color: var(--fg); }
     document.getElementById("status").textContent = "Error: " + e.message;
     throw e;
 });
+
+// A CH32V003 microcontroller (src/rv64/src/dev/ch32.rs) with build.bios as
+// its flash: no kernel or disk. The terminal is sized to build.cols x
+// build.rows, with the font scaled to fit the page's width.
+function start_mcu(build, base, status)
+{
+    const cols = build.cols || 46, rows = build.rows || 25;
+    const width = Math.min(document.documentElement.clientWidth - 32 - 8, 760);
+    const font_size = Math.max(8, Math.min(18, Math.floor(width / (cols * 0.6))));
+    const GameTerminal = class extends window["Terminal"]
+    {
+        constructor(options)
+        {
+            super(Object.assign({}, options, { cols, rows, fontSize: font_size }));
+        }
+    };
+    document.getElementById("mcu-about").hidden = false;
+    document.querySelector("h1").textContent = "v86 CH32V003";
+    document.title = "v86 CH32V003: " + build.label.replace(/^.*: /, "");
+    const emulator = window.emulator = new V86({
+        arch: "ch32v003",
+        wasm_path: "v86-rv64.wasm",
+        bios: { url: base + build.bios },
+        serial_console: { type: "xtermjs", container: document.getElementById("terminal"), xterm_lib: GameTerminal },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+    setup_console_log(emulator, build);
+    emulator.add_listener("emulator-ready", () => { status.textContent = "Running"; });
+    if(build.controls === "tetris")
+    {
+        setup_pad(emulator);
+    }
+}
+
+// On-screen controls for the Tetris firmware (tools/ch32v003/tetris.c): each
+// button sends the key the game reads from its serial port; left, right
+// and down repeat while held. Without the terminal focused, the keyboard's
+// keys are sent too.
+const PAD_KEYS = {
+    rotate: "\x1b[A", left: "\x1b[D", right: "\x1b[C", down: "\x1b[B",
+    drop: " ", rotate_back: "z", pause: "p", new: "r",
+};
+
+function setup_pad(emulator)
+{
+    const pad = document.getElementById("pad");
+    pad.hidden = false;
+    for(const button of pad.querySelectorAll("button"))
+    {
+        const key = PAD_KEYS[button.dataset.key];
+        let timer = 0;
+        const stop = () =>
+        {
+            clearTimeout(timer);
+            clearInterval(timer);
+            timer = 0;
+            button.classList.remove("down");
+        };
+        button.addEventListener("pointerdown", e =>
+        {
+            e.preventDefault();
+            button.setPointerCapture(e.pointerId);
+            button.classList.add("down");
+            emulator.serial0_send(key);
+            if(navigator.vibrate) navigator.vibrate(8);
+            if(button.hasAttribute("data-repeat"))
+            {
+                timer = setTimeout(() => { timer = setInterval(() => emulator.serial0_send(key), 75); }, 220);
+            }
+        });
+        button.addEventListener("pointerup", stop);
+        button.addEventListener("pointercancel", stop);
+        button.addEventListener("lostpointercapture", stop);
+        button.addEventListener("contextmenu", e => e.preventDefault());
+    }
+    const keyboard = {
+        ArrowUp: PAD_KEYS.rotate, ArrowLeft: PAD_KEYS.left, ArrowRight: PAD_KEYS.right, ArrowDown: PAD_KEYS.down,
+        " ": " ", z: "z", x: "x", p: "p", r: "r", a: "a", d: "d", w: "w", s: "s",
+    };
+    document.addEventListener("keydown", e =>
+    {
+        if(document.getElementById("terminal").contains(document.activeElement)) return;
+        const k = keyboard[e.key];
+        if(k && !e.ctrlKey && !e.metaKey && !e.altKey)
+        {
+            e.preventDefault();
+            emulator.serial0_send(k);
+        }
+    });
+}
 
 // The kernel, decompressed if it's gzipped (Image.gz: Cloudflare's static
 // assets allow at most 25 MiB per file)

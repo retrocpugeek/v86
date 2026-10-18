@@ -33,6 +33,15 @@ JIT). pc-relative results, jump targets and load/store addresses are 32
 bits, CSRs read sign-extended (with the `h` halves of 64-bit ones), and
 paging is Sv32. The C extension has RV32C's C.JAL, C.FLW etc. (`rvc::expand32`).
 
+## CH32V003
+
+`dev/ch32.rs` makes a WCH CH32V003 microcontroller out of the RV32 core:
+flash at 0x0800_0000 (and 0) as ROM, 2 KB of SRAM, SysTick and the PFIC
+(interrupts in machine mode), USART1 as the console, RCC. `rv64run
+--ch32v003 flash.bin` runs one natively in real time; in the browser it's
+`arch: "ch32v003"` with `bios` as the flash image. `tools/ch32v003` has a
+Tetris for it.
+
 ## Running
 
 ```sh

@@ -351,7 +351,7 @@ impl Cpu {
                     if self.prv == PRV_U || (self.prv == PRV_S && self.csr.mstatus & MSTATUS_TW != 0) {
                         return Err(illegal(raw));
                     }
-                    if self.csr.mip & self.csr.mie == 0 {
+                    if !self.wake_pending() {
                         self.waiting = true;
                     }
                 }
