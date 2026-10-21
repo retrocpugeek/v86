@@ -6,7 +6,9 @@
 #   tools/a64-site/add-image.sh <id> <label> <Image> <rootfs.ext4|rootfs.squashfs> [cmdline]
 #
 # WEB=<path> (e.g. WEB=/cgi-bin/luci/) shows the guest's web interface at that
-# path next to the console (the page only serves /cgi-bin/ from the guest).
+# path next to the console (the page serves its first directory, e.g. /cgi-bin/,
+# from the guest); WEB_APP=gdb-wui with WEB=/gdb-wui/ shows gdb-wui instead
+# (see gdb-wui/build.sh and guest-web.js).
 # FIRMWARE=1: <Image> is firmware that boots from the disk (U-Boot, see
 # u-boot/build.sh) rather than a Linux kernel; the cmdline is then unused.
 # SCREEN=<width>x<height> gives the machine a framebuffer, keyboard and
@@ -30,12 +32,13 @@ python3 "$ROOT/tools/split-image.py" $CHUNK "$ROOTFS" "$DIR/rootfs/%d-%d$EXT"
 # split-image.py pads the last part; the disk size is rounded up to match
 SIZE=$(( ( $(stat -Lc %s "$ROOTFS") + CHUNK - 1 ) / CHUNK * CHUNK ))
 
-node - "$ROOT/build/a64-site/images/manifest.json" "$ID" "$LABEL" "$EXT" "$SIZE" "$CHUNK" "$CMDLINE" "${WEB:-}" "$NAME" "${FIRMWARE:-}" "${SCREEN:-}" "${MEMORY:-}" <<'JS'
+node - "$ROOT/build/a64-site/images/manifest.json" "$ID" "$LABEL" "$EXT" "$SIZE" "$CHUNK" "$CMDLINE" "${WEB:-}" "$NAME" "${FIRMWARE:-}" "${SCREEN:-}" "${MEMORY:-}" "${WEB_APP:-}" <<'JS'
 const fs = require("fs");
-const [file, id, label, ext, size, chunk_size, cmdline, web, kernel, firmware, screen, memory] = process.argv.slice(2);
+const [file, id, label, ext, size, chunk_size, cmdline, web, kernel, firmware, screen, memory, web_app] = process.argv.slice(2);
 const m = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { builds: [] };
 const entry = { id, label, kernel, rootfs: { ext, size: +size, chunk_size: +chunk_size }, cmdline };
 if(web) entry.web = web;
+if(web_app) entry.web_app = web_app;
 if(firmware) entry.firmware = true;
 if(screen)
 {
