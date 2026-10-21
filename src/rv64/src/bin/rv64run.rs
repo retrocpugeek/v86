@@ -3,10 +3,15 @@
 //!   rv64run --bios fw_dynamic.bin --kernel Image --dtb virt.dtb [--disk rootfs]
 //!           [--mem 256] [--steps N] [--log-illegal] [--lockstep qemu-cpu.log] [--xlen 32]
 //!           [--disk-slot N]
-//!   rv64run (--ch32v003 | --ch32v307) firmware.bin [--steps N]
+//!   rv64run (--ch32v003 | --ch32v307) firmware.bin [--steps N] [--script "..."]
 //!
 //! --ch32v003 and --ch32v307 run a WCH CH32V microcontroller (dev/ch32.rs)
-//! instead, in real time, with USART1 on stdin/stdout.
+//! instead, in real time, with USART1 on stdin/stdout. With --script, it
+//! runs as fast as it can through a list of events at virtual times (ms),
+//! separated by ';', for the CH32V003 game console's inputs:
+//! "<ms> show" prints the OLED display, "<ms> fire" and "<ms> nofire" press
+//! and release the fire button (PA2 low), "<ms> pad <n>" sets the direction
+//! buttons' ADC value (channel 2; 0 when none is pressed).
 //!
 //! Boots like `qemu-system-riscv64 -M virt -bios ... -kernel ...`. The serial
 //! console (16550) is on stdin/stdout; Ctrl-A x quits.
@@ -45,6 +50,7 @@ struct Args {
     /// takes the last one, 7)
     disk_slot: u64,
     ch32: Option<(v86_rv64::dev::ch32::Chip, String)>,
+    script: Option<String>,
 }
 
 fn usage() -> ! {
@@ -65,6 +71,7 @@ fn parse_args() -> Args {
         xlen32: false,
         disk_slot: 0,
         ch32: None,
+        script: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -80,6 +87,7 @@ fn parse_args() -> Args {
             "--lockstep" => a.lockstep = Some(val()),
             "--ch32v003" => a.ch32 = Some((v86_rv64::dev::ch32::Chip::V003, val())),
             "--ch32v307" => a.ch32 = Some((v86_rv64::dev::ch32::Chip::V307, val())),
+            "--script" => a.script = Some(val()),
             "--disk-slot" => a.disk_slot = val().parse().ok().filter(|&n| n < 8).unwrap_or_else(|| usage()),
             "--xlen" => {
                 a.xlen32 = match val().as_str() {
@@ -130,6 +138,10 @@ fn main() {
             eprintln!("{chip:?}: {e}");
             exit(1)
         });
+        if let Some(script) = &args.script {
+            run_script(&mut cpu, script);
+            return;
+        }
         cpu.realtime = true;
         let rx = cpu.bus.ch32.as_ref().unwrap().rx.clone();
         interactive(&mut cpu, rx, args.steps);
@@ -171,6 +183,52 @@ fn main() {
     match &args.lockstep {
         Some(path) => lockstep(&mut cpu, path, args.steps),
         None => interactive(&mut cpu, rx, args.steps),
+    }
+}
+
+/// The CH32V's OLED display as text, two pixel rows per line.
+fn show_display(cpu: &Cpu, ms: u64) {
+    use v86_rv64::dev::ssd1306::{HEIGHT, WIDTH};
+    let mut px = vec![0u8; WIDTH * HEIGHT];
+    cpu.bus.ch32.as_ref().unwrap().display.render(&mut px);
+    println!("--- {ms} ms ---");
+    for y in (0..HEIGHT).step_by(2) {
+        let line: String = (0..WIDTH)
+            .map(|x| match (px[y * WIDTH + x], px[(y + 1) * WIDTH + x]) {
+                (0, 0) => ' ',
+                (_, 0) => '▀',
+                (0, _) => '▄',
+                _ => '█',
+            })
+            .collect();
+        println!("|{}|", line.trim_end());
+    }
+}
+
+fn run_script(cpu: &mut Cpu, script: &str) {
+    let mut events: Vec<(u64, Vec<&str>)> = script
+        .split(';')
+        .filter_map(|e| {
+            let mut w = e.split_whitespace();
+            Some((w.next()?.parse().ok()?, w.collect()))
+        })
+        .collect();
+    events.sort_by_key(|e| e.0);
+    for (ms, what) in events {
+        while cpu.now_ns() < ms * 1_000_000 {
+            if matches!(cpu.run(10_000), RunExit::PowerOff | RunExit::Reset | RunExit::Idle) {
+                eprintln!("rv64run: the CPU stopped at {} ms", cpu.now_ns() / 1_000_000);
+                return;
+            }
+        }
+        let c = cpu.bus.ch32.as_mut().unwrap();
+        match what.as_slice() {
+            ["show"] => show_display(cpu, ms),
+            ["fire"] => c.gpio_in[0] = (1 << 2, 0),
+            ["nofire"] => c.gpio_in[0] = (0, 0),
+            ["pad", n] => c.adc_in[2] = n.parse().unwrap_or(0),
+            _ => eprintln!("rv64run: unknown script event {what:?}"),
+        }
     }
 }
 

@@ -230,6 +230,17 @@ impl Cpu {
         }
     }
 
+    /// Time instructions as one per cycle at `hz` (a CH32V's HCLK), keeping
+    /// virtual time continuous.
+    pub fn set_clock_hz(&mut self, hz: u64) {
+        let ns = (1_000_000_000 + hz / 2).checked_div(hz).unwrap_or(1).max(1);
+        if ns != self.ns_per_insn {
+            let now = self.now_ns();
+            self.ns_per_insn = ns;
+            self.warp_ns = now.wrapping_sub(self.icount.wrapping_mul(ns));
+        }
+    }
+
     /// Advance virtual time to at least the host clock (realtime mode); see
     /// v86's aarch64 core for the reasoning behind MAX_WARP_NS.
     pub fn sync_host_ns(&mut self, host_ns: u64) {
@@ -245,6 +256,11 @@ impl Cpu {
         }
     }
 
+    /// How far virtual time is ahead of the host clock (realtime mode), in ns.
+    pub fn ns_ahead(&self, host_ns: u64) -> u64 {
+        self.host_base_ns.map_or(0, |base| self.now_ns().saturating_sub(host_ns.saturating_sub(base)))
+    }
+
     pub fn ns_until_timer(&self) -> Option<u64> {
         (self.next_timer_ns != u64::MAX).then(|| self.next_timer_ns.saturating_sub(self.now_ns()))
     }
@@ -253,9 +269,14 @@ impl Cpu {
 
     /// Copy the CLINT's and PLIC's lines into mip (after device accesses).
     pub fn update_mip(&mut self) {
-        if let Some(c) = &self.bus.ch32 {
+        if let Some(c) = self.bus.ch32.as_mut() {
             // Console input may have arrived
             c.invalidate();
+            if c.clock_changed {
+                c.clock_changed = false;
+                let hz = c.hclk();
+                self.set_clock_hz(hz);
+            }
         }
         let mut mip = self.csr.mip & !(MIP_MSIP | MIP_MEIP);
         if self.bus.clint.msip {

@@ -1570,6 +1570,61 @@ V86.prototype.get_gpio_out = function(port)
 };
 
 /**
+ * Microcontrollers (arch "ch32v003"): drive input pins of a GPIO port, e.g.
+ * a button's (port 0: A, 1: B, ...; levels for the pins in mask).
+ * @param {number} port
+ * @param {number} mask
+ * @param {number} levels
+ */
+V86.prototype.set_gpio_in = function(port, mask, levels)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_set_gpio_in) cpu.ch32_set_gpio_in(port, mask, levels);
+};
+
+/**
+ * Microcontrollers: set an ADC channel's input (0 to 1023).
+ * @param {number} channel
+ * @param {number} value
+ */
+V86.prototype.set_adc_input = function(channel, value)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_set_adc) cpu.ch32_set_adc(channel, value);
+};
+
+/**
+ * Microcontrollers: the OLED display's state; see RV64CPU.ch32_display.
+ * @param {number} last_frame
+ */
+V86.prototype.get_oled_display = function(last_frame)
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_display ? cpu.ch32_display(last_frame) : null;
+};
+
+/**
+ * Microcontrollers: record changes of output pins (e.g. a buzzer's).
+ * @param {number} port
+ * @param {number} mask
+ */
+V86.prototype.watch_gpio = function(port, mask)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_watch_gpio) cpu.ch32_watch_gpio(port, mask);
+};
+
+/**
+ * Microcontrollers: the watched pins' changes since the last call (times in
+ * ms of virtual time) and the virtual time now.
+ */
+V86.prototype.take_gpio_edges = function()
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_take_gpio_edges ? cpu.ch32_take_gpio_edges() : { now: 0, edges: [] };
+};
+
+/**
  * Reads data from memory at specified offset.
  *
  * @param {number} offset

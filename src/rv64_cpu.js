@@ -536,6 +536,16 @@ RV64CPU.prototype.main_loop = function()
         const exit = this.wasm["rv64_run"](STEPS_PER_RUN);
         if(exit === 0)
         {
+            if(this.ch32)
+            {
+                // A microcontroller runs at its own clock's speed: a firmware
+                // that busy-waits mustn't get ahead of real time
+                const ahead = this.wasm["rv64_ms_ahead"](now());
+                if(ahead > 1)
+                {
+                    return Math.min(ahead, 100);
+                }
+            }
             if(now() - start >= TIME_PER_SLICE)
             {
                 return 0;
@@ -611,6 +621,77 @@ RV64CPU.prototype.jit_stats = function()
 RV64CPU.prototype.ch32_gpio_out = function(port)
 {
     return this.ch32 ? this.wasm["rv64_ch32_gpio_out"](port) : 0;
+};
+
+/**
+ * CH32V: drive input pins of a GPIO port (port 0: A, 1: B, ...).
+ * @param {number} port
+ * @param {number} mask the pins driven (others read what the chip drives or pulls)
+ * @param {number} levels their levels
+ */
+RV64CPU.prototype.ch32_set_gpio_in = function(port, mask, levels)
+{
+    if(this.ch32) this.wasm["rv64_ch32_set_gpio_in"](port, mask, levels);
+};
+
+/**
+ * CH32V: set an ADC channel's input.
+ * @param {number} channel
+ * @param {number} value 0 to 1023
+ */
+RV64CPU.prototype.ch32_set_adc = function(channel, value)
+{
+    if(this.ch32) this.wasm["rv64_ch32_set_adc"](channel, value);
+};
+
+/**
+ * CH32V: the SSD1306 OLED display on I2C1 (dev/ssd1306.rs): its frame
+ * counter, which changes when what it shows may have, its 128 x 64 pixels
+ * (a byte each, 0 or 1, row by row; a view into wasm memory, valid until the
+ * next call) and its contrast (0 to 255).
+ * @param {number} last_frame the frame counter of the pixels the caller has
+ * @return {?{frame: number, pixels: ?Uint8Array, contrast: number}} pixels is
+ * null if the frame counter is still last_frame
+ */
+RV64CPU.prototype.ch32_display = function(last_frame)
+{
+    if(!this.ch32) return null;
+    const frame = this.wasm["rv64_ch32_oled_frame"]();
+    if(!frame) return null;
+    const pixels = frame === last_frame ? null :
+        new Uint8Array(this.wasm_memory.buffer, this.wasm["rv64_ch32_oled_render"]() >>> 0, 128 * 64);
+    return { frame, pixels, contrast: this.wasm["rv64_ch32_oled_contrast"]() };
+};
+
+/**
+ * CH32V: record changes of output pins (e.g. a buzzer's), taken with
+ * ch32_take_gpio_edges.
+ * @param {number} port
+ * @param {number} mask
+ */
+RV64CPU.prototype.ch32_watch_gpio = function(port, mask)
+{
+    if(this.ch32) this.wasm["rv64_ch32_watch_gpio"](port, mask);
+};
+
+/**
+ * CH32V: the watched pins' changes since the last call, and the virtual
+ * time now (ms).
+ * @return {{now: number, edges: !Array<{time: number, port: number, value: number}>}}
+ */
+RV64CPU.prototype.ch32_take_gpio_edges = function()
+{
+    const edges = [];
+    if(this.ch32)
+    {
+        const n = this.wasm["rv64_ch32_take_edges"]();
+        const a = new Float64Array(this.wasm_memory.buffer, this.wasm["rv64_ch32_edges_ptr"]() >>> 0, n * 3);
+        for(let i = 0; i < n; i++)
+        {
+            edges.push({ time: a[3 * i], port: a[3 * i + 1], value: a[3 * i + 2] });
+        }
+    }
+    return { now: this.ch32 ? this.wasm["rv64_now_ms"]() : 0, edges };
 };
 
 /** @return {number} instructions executed since boot */

@@ -45,6 +45,26 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #pad .small button { height: 46px; font-size: 15px; }
 #pad button.down { background: #3d6290; border-color: #6c9bd2; }
 #pad-note { color: var(--muted); font-size: 13px; }
+/* The CH32V003 game console (builds with "board": "gameconsole") */
+#console { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 560px; align-self: flex-start;
+    padding: 16px; box-sizing: border-box; border-radius: 22px; background: #1b2230; border: 1px solid #33405a;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#console[hidden] { display: none; }
+#oled { width: 100%; aspect-ratio: 2 / 1; image-rendering: pixelated; background: #05070a; border-radius: 6px;
+    border: 10px solid #000; box-sizing: border-box; }
+#console .controls { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+#dpad { position: relative; width: 168px; height: 168px; flex: none; border-radius: 50%; background: #233041;
+    border: 1px solid #3c4d66; touch-action: none; }
+#dpad span { position: absolute; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center;
+    font-size: 22px; color: var(--muted); border-radius: 12px; }
+#dpad span.down { background: #3d6290; color: var(--fg); }
+#dpad .n { left: 56px; top: 0; } #dpad .s { left: 56px; bottom: 0; }
+#dpad .w { left: 0; top: 56px; } #dpad .e { right: 0; top: 56px; }
+#fire { width: 104px; height: 104px; border-radius: 50%; font-size: 18px; background: #6b2a33; border: 1px solid #a54452;
+    color: var(--fg); touch-action: none; padding: 0; flex: none; }
+#fire.down { background: #a54452; }
+#console .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+#console-note { color: var(--muted); font-size: 13px; }
 /* CH32V003 hardware and resources */
 #mcu-info { flex: 1 1 320px; max-width: 560px; font-size: 14px; }
 #mcu-info[hidden] { display: none; }
@@ -118,6 +138,19 @@ code { color: var(--fg); }
       <button data-key="new">New game</button>
     </div>
     <span id="pad-note">Keyboard: arrows, space (drop), z, p, r.</span>
+  </section>
+  <section id="console" hidden aria-label="Game console">
+    <canvas id="oled" width="128" height="64" aria-label="The OLED display"></canvas>
+    <div class="controls">
+      <div id="dpad" role="group" aria-label="Direction buttons">
+        <span class="n">&#x25b2;</span><span class="w">&#x25c0;</span><span class="e">&#x25b6;</span><span class="s">&#x25bc;</span>
+      </div>
+      <button id="fire" type="button">Fire</button>
+    </div>
+    <div class="row">
+      <button id="sound" type="button">Sound: on</button>
+      <span id="console-note">Keyboard: arrows or WASD, space or Z to fire.</span>
+    </div>
   </section>
   <section id="shell-pad" hidden aria-label="Shell keys">
     <div class="row">
@@ -276,6 +309,30 @@ const MCUS = {
             "v86's RISC-V core, running a bare-metal Tetris that draws over its serial port " +
             `(<a href="${SRC}ch32v003">firmware source</a>).`,
     },
+    gameconsole: {
+        name: "CH32V003 Game Console",
+        mhz: 12,
+        hw: [
+            ["Board", `Stefan Wagner's <a href="https://github.com/wagiminator/CH32V003-GameConsole">CH32V003 RISC-V Mini Game Console</a>`],
+            ["Microcontroller", "WCH CH32V003J4M6 (8 pins)"],
+            ["CPU", "QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter, an instruction per clock cycle)"],
+            ["Clock", "@MHZ MHz, as the game sets it up (24 MHz internal oscillator; 48 MHz with the PLL)"],
+            ["Flash", "16 KB (16,384 bytes) at 0x0800 0000, also at 0"],
+            ["SRAM", "2 KB (2,048 bytes) at 0x2000 0000"],
+            ["Display", "SSD1306 128 x 64 OLED on I2C1 (PC1, PC2) at 400 kHz, at the bus's speed: a full screen takes about 23 ms"],
+            ["Buttons", "Up, down, left and right on a resistor ladder into the ADC (PC4); fire on PA2"],
+            ["Buzzer", "PA1, toggled by the game: played with Web Audio"],
+            ["Peripherals", "SysTick, PFIC, RCC clocks, GPIO, ADC1, I2C1 (master transmitter), DMA1 channel 6 to I2C1"],
+        ],
+        timing: "No interrupts (Conway's Life: DMA complete): the game polls SysTick for its delays and the I2C bus as it draws",
+        about: "Games for Stefan Wagner's CH32V003 Mini Game Console, a 10-cent RISC-V microcontroller with an OLED display, " +
+            "emulated by v86's RISC-V core with its display, buttons and buzzer. The games are " +
+            `<a href="https://github.com/wagiminator/CH32V003-GameConsole/tree/ad10df9/software">built from their source</a> ` +
+            `(<a href="${SRC}ch32v003-gameconsole">build script</a>): Tiny Tris, Tiny Invaders, Tiny Arkanoid and Tiny Pacman ` +
+            `are Daniel Champagne's <a href="https://www.tinyjoypad.com/">TinyJoypad</a> games for the ATtiny85, Tiny Lander is ` +
+            `<a href="https://github.com/tscha70/TinyLanderV1.0">tscha70's</a>, all converted by Stefan Wagner (GPL-3.0); ` +
+            "Conway's Life is his own (CC BY-SA 3.0).",
+    },
     ch32v307: {
         name: "CH32V307",
         mhz: 144,
@@ -304,7 +361,12 @@ const MCUS = {
 // the page's width.
 function start_mcu(build, base, status)
 {
-    const mcu = MCUS[build.arch];
+    const mcu = MCUS[build.board || build.arch];
+    if(build.board === "gameconsole")
+    {
+        start_game_console(build, base, status, mcu);
+        return;
+    }
     const cols = build.cols || 46, rows = build.rows || 25;
     const width = Math.min(document.documentElement.clientWidth - 32 - 8, 760);
     const font_size = Math.max(8, Math.min(18, Math.floor(width / (cols * 0.6))));
@@ -343,6 +405,220 @@ function start_mcu(build, base, status)
     show_mcu_info(emulator, mcu, build);
 }
 
+// The CH32V003 game console (tools/ch32v003-gameconsole): the OLED display
+// (src/rv64/src/dev/ssd1306.rs) on a canvas, the buttons and the buzzer.
+function start_game_console(build, base, status, mcu)
+{
+    const about = document.getElementById("mcu-about");
+    about.innerHTML = mcu.about;
+    about.hidden = false;
+    document.getElementById("terminal").hidden = true;
+    document.getElementById("console").hidden = false;
+    document.querySelector("h1").textContent = "v86 " + mcu.name;
+    document.title = "v86 " + mcu.name + ": " + build.label.replace(/^.*: /, "");
+    const emulator = window.emulator = new V86({
+        arch: build.arch,
+        wasm_path: "v86-rv64.wasm",
+        bios: { url: base + build.bios },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+    emulator.add_listener("emulator-ready", () =>
+    {
+        status.textContent = "Running";
+        draw_oled(emulator);
+        setup_console_buttons(emulator);
+        setup_buzzer(emulator);
+    });
+    show_mcu_info(emulator, mcu, build);
+}
+
+// The display, redrawn when it changes: lit pixels in an OLED's blue-white,
+// brighter with the contrast setting.
+function draw_oled(emulator)
+{
+    const canvas = document.getElementById("oled");
+    const ctx = canvas.getContext("2d");
+    const image = ctx.createImageData(128, 64);
+    let frame = 0;
+    const draw = () =>
+    {
+        const d = emulator.get_oled_display(frame);
+        if(d && d.pixels)
+        {
+            frame = d.frame;
+            const level = 0.45 + 0.55 * d.contrast / 255;
+            const on = [Math.round(170 * level), Math.round(225 * level), Math.round(255 * level)];
+            for(let i = 0; i < 128 * 64; i++)
+            {
+                const lit = d.pixels[i];
+                image.data[4 * i] = lit ? on[0] : 5;
+                image.data[4 * i + 1] = lit ? on[1] : 7;
+                image.data[4 * i + 2] = lit ? on[2] : 10;
+                image.data[4 * i + 3] = 255;
+            }
+            ctx.putImageData(image, 0, 0);
+        }
+        requestAnimationFrame(draw);
+    };
+    draw();
+}
+
+// The direction buttons are on a resistor ladder into ADC channel 2 (PC4):
+// the values the games expect (their driver.h) for each button and pair.
+const PAD_ADC = { n: 197, ne: 259, e: 90, se: 388, s: 346, sw: 616, w: 511, nw: 567 };
+// Fire: PA2, pulled up, low when pressed
+const FIRE_PORT = 0, FIRE_PIN = 2;
+
+function setup_console_buttons(emulator)
+{
+    const dpad = document.getElementById("dpad");
+    const fire = document.getElementById("fire");
+    const touch = new Set(), keys = new Set();
+    let touch_fire = false, key_fire = false;
+    const update = () =>
+    {
+        const held = new Set([...touch, ...keys]);
+        const v = (held.has("n") ? "n" : held.has("s") ? "s" : "") + (held.has("e") ? "e" : held.has("w") ? "w" : "");
+        emulator.set_adc_input(2, PAD_ADC[v] || 0);
+        for(const d of ["n", "s", "e", "w"])
+        {
+            dpad.querySelector("." + d).classList.toggle("down", v.includes(d));
+        }
+        const firing = touch_fire || key_fire;
+        emulator.set_gpio_in(FIRE_PORT, firing ? 1 << FIRE_PIN : 0, 0);
+        fire.classList.toggle("down", firing);
+    };
+    // The D-pad: the direction from its centre (8 ways), while touched
+    const aim = e =>
+    {
+        const r = dpad.getBoundingClientRect();
+        const x = e.clientX - (r.left + r.width / 2), y = e.clientY - (r.top + r.height / 2);
+        touch.clear();
+        if(Math.hypot(x, y) > r.width * 0.12)
+        {
+            const a = Math.atan2(-y, x) * 180 / Math.PI;
+            const sector = Math.round(((a + 360) % 360) / 45) % 8;
+            ["e", "ne", "n", "nw", "w", "sw", "s", "se"][sector].split("").forEach(d => touch.add(d));
+        }
+        update();
+    };
+    dpad.addEventListener("pointerdown", e =>
+    {
+        e.preventDefault();
+        dpad.setPointerCapture(e.pointerId);
+        if(navigator.vibrate) navigator.vibrate(8);
+        aim(e);
+    });
+    dpad.addEventListener("pointermove", e => { if(dpad.hasPointerCapture(e.pointerId)) aim(e); });
+    const release = () => { touch.clear(); update(); };
+    dpad.addEventListener("pointerup", release);
+    dpad.addEventListener("pointercancel", release);
+    fire.addEventListener("pointerdown", e =>
+    {
+        e.preventDefault();
+        fire.setPointerCapture(e.pointerId);
+        if(navigator.vibrate) navigator.vibrate(8);
+        touch_fire = true;
+        update();
+    });
+    const fire_up = () => { touch_fire = false; update(); };
+    fire.addEventListener("pointerup", fire_up);
+    fire.addEventListener("pointercancel", fire_up);
+    for(const el of [dpad, fire]) el.addEventListener("contextmenu", e => e.preventDefault());
+    const KEYS = {
+        ArrowUp: "n", ArrowDown: "s", ArrowLeft: "w", ArrowRight: "e", w: "n", s: "s", a: "w", d: "e",
+        " ": "fire", z: "fire", Enter: "fire",
+    };
+    const key = (e, down) =>
+    {
+        const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+        if(!k || e.ctrlKey || e.metaKey || e.altKey) return;
+        e.preventDefault();
+        if(k === "fire") key_fire = down;
+        else if(down) keys.add(k);
+        else keys.delete(k);
+        update();
+    };
+    document.addEventListener("keydown", e => key(e, true));
+    document.addEventListener("keyup", e => key(e, false));
+    window.addEventListener("blur", () => { keys.clear(); key_fire = false; update(); });
+}
+
+// The buzzer (PA1): the game toggles it in timed loops. Its edges come with
+// the machine's time; each burst of them is played as a square wave at
+// their rate, a little later (the latency) than they happened.
+const BUZZER_PORT = 0, BUZZER_PIN = 1, BUZZER_LATENCY = 0.08;
+
+function setup_buzzer(emulator)
+{
+    const button = document.getElementById("sound");
+    let on = true, audio = null, gain = null, osc = null;
+    // (the machine's time - the audio clock's), set at the first edges
+    let offset = null;
+    let pending = [];
+    emulator.watch_gpio(BUZZER_PORT, 1 << BUZZER_PIN);
+    const start_audio = () =>
+    {
+        if(audio || !on) return;
+        const Ctx = window.AudioContext || window["webkitAudioContext"];
+        if(!Ctx) return;
+        audio = new Ctx();
+        gain = audio.createGain();
+        gain.gain.value = 0;
+        gain.connect(audio.destination);
+        osc = audio.createOscillator();
+        osc.type = "square";
+        osc.connect(gain);
+        osc.start();
+    };
+    // Audio may only start after a tap or key press
+    for(const ev of ["pointerdown", "keydown"])
+    {
+        document.addEventListener(ev, () => { start_audio(); if(audio && audio.state === "suspended") audio.resume(); }, true);
+    }
+    button.addEventListener("click", () =>
+    {
+        on = !on;
+        button.textContent = "Sound: " + (on ? "on" : "off");
+        if(!on && gain)
+        {
+            gain.gain.cancelScheduledValues(0);
+            gain.gain.setValueAtTime(0, audio.currentTime);
+        }
+    });
+    setInterval(() =>
+    {
+        const { now, edges } = emulator.take_gpio_edges();
+        if(!audio || !on || audio.state !== "running")
+        {
+            offset = null;
+            return;
+        }
+        const t_audio = audio.currentTime;
+        if(offset === null || Math.abs(now / 1000 - t_audio - offset) > 0.25) offset = now / 1000 - t_audio;
+        pending = pending.concat(edges.map(e => e.time / 1000));
+        // Bursts: edges less than 4 ms apart; play the finished ones
+        while(pending.length)
+        {
+            let end = 0;
+            while(end + 1 < pending.length && pending[end + 1] - pending[end] < 0.004) end++;
+            if(end + 1 === pending.length && now / 1000 - pending[end] < 0.004) break;
+            const burst = pending.splice(0, end + 1);
+            if(burst.length < 3) continue;
+            const t0 = burst[0] - offset + BUZZER_LATENCY, t1 = burst[burst.length - 1] - offset + BUZZER_LATENCY;
+            if(t1 <= audio.currentTime) continue;
+            const freq = (burst.length - 1) / 2 / (burst[burst.length - 1] - burst[0]);
+            const at = Math.max(t0, audio.currentTime);
+            osc.frequency.setValueAtTime(Math.min(freq, 12000), at);
+            gain.gain.setValueAtTime(0.08, at);
+            gain.gain.setValueAtTime(0, t1);
+        }
+    }, 25);
+}
+
 // Keys a phone's keyboard lacks, and one-tap commands, for a serial shell.
 function setup_shell_pad(emulator, commands)
 {
@@ -374,7 +650,8 @@ function show_mcu_info(emulator, mcu, build)
 {
     const stats = build.stats;
     document.getElementById("mcu-info").hidden = false;
-    document.getElementById("mcu-hw").innerHTML = mcu.hw.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+    document.getElementById("mcu-hw").innerHTML = mcu.hw.map(([k, v]) =>
+        `<tr><th>${k}</th><td>${v.replace("@MHZ", build.mhz || mcu.mhz)}</td></tr>`).join("");
     document.getElementById("mcu-timing").innerHTML = mcu.timing;
     const n = v => v.toLocaleString("en");
     const pct = (part, whole) => (100 * part / whole).toFixed(part / whole < 0.1 ? 1 : 0) + "%";
@@ -411,7 +688,7 @@ function show_mcu_info(emulator, mcu, build)
             leds.forEach((l, i) => dots[i].classList.toggle("on", !!(emulator.get_gpio_out(l.port) >> l.pin & 1)));
         }, 50));
     }
-    const MHZ = mcu.mhz;
+    const MHZ = build.mhz || mcu.mhz;
     let last_count = emulator.get_instruction_counter(), last_time = performance.now();
     setInterval(() =>
     {

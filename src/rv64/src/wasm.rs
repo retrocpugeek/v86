@@ -143,6 +143,90 @@ pub extern "C" fn rv64_ch32_gpio_out(port: u32) -> u32 {
     unsafe { CPU.as_deref() }.and_then(|c| c.bus.ch32.as_ref()).map_or(0, |c| c.gpio_out(port))
 }
 
+fn ch32() -> Option<&'static mut crate::dev::ch32::Ch32> {
+    #[allow(static_mut_refs)]
+    unsafe { CPU.as_deref_mut() }.and_then(|c| c.bus.ch32.as_deref_mut())
+}
+
+static mut OLED_PIXELS: [u8; crate::dev::ssd1306::WIDTH * crate::dev::ssd1306::HEIGHT] =
+    [0; crate::dev::ssd1306::WIDTH * crate::dev::ssd1306::HEIGHT];
+static mut EDGES: Vec<f64> = Vec::new();
+
+/// CH32V: the OLED display's frame counter (changes when what it shows may
+/// have), or 0 if there's no machine.
+#[no_mangle]
+pub extern "C" fn rv64_ch32_oled_frame() -> u32 { ch32().map_or(0, |c| c.display.frame | 1) }
+
+/// CH32V: render the OLED display; returns where its 128 x 64 pixels are
+/// (a byte each, 0 or 1, row by row).
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_oled_render() -> u32 {
+    let px = unsafe { &mut *addr_of_mut!(OLED_PIXELS) };
+    if let Some(c) = ch32() {
+        c.display.render(px);
+    }
+    px.as_ptr() as u32
+}
+
+/// CH32V: the OLED display's contrast setting (0 to 255).
+#[no_mangle]
+pub extern "C" fn rv64_ch32_oled_contrast() -> u32 { ch32().map_or(0, |c| c.display.contrast as u32) }
+
+/// CH32V: drive the pins of GPIO `port` in `mask` to `levels`.
+#[no_mangle]
+pub extern "C" fn rv64_ch32_set_gpio_in(port: u32, mask: u32, levels: u32) {
+    if let Some(p) = ch32().and_then(|c| c.gpio_in.get_mut(port as usize)) {
+        *p = (mask, levels);
+    }
+}
+
+/// CH32V: set ADC channel `ch`'s input (0 to 1023).
+#[no_mangle]
+pub extern "C" fn rv64_ch32_set_adc(ch: u32, value: u32) {
+    if let Some(v) = ch32().and_then(|c| c.adc_in.get_mut(ch as usize)) {
+        *v = value as u16;
+    }
+}
+
+/// CH32V: record changes of the output pins of GPIO `port` in `mask`.
+#[no_mangle]
+pub extern "C" fn rv64_ch32_watch_gpio(port: u32, mask: u32) {
+    if let Some(w) = ch32().and_then(|c| c.gpio_watch.get_mut(port as usize)) {
+        *w = mask;
+    }
+}
+
+/// CH32V: hand over the recorded pin changes; returns how many, and
+/// rv64_ch32_edges_ptr() where they are: (virtual time in ms, port, OUTDR)
+/// as f64s.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_take_edges() -> u32 {
+    let edges = unsafe { &mut *addr_of_mut!(EDGES) };
+    edges.clear();
+    if let Some(c) = ch32() {
+        for (t, port, v) in c.take_edges() {
+            edges.extend([t as f64 / 1e6, port as f64, v as f64]);
+        }
+    }
+    (edges.len() / 3) as u32
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_edges_ptr() -> u32 { unsafe { (*addr_of!(EDGES)).as_ptr() as u32 } }
+
+/// Virtual time now, in ms.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_now_ms() -> f64 { unsafe { CPU.as_deref() }.map_or(0.0, |c| c.now_ns() as f64 / 1e6) }
+
+/// How far virtual time is ahead of the host clock (ms, as for
+/// rv64_sync_time): a machine timed like real hardware (CH32V) waits that out.
+#[no_mangle]
+pub extern "C" fn rv64_ms_ahead(host_ms: f64) -> f64 { cpu().ns_ahead((host_ms * 1e6) as u64) as f64 / 1e6 }
+
 /// Where the machine's RAM is in linear memory.
 #[no_mangle]
 pub extern "C" fn rv64_ram_ptr() -> u32 { cpu().bus.ram.as_ptr() as u32 }

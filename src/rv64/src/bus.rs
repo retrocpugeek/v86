@@ -324,6 +324,17 @@ impl Bus {
         self.rom.get(off..off + size as usize).map(|b| read_le(b, size))
     }
 
+    /// A byte of RAM or ROM (0 elsewhere), as DMA reads it.
+    fn peek(&self, pa: u64) -> u8 {
+        if let Some(off) = self.ram_offset(pa, 1) {
+            self.ram[off]
+        } else if let Some(off) = self.rom_offset(pa) {
+            self.rom[off]
+        } else {
+            0
+        }
+    }
+
     fn rom_offset(&self, pa: u64) -> Option<usize> {
         let len = self.rom.len() as u64;
         let off = pa.wrapping_sub(self.rom_base);
@@ -394,6 +405,11 @@ impl Bus {
         }
         if let Some(c) = self.ch32.as_mut() {
             if c.write(pa, size, value, self.now_ns) {
+                // DMA starting: it reads memory (RAM or flash)
+                if let Some((addr, len)) = c.take_dma_request() {
+                    let bytes = (0..len as u64).map(|i| self.peek(addr as u64 + i)).collect();
+                    self.ch32.as_mut().unwrap().dma_supply(bytes, self.now_ns);
+                }
                 return;
             }
         }
