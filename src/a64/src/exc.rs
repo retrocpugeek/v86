@@ -15,6 +15,7 @@ pub mod ec {
     pub const DABT_LOWER: u32 = 0x24;
     pub const DABT_CUR: u32 = 0x25;
     pub const SP_ALIGN: u32 = 0x26;
+    pub const SOFTSTEP_LOWER: u32 = 0x32;
     pub const BRK64: u32 = 0x3c;
 }
 
