@@ -423,9 +423,17 @@ RV64CPU.prototype.build_dtb = function()
         .prop("model", "riscv-virtio,qemu");
 
     const uart_path = "/soc/serial@" + UART_BASE.toString(16);
-    root.child("chosen")
+    const chosen = root.child("chosen")
         .prop("bootargs", this.settings.cmdline || DEFAULT_CMDLINE)
         .prop("stdout-path", uart_path);
+    // Seeds the kernel's random pool: without it (no RNG device here, and a
+    // read-only root can't keep a seed), getrandom() can block for minutes
+    if(typeof crypto !== "undefined" && crypto.getRandomValues)
+    {
+        const seed = new Uint8Array(32);
+        crypto.getRandomValues(seed);
+        chosen.prop("rng-seed", seed);
+    }
 
     root.child("memory@" + RAM_BASE.toString(16))
         .prop("device_type", "memory")

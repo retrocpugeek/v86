@@ -8,7 +8,8 @@
 #
 # The kernel is stored gzipped (Image.gz). <fw_dynamic.bin> is OpenSBI built for the generic platform (Buildroot's
 # qemu_riscv64_virt_defconfig builds it). WEB=<path> shows the guest's web
-# interface at that path next to the console; MEMORY=<MB> sets its RAM
+# interface at that path next to the console (WEB_APP=gdb-wui: gdb-wui, see
+# tools/rv64-gdb, with WEB=/gdb-wui/); MEMORY=<MB> sets its RAM
 # (default 256); ARCH=riscv32 marks an RV32 image (qemu_riscv32_virt_defconfig).
 set -eu
 [ $# -ge 5 ] || { echo "usage: $0 <id> <label> <fw_dynamic.bin> <Image> <rootfs> [cmdline]" >&2; exit 1; }
@@ -29,12 +30,13 @@ python3 "$ROOT/tools/split-image.py" $CHUNK "$ROOTFS" "$DIR/rootfs/%d-%d$EXT"
 # split-image.py pads the last part; the disk size is rounded up to match
 SIZE=$(( ( $(stat -Lc %s "$ROOTFS") + CHUNK - 1 ) / CHUNK * CHUNK ))
 
-node - "$ROOT/build/rv64-site/images/manifest.json" "$ID" "$LABEL" "$EXT" "$SIZE" "$CHUNK" "$CMDLINE" "${WEB:-}" "${MEMORY:-}" "${ARCH:-}" <<'JS'
+node - "$ROOT/build/rv64-site/images/manifest.json" "$ID" "$LABEL" "$EXT" "$SIZE" "$CHUNK" "$CMDLINE" "${WEB:-}" "${MEMORY:-}" "${ARCH:-}" "${WEB_APP:-}" <<'JS'
 const fs = require("fs");
-const [file, id, label, ext, size, chunk_size, cmdline, web, memory, arch] = process.argv.slice(2);
+const [file, id, label, ext, size, chunk_size, cmdline, web, memory, arch, web_app] = process.argv.slice(2);
 const m = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { builds: [] };
 const entry = { id, label, bios: "fw_dynamic.bin", kernel: "Image.gz", rootfs: { ext, size: +size, chunk_size: +chunk_size }, cmdline };
 if(web) entry.web = web;
+if(web_app) entry.web_app = web_app;
 if(memory) entry.memory_mb = +memory;
 if(arch) entry.arch = arch;
 const i = m.builds.findIndex(b => b.id === id);
