@@ -92,8 +92,10 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
             <li>U-Boot booting Linux from the disk</li>
             <li>X11 desktop: openbox, xterm, on-screen keyboard</li>
             <li>JIT: hot code compiled to WebAssembly</li>
+            <li><a href="#gdb-wui">gdb-wui</a>: debug programs in the guest from a web UI next to the console</li>
           </ul>
           <a class="go" href="https://v86-arm.turret13.workers.dev/">Boot ARM64 Linux</a>
+          <a class="alt" href="https://v86-arm.turret13.workers.dev/?build=gdb-wui">Debug with gdb-wui on ARM64</a>
         </article>
 
         <article class="card riscv">
@@ -106,11 +108,13 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
             <li>Checked instruction by instruction against QEMU</li>
             <li>JIT: hot code compiled to WebAssembly</li>
             <li>A WCH CH32V003 microcontroller (RV32EC, 2 KB of RAM) running a bare-metal Tetris, with touch controls for phones</li>
+            <li><a href="#gdb-wui">gdb-wui</a>: debug programs in the guest from a web UI next to the console</li>
             <li>A WCH CH32V307 microcontroller (RV32IMAFC, 64 KB of RAM) running the RT-Thread shell, with snake, an analog clock, CoreMark and Lua</li>
           </ul>
           <a class="go" href="https://v86-riscv.turret13.workers.dev/">Boot RISC-V Linux</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris">Play Tetris on an emulated CH32V003</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v307-rtthread">Try the RT-Thread shell on an emulated CH32V307</a>
+          <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=gdb-wui">Debug with gdb-wui on RISC-V</a>
         </article>
 
         <article class="card x86">
@@ -124,6 +128,29 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
           <a class="go" href="https://copy.sh/v86/">Open copy.sh/v86</a>
         </article>
       </div>
+    </div>
+  </section>
+
+  <section id="gdb-wui">
+    <div class="wrap claude">
+      <h2>Debugging in the browser: gdb-wui</h2>
+      <p>
+        <a href="https://github.com/retrocpugeek/gdb-wui">gdb-wui</a> is a web UI for GDB: source,
+        disassembly, variables, registers, memory, threads and a gdb console in one window, with gdb itself
+        doing the debugging. On both sites an image runs it inside the emulated machine, next to the
+        console: gdb and gdb-wui run in the guest, and the page carries gdb-wui's HTTP and WebSocket
+        traffic over v86's virtual network, so nothing leaves your browser.
+      </p>
+      <p>
+        Its example programs are in <code>/root/demo</code>: pick one, click Run→main and step. Or start
+        <code>gdbserver :1234 /root/demo/hello &amp;</code> on the console and click <em>connect</em> in
+        gdb-wui's console bar to debug it remotely.
+      </p>
+      <ul class="links">
+        <li><a href="https://v86-arm.turret13.workers.dev/?build=gdb-wui">gdb-wui on ARM64</a><span>Buildroot, aarch64</span></li>
+        <li><a href="https://v86-riscv.turret13.workers.dev/?build=gdb-wui">gdb-wui on RISC-V</a><span>Buildroot, riscv64</span></li>
+        <li><a href="https://retrocpugeek.github.io/gdb-wui/">gdb-wui documentation</a><span>With screenshots and a guided first session</span></li>
+      </ul>
     </div>
   </section>
 
@@ -151,6 +178,7 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
         <li><a href="https://github.com/retrocpugeek/v86/tree/ports">The fork: ports branch</a><span>ARM64 port, shared plumbing, the ARM site</span></li>
         <li><a href="https://github.com/retrocpugeek/v86/tree/riscv-port">The fork: riscv-port branch</a><span>RISC-V port and the RISC-V site</span></li>
         <li><a href="https://github.com/copy/v86">copy/v86 on GitHub</a><span>The upstream project</span></li>
+        <li><a href="https://github.com/retrocpugeek/gdb-wui">gdb-wui on GitHub</a><span>The web UI for GDB that the debugging images run</span></li>
         <li><a href="https://copy.sh/v86/">copy.sh/v86</a><span>The original x86 emulator site</span></li>
         <li><a href="https://buildroot.org/">Buildroot</a><span>Builds the Linux kernels and root filesystems the machines boot</span></li>
         <li><a href="https://buildroot.org/downloads/manual/manual.html">Buildroot manual</a><span>The images start from <code>qemu_aarch64_virt</code>, <code>qemu_riscv64_virt</code> and <code>qemu_riscv32_virt</code> defconfigs</span></li>
