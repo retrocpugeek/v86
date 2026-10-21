@@ -17,6 +17,7 @@ pub const DAIF_A: u32 = 1 << 8;
 pub const DAIF_I: u32 = 1 << 7;
 pub const DAIF_F: u32 = 1 << 6;
 pub const PSTATE_IL: u64 = 1 << 20;
+pub const PSTATE_SS: u64 = 1 << 21;
 
 /// Generic timer frequency; QEMU's virt machine uses 62.5 MHz.
 pub const CNTFRQ: u64 = 62_500_000;
@@ -54,6 +55,11 @@ pub struct Cpu {
     pub el: u32,
     pub spsel: u32,
     pub il: bool,
+    /// PSTATE.SS: software step (MDSCR_EL1.SS, for EL0 only, as Linux's
+    /// ptrace uses it) is active-not-pending: the next instruction is the
+    /// one being stepped. Clear while stepping is active-pending: a software
+    /// step exception comes before the next instruction.
+    pub ss: bool,
     pub v: [u128; 32],
     pub fpcr: u32,
     pub fpsr: u32,
@@ -116,6 +122,7 @@ impl Cpu {
             el: 1,
             spsel: 1,
             il: false,
+            ss: false,
             v: [0; 32],
             fpcr: 0,
             fpsr: 0,
@@ -194,7 +201,19 @@ impl Cpu {
             | self.daif as u64
             | ((self.el << 2) | self.spsel) as u64
             | if self.il { PSTATE_IL } else { 0 }
+            | if self.ss { PSTATE_SS } else { 0 }
     }
+
+    /// Software step is enabled at EL0: MDSCR_EL1.SS, with the OS lock clear.
+    /// (Debug exceptions from EL0 to EL1 can't be masked.)
+    #[inline(always)]
+    pub fn step_enabled_el0(&self) -> bool {
+        self.sr.mdscr_el1 & 1 != 0 && self.sr.misc.get(&crate::sysregs::OSLAR_EL1).copied().unwrap_or(1) & 1 == 0
+    }
+
+    /// Software step is active: executing at EL0 with it enabled.
+    #[inline(always)]
+    pub fn stepping(&self) -> bool { self.el == 0 && self.step_enabled_el0() }
 
     // ---- time ----
 
@@ -241,6 +260,8 @@ impl Cpu {
         self.sr.elr_el1 = ret;
         self.block_start = true;
         self.el = 1;
+        // Not stepping at EL1 (MDSCR_EL1.KDE isn't implemented)
+        self.ss = false;
         self.tlb.invalidate_fetch();
         self.spsel = 1;
         self.il = false;
@@ -285,6 +306,7 @@ impl Cpu {
         self.il = spsr & PSTATE_IL != 0;
         self.el = m >> 2;
         self.spsel = m & 1;
+        self.ss = spsr & PSTATE_SS != 0 && self.stepping();
         self.tlb.invalidate_fetch();
         if self.el == 0 && self.first_el0.is_none() {
             self.first_el0 = Some(self.icount);
@@ -310,6 +332,13 @@ impl Cpu {
         }
         let pc = self.pc;
         self.insn_pc = pc;
+        let stepping = self.stepping();
+        if stepping && !self.ss {
+            // Active-pending: the stepped instruction has completed
+            // (ISS: ISV, IFSC 0x22 debug exception)
+            self.take_exception(Exception::new(ec::SOFTSTEP_LOWER, 1 << 24 | 0x22), pc);
+            return;
+        }
         if self.il {
             self.take_exception(Exception::new(ec::ILLEGAL_STATE, 0), pc);
             return;
@@ -334,8 +363,16 @@ impl Cpu {
             if e.ec == ec::DABT_LOWER || e.ec == ec::DABT_CUR {
                 self.icount -= 1;
             }
+            // A stepped SVC has completed (the step exception follows its
+            // return); other exceptions leave the instruction to run again
+            if e.ec == ec::SVC64 {
+                self.ss = false;
+            }
             self.take_exception(e, pc);
             return;
+        }
+        if stepping {
+            self.ss = false;
         }
         if JIT {
             self.block_start = self.pc != pc.wrapping_add(4) || op.f as usize == generic as *const () as usize;
@@ -413,7 +450,8 @@ impl Cpu {
             self.stop_batch = false;
             if self.jit.enabled {
                 while n < end && !self.stop_batch {
-                    if self.block_start {
+                    // (compiled code doesn't do software step)
+                    if self.block_start && !self.stepping() {
                         if let Some(used) = self.jit_enter(end - n) {
                             n += used;
                             continue;
