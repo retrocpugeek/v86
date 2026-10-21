@@ -11,7 +11,10 @@
 //! separated by ';', for the CH32V003 game console's inputs:
 //! "<ms> show" prints the OLED display, "<ms> fire" and "<ms> nofire" press
 //! and release the fire button (PA2 low), "<ms> pad <n>" sets the direction
-//! buttons' ADC value (channel 2; 0 when none is pressed).
+//! buttons' ADC value (channel 2; 0 when none is pressed), "<ms> frame"
+//! prints the display's frame counter and the pc (a hang shows as both
+//! staying the same). --jitter moves virtual time on by up to 1 us between
+//! batches of instructions, as following the host clock does in the browser.
 //!
 //! Boots like `qemu-system-riscv64 -M virt -bios ... -kernel ...`. The serial
 //! console (16550) is on stdin/stdout; Ctrl-A x quits.
@@ -51,6 +54,7 @@ struct Args {
     disk_slot: u64,
     ch32: Option<(v86_rv64::dev::ch32::Chip, String)>,
     script: Option<String>,
+    jitter: bool,
 }
 
 fn usage() -> ! {
@@ -72,6 +76,7 @@ fn parse_args() -> Args {
         disk_slot: 0,
         ch32: None,
         script: None,
+        jitter: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -88,6 +93,7 @@ fn parse_args() -> Args {
             "--ch32v003" => a.ch32 = Some((v86_rv64::dev::ch32::Chip::V003, val())),
             "--ch32v307" => a.ch32 = Some((v86_rv64::dev::ch32::Chip::V307, val())),
             "--script" => a.script = Some(val()),
+            "--jitter" => a.jitter = true,
             "--disk-slot" => a.disk_slot = val().parse().ok().filter(|&n| n < 8).unwrap_or_else(|| usage()),
             "--xlen" => {
                 a.xlen32 = match val().as_str() {
@@ -139,7 +145,7 @@ fn main() {
             exit(1)
         });
         if let Some(script) = &args.script {
-            run_script(&mut cpu, script);
+            run_script(&mut cpu, script, args.jitter);
             return;
         }
         cpu.realtime = true;
@@ -205,7 +211,8 @@ fn show_display(cpu: &Cpu, ms: u64) {
     }
 }
 
-fn run_script(cpu: &mut Cpu, script: &str) {
+fn run_script(cpu: &mut Cpu, script: &str, jitter: bool) {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut events: Vec<(u64, Vec<&str>)> = script
         .split(';')
         .filter_map(|e| {
@@ -216,6 +223,12 @@ fn run_script(cpu: &mut Cpu, script: &str) {
     events.sort_by_key(|e| e.0);
     for (ms, what) in events {
         while cpu.now_ns() < ms * 1_000_000 {
+            if jitter {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                cpu.warp_ns += seed % 1000;
+            }
             if matches!(cpu.run(10_000), RunExit::PowerOff | RunExit::Reset | RunExit::Idle) {
                 eprintln!("rv64run: the CPU stopped at {} ms", cpu.now_ns() / 1_000_000);
                 return;
@@ -224,6 +237,7 @@ fn run_script(cpu: &mut Cpu, script: &str) {
         let c = cpu.bus.ch32.as_mut().unwrap();
         match what.as_slice() {
             ["show"] => show_display(cpu, ms),
+            ["frame"] => println!("{ms} ms: display frame {}, pc {:#x}", c.display.frame, cpu.pc),
             ["fire"] => c.gpio_in[0] = (1 << 2, 0),
             ["nofire"] => c.gpio_in[0] = (0, 0),
             ["pad", n] => c.adc_in[2] = n.parse().unwrap_or(0),

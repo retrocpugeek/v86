@@ -165,9 +165,11 @@ struct I2c {
     shift_until: u64,
     /// DATAR, written while the shift register was busy
     dr: Option<u8>,
-    /// STAR1 was read (SB is cleared by a STAR1 read then a DATAR write,
-    /// ADDR by a STAR1 read then a STAR2 read)
-    star1_read: bool,
+    /// The last STAR1 read showed ADDR: ADDR is cleared by reading STAR1
+    /// (with ADDR set) then STAR2. (Only a read that saw it counts: else an
+    /// address finishing between a driver's STAR1 and STAR2 reads would be
+    /// cleared unseen, and the driver would wait for it forever.)
+    star1_saw_addr: bool,
     /// The device addressed acknowledged (the display)
     to_display: bool,
     /// Bytes DMA1 channel 6 has yet to write to DATAR
@@ -651,7 +653,7 @@ impl Ch32 {
             0x08 => i2c.oaddr[0],
             0x0c => i2c.oaddr[1],
             0x14 => {
-                i2c.star1_read = true;
+                i2c.star1_saw_addr = i2c.addr;
                 let txe = i2c.addressed && i2c.dr.is_none();
                 let btf = i2c.addressed && idle && !i2c.addr;
                 i2c.sb as u32 * I2C_SB
@@ -661,10 +663,10 @@ impl Ch32 {
                     | i2c.af as u32 * I2C_AF
             }
             0x18 => {
-                if i2c.star1_read && i2c.addr {
+                if i2c.star1_saw_addr {
                     i2c.addr = false;
                 }
-                i2c.star1_read = false;
+                i2c.star1_saw_addr = false;
                 let busy = i2c.master || i2c.start_at.is_some();
                 i2c.master as u32 * I2C_MSL | busy as u32 * I2C_BUSY | i2c.tra as u32 * I2C_TRA
             }
@@ -996,4 +998,42 @@ pub fn machine(chip: Chip, firmware: &[u8], out: Box<dyn FnMut(u8)>, epoch: u64)
     let hz = cpu.bus.ch32.as_ref().unwrap().hclk();
     cpu.set_clock_hz(hz);
     Ok(cpu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STAR1: u64 = I2C1_BASE + 0x14;
+    const STAR2: u64 = I2C1_BASE + 0x18;
+
+    /// An I2C1 at 400 kHz (24 MHz HCLK, fast mode) that has sent a START
+    /// and the display's address at time 0; returns when the address is
+    /// done (ns).
+    fn addressing() -> (Ch32, u64) {
+        let mut c = Ch32::new(Chip::V003, Box::new(|_| {}), 0);
+        c.write(RCC_BASE + 4, 4, 0, 0);
+        c.write(I2C1_BASE + 0x1c, 4, 20 | 1 << 15, 0);
+        c.write(I2C1_BASE, 4, (I2C_PE | I2C_START) as u64, 0);
+        let mut t = 0;
+        while c.read(STAR1, 4, t).unwrap() as u32 & I2C_SB == 0 {
+            t += 100;
+        }
+        c.write(I2C1_BASE + 0x10, 4, (ssd1306::ADDR as u64) << 1, t);
+        let done = t + 9 * c.i2c_bit_ns();
+        (c, done)
+    }
+
+    #[test]
+    fn addr_finishing_between_star1_and_star2_is_not_lost() {
+        let (mut c, done) = addressing();
+        // The driver's check reads STAR1 (before the address is done), then
+        // STAR2 (after): ADDR must still be there for its next STAR1 read
+        assert_eq!(c.read(STAR1, 2, done - 1).unwrap() as u32 & I2C_ADDR, 0);
+        c.read(STAR2, 2, done + 1);
+        assert_ne!(c.read(STAR1, 2, done + 2).unwrap() as u32 & I2C_ADDR, 0);
+        // ... and that STAR1 read, then STAR2, clears it
+        c.read(STAR2, 2, done + 3);
+        assert_eq!(c.read(STAR1, 2, done + 4).unwrap() as u32 & I2C_ADDR, 0);
+    }
 }
