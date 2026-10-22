@@ -8,10 +8,12 @@
 #   tools/gdb-wui-guest/overlay.sh <GOARCH> <cross prefix> <gdb-wui source> <overlay dir> [busybox]
 #
 # e.g. overlay.sh arm64 .../host/bin/aarch64-buildroot-linux-gnu- ~/gdb-wui out/overlay \
-#        out/build/busybox-1.37.0/busybox_unstripped
+#        out/build/busybox-1.37.0/busybox
 #
-# [busybox], Buildroot's unstripped busybox, goes into /root/demo too: a real
-# program of a few thousand functions to read decompiled.
+# [busybox], busybox's build, goes into /root/demo too, stripped as Buildroot
+# strips the target's copy, so that it is the image's own /bin/busybox byte
+# for byte (post-build.sh checks): a real program of a few thousand functions
+# with no symbols at all, whose names come from the decompiler.
 #
 # With Ghidra (GHIDRA_INSTALL_DIR), every program in /root/demo is decompiled
 # here, by gdb-wui -write-sidecar, into /usr/share/gdb-wui/sidecars, which
@@ -47,9 +49,9 @@ for f in *.c; do
 done
 
 if [ -n "$BUSYBOX" ]; then
-    # Its symbols, which are the point, but not the scraps of debug info
-    # libgcc brings, which name the directory the toolchain was built in
-    "${CROSS}strip" --strip-debug -o "$OVERLAY/root/demo/busybox" "$BUSYBOX"
+    # Buildroot's STRIPCMD (package/Makefile.in), which target-finalize runs
+    # on /bin/busybox
+    "${CROSS}strip" --remove-section=.comment --remove-section=.note -o "$OVERLAY/root/demo/busybox" "$BUSYBOX"
 fi
 
 if [ -n "${GHIDRA_INSTALL_DIR:-}" ]; then
@@ -75,9 +77,11 @@ cp "$HERE/S95gdb-wui" "$OVERLAY/etc/init.d/"
 cat > "$OVERLAY/etc/motd" <<'EOF'
 gdb-wui is running on this machine: its window is next to this console.
 Its project is /root/demo: gdb-wui's example programs, with their sources,
-and busybox. Their decompilations (the Decompiled tab) were made by Ghidra
-when this image was built. To run busybox under gdb, type in gdb-wui's
-console: set args ls -l /
+and busybox, which is /bin/busybox: stripped, so every name in it is the
+decompiler's. Their decompilations (the Decompiled tab) were made by Ghidra
+when this image was built. To run busybox ls: type  set args ls -l /  in
+gdb-wui's console and click Run->entry; in Symbols, right-click entry, Set
+breakpoint, and continue; entry hands main to __libc_start_main.
 To debug under gdbserver: gdbserver :1234 /root/demo/hello &
 and click "connect" in gdb-wui's console bar.
 EOF

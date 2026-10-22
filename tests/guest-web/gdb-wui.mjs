@@ -130,8 +130,8 @@ async function main()
         await sleep(300);
         await frame("!d.getElementById('confirm').classList.contains('is-hidden') && d.getElementById('confirm-yes').click()");
         await until("busybox loaded", "d.getElementById('exe-name').textContent.includes('busybox')", 120);
-        // As the try-online page says: ls's arguments and a breakpoint on
-        // ls_main, typed in gdb's console, then Run
+        // As the try-online page says. busybox is the image's /bin/busybox,
+        // stripped: every name here is the decompiler's.
         // A line typed into gdb's console, once it has answered the last one
         // and shows a fresh prompt (a line typed before that can be lost)
         const typed = "d.getElementById('gdbconsole').innerText.trimEnd()";
@@ -143,15 +143,38 @@ async function main()
             await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
             await until(`gdb answered ${line}`, `${answer}.test(${typed}) && ${typed}.endsWith("(gdb)")`, 60);
         };
+        // A right-click on an element, and its menu's breakpoint item
+        const breakVia = async (what, el) => {
+            await frame(`(() => { const el = ${el}; const b = el.getBoundingClientRect();
+                el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: b.left + 3, clientY: b.top + 3, button: 2 })); })()`);
+            await until(`menu for ${what}`, "!d.getElementById('ctxmenu').classList.contains('is-hidden')", 30);
+            await frame("[...d.querySelectorAll('#ctxmenu button, #ctxmenu [role=menuitem]')].find(e => /breakpoint/i.test(e.textContent)).click()");
+        };
+        const breakOnSymbol = async name => {
+            await frame(`(() => { const i = d.getElementById('symbols-search'); i.value = ${JSON.stringify(name)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+            await until(`the decompiler's ${name} listed`, `[...d.querySelectorAll('#symbols .sym-row .list-main')].some(e => e.textContent === ${JSON.stringify(name)})`, 300);
+            await breakVia(name, `[...d.querySelectorAll('#symbols .sym-row')].find(r => r.querySelector('.list-main').textContent === ${JSON.stringify(name)})`);
+        };
         await type("set args ls -l /", "/\\(gdb\\) set args ls -l \\//");
-        // (numbered after the breakpoints the session has made already)
-        await type("break ls_main", "/Breakpoint \\d+ at/");
-        await frame("d.getElementById('btn-run').click()");
-        await until("busybox stopped in ls_main", "d.getElementById('run-state').dataset.state === 'stopped' && /ls_main/.test(d.getElementById('stack').textContent)", 300);
+        // Started first: busybox is position-independent, and the decompiler's
+        // addresses mean nothing until it has been loaded somewhere
+        await frame("d.getElementById('btn-run-entry').click()");
+        await until("busybox started", "d.getElementById('run-state').dataset.state === 'stopped'", 300);
+        await breakOnSymbol("entry");
+        await frame("d.getElementById('btn-continue').click()");
+        await until("busybox stopped at entry", "d.getElementById('run-state').dataset.state === 'stopped' && /entry/.test(d.getElementById('stack').innerText)", 300);
+        // (a stop with no source shows the disassembly)
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
-        // (the pane renders only the lines in view; its header names the function)
-        await until("busybox's ls_main decompiled", "/getopt32|ls_main ·/.test(d.body.innerText) && /ls_main/.test(d.querySelector('#center').innerText)", 300);
-        console.log("  busybox:", (await frame("d.getElementById('decomp').textContent")).replace(/\s+/g, " ").slice(0, 160));
+        await until("entry decompiled", "/__libc_start_main\\(/.test(d.getElementById('decomp').textContent)", 300);
+        // main is what entry hands __libc_start_main, by whatever name Ghidra gave it
+        const mainName = await frame("d.getElementById('decomp').textContent.match(/__libc_start_main\\(([A-Za-z_]\\w*)/)[1]");
+        console.log("  entry calls __libc_start_main(" + mainName + ", ...)");
+        await breakOnSymbol(mainName);
+        await frame("d.getElementById('btn-continue').click()");
+        await until("busybox stopped in its main", `d.getElementById('run-state').dataset.state === 'stopped' && d.getElementById('stack').innerText.includes(${JSON.stringify(mainName)})`, 300);
+        await frame("d.querySelector('button.tab[data-center=decomp]').click()");
+        await until("busybox's main decompiled", `d.querySelector('#center').innerText.includes(${JSON.stringify(mainName + " ·")}) && /"busybox"/.test(d.getElementById('decomp').textContent)`, 120);
+        console.log("  busybox:", (await frame("d.getElementById('decomp').innerText")).replace(/\s+/g, " ").slice(0, 200));
         if(OUT) await shot("busybox");
         await frame("d.getElementById('btn-kill').click()");
         await sleep(1000);

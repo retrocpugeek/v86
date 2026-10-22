@@ -17,10 +17,10 @@ BR=$(realpath "$1") OUT=$(realpath -m "$2") SRC=$(realpath "$3")
 mkdir -p "$OUT"
 sed -e "s|@HERE@|$HERE|g" -e "s|@OVERLAY@|$OUT/gdb-wui-overlay|g" "$HERE/gdb-wui_defconfig" > "$OUT/gdb-wui_defconfig"
 make -C "$BR" O="$OUT" BR2_DEFCONFIG="$OUT/gdb-wui_defconfig" defconfig
-# The overlay's programs need the toolchain, and it takes busybox's unstripped
-# build into the demo: build those first. With GHIDRA_INSTALL_DIR set it also
+# The overlay's programs need the toolchain, and it takes busybox's build into
+# the demo: build those first. With GHIDRA_INSTALL_DIR set it also
 # decompiles them (see overlay.sh).
 make -C "$OUT" toolchain busybox
 "$HERE/../../gdb-wui-guest/overlay.sh" arm64 "$OUT/host/bin/aarch64-buildroot-linux-gnu-" "$SRC" "$OUT/gdb-wui-overlay" \
-    "$(ls "$OUT"/build/busybox-*/busybox_unstripped)"
+    "$(ls -d "$OUT"/build/busybox-*)/busybox"
 make -C "$OUT"

@@ -10,6 +10,12 @@ PREFIX=${BUILD_DIR_PREFIX:-$HOME/}
 # pretty-printer script needs gdb's Python, which this gdb is built without
 rm -f "$T/usr/bin/procan" "$T"/usr/lib/libstdc++.so.*-gdb.py
 rm -rf "$T"/usr/share/gcc-*
+# The demo's busybox is the image's own, so that what it shows of it is true
+# of /bin/busybox (overlay.sh strips it as Buildroot strips the target)
+if [ -e "$T/root/demo/busybox" ] && ! cmp -s "$T/bin/busybox" "$T/root/demo/busybox"; then
+    echo "post-build: /root/demo/busybox differs from /bin/busybox" >&2
+    exit 1
+fi
 if grep -rl "$PREFIX" "$T" >&2; then
     echo "post-build: the files above contain $PREFIX" >&2
     exit 1
