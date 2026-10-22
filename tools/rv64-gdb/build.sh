@@ -3,7 +3,7 @@
 # (https://github.com/retrocpugeek/gdb-wui) for the v86-riscv site's
 # "Buildroot + gdb-wui" image, whose page shows gdb-wui next to the console.
 #
-#   tools/rv64-gdb/build.sh BUILDROOT_TREE GDB_WUI_SRC
+#   GHIDRA_INSTALL_DIR=~/ghidra tools/rv64-gdb/build.sh BUILDROOT_TREE GDB_WUI_SRC
 #
 # BUILDROOT_TREE: a copy of a buildroot-selfservice work dir for a riscv64 job
 #   (src/ and out/, built with the gdbserver feature, so the toolchain has C++),
@@ -40,7 +40,10 @@ grep -rlI --null "$OLD" "$TREE/out/host" "$TREE/out/staging" 2>/dev/null |
     xargs -0 -r sed -i "s|$OLD|$TREE|g"
 
 OVERLAY=$OUT/overlay
-"$PWD/tools/gdb-wui-guest/overlay.sh" riscv64 "$CROSS" "$SRC" "$OVERLAY"
+# (with busybox's unstripped build, and with GHIDRA_INSTALL_DIR the programs'
+# decompilations: see overlay.sh)
+"$PWD/tools/gdb-wui-guest/overlay.sh" riscv64 "$CROSS" "$SRC" "$OVERLAY" \
+    "$(ls "$TREE"/out/build/busybox-*/busybox_unstripped)"
 
 CONFIG=$TREE/out/.config
 cp "$PWD/tools/gdb-wui-guest/post-build.sh" "$OUT/post-build.sh"
