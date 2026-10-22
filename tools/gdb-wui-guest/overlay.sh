@@ -47,7 +47,9 @@ for f in *.c; do
 done
 
 if [ -n "$BUSYBOX" ]; then
-    cp "$BUSYBOX" "$OVERLAY/root/demo/busybox"
+    # Its symbols, which are the point, but not the scraps of debug info
+    # libgcc brings, which name the directory the toolchain was built in
+    "${CROSS}strip" --strip-debug -o "$OVERLAY/root/demo/busybox" "$BUSYBOX"
 fi
 
 if [ -n "${GHIDRA_INSTALL_DIR:-}" ]; then
