@@ -175,6 +175,9 @@ async function main()
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
         await until("busybox's main decompiled", `d.querySelector('#center').innerText.includes(${JSON.stringify(mainName + " ·")}) && /"busybox"/.test(d.getElementById('decomp').textContent)`, 120);
         console.log("  busybox:", (await frame("d.getElementById('decomp').innerText")).replace(/\s+/g, " ").slice(0, 200));
+        // busybox's breakpoints mean nothing in the programs after it
+        await type("delete", "/\\(gdb\\) delete/");
+        await until("breakpoints deleted", "!d.querySelector('#breakpoints .list-row')", 30);
         if(OUT) await shot("busybox");
         await frame("d.getElementById('btn-kill').click()");
         await sleep(1000);
