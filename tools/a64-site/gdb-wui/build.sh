@@ -3,7 +3,7 @@
 # filesystem with gdb, and gdb-wui with its example programs
 # (tools/gdb-wui-guest/overlay.sh, from a gdb-wui checkout; needs Go).
 #
-#   tools/a64-site/gdb-wui/build.sh <buildroot source> <output dir> <gdb-wui source>
+#   GHIDRA_INSTALL_DIR=~/ghidra tools/a64-site/gdb-wui/build.sh <buildroot source> <output dir> <gdb-wui source>
 #   WEB=/gdb-wui/ WEB_APP=gdb-wui MEMORY=256 tools/a64-site/add-image.sh gdb-wui "..." \
 #       <output>/images/Image <output>/images/rootfs.squashfs \
 #       "rootwait root=/dev/vda ro rootfstype=squashfs console=ttyAMA0"
@@ -17,7 +17,10 @@ BR=$(realpath "$1") OUT=$(realpath -m "$2") SRC=$(realpath "$3")
 mkdir -p "$OUT"
 sed -e "s|@HERE@|$HERE|g" -e "s|@OVERLAY@|$OUT/gdb-wui-overlay|g" "$HERE/gdb-wui_defconfig" > "$OUT/gdb-wui_defconfig"
 make -C "$BR" O="$OUT" BR2_DEFCONFIG="$OUT/gdb-wui_defconfig" defconfig
-# The overlay's programs need the toolchain: build that first
-make -C "$OUT" toolchain
-"$HERE/../../gdb-wui-guest/overlay.sh" arm64 "$OUT/host/bin/aarch64-buildroot-linux-gnu-" "$SRC" "$OUT/gdb-wui-overlay"
+# The overlay's programs need the toolchain, and it takes busybox's unstripped
+# build into the demo: build those first. With GHIDRA_INSTALL_DIR set it also
+# decompiles them (see overlay.sh).
+make -C "$OUT" toolchain busybox
+"$HERE/../../gdb-wui-guest/overlay.sh" arm64 "$OUT/host/bin/aarch64-buildroot-linux-gnu-" "$SRC" "$OUT/gdb-wui-overlay" \
+    "$(ls "$OUT"/build/busybox-*/busybox_unstripped)"
 make -C "$OUT"
