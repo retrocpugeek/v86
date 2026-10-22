@@ -132,15 +132,20 @@ async function main()
         await until("busybox loaded", "d.getElementById('exe-name').textContent.includes('busybox')", 120);
         // As the try-online page says: ls's arguments and a breakpoint on
         // ls_main, typed in gdb's console, then Run
-        const type = async line => {
+        // A line typed into gdb's console, once it has answered the last one
+        // and shows a fresh prompt (a line typed before that can be lost)
+        const typed = "d.getElementById('gdbconsole').innerText.trimEnd()";
+        const type = async (line, answer) => {
+            await until("gdb's prompt", `${typed}.endsWith("(gdb)")`, 60);
             await frame("d.querySelector('#gdbconsole .xterm-helper-textarea').focus()");
             await send("Input.insertText", { text: line });
             await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
             await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-            await sleep(1500);
+            await until(`gdb answered ${line}`, `${answer}.test(${typed}) && ${typed}.endsWith("(gdb)")`, 60);
         };
-        await type("set args ls -l /");
-        await type("break ls_main");
+        await type("set args ls -l /", "/\\(gdb\\) set args ls -l \\//");
+        // (numbered after the breakpoints the session has made already)
+        await type("break ls_main", "/Breakpoint \\d+ at/");
         await frame("d.getElementById('btn-run').click()");
         await until("busybox stopped in ls_main", "d.getElementById('run-state').dataset.state === 'stopped' && /ls_main/.test(d.getElementById('stack').textContent)", 300);
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
