@@ -2,7 +2,8 @@
 // v86-riscv site in headless Chrome and debugs a program with the gdb-wui
 // panel: load /root/demo/hello, run to main, step over a line; open it in a
 // new tab; then debug hello under a gdbserver started on the guest's console
-// (gdb-wui's remote target).
+// (gdb-wui's remote target). On the way, busybox's main decompiled by Ghidra
+// (a sidecar) and by kuna (the page's, tools/kuna-web; NO_KUNA=1 skips it).
 //
 //   SITE=http://localhost:8788 BUILD=gdb-wui node tests/guest-web/gdb-wui.mjs [screenshot-prefix]
 //
@@ -119,8 +120,37 @@ async function main()
     // The Decompiled tab, from the image's sidecars (no Ghidra in the guest)
     if(!process.env.NO_DECOMP)
     {
+        // The Decompiled header's choice of decompiler, when there is one
+        const pick = "[...d.querySelectorAll('.decomp-pick')].find(p => !p.classList.contains('is-hidden'))";
+        const use = name => frame(`(() => { const p = ${pick}; p.value = '${name}'; p.dispatchEvent(new Event('change')); return true; })()`);
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
         await until("hello's main decompiled", "/main\\s*\\(/.test(d.getElementById('decomp').textContent)", 120);
+        // kuna's main, and a stack variable read through its frame offsets: the
+        // value gdb has for total (from the DWARF) under the pointer
+        if(!process.env.NO_KUNA)
+        {
+            await until("the decompiler picker", pick, 60);
+            await use("kuna");
+            // (kuna says where each variable lives, in a comment)
+            await until("hello's main decompiled by kuna", "/\\w+ = add\\(/.test(d.getElementById('decomp').textContent) && /\\/\\/[^;]*\\bstack - 0x/.test(d.getElementById('decomp').textContent)", 300);
+            // total, by kuna's name for it (from the DWARF on aarch64, v2 on riscv64)
+            const total = await frame("d.getElementById('decomp').textContent.match(/(\\w+) = add\\(/)[1]");
+            const gdbTotal = await frame("(d.getElementById('variables').innerText.match(/total\\s*(-?\\d+)/) || [])[1]");
+            await frame(`(() => { const pane = d.getElementById('decomp');
+                const w = d.createTreeWalker(pane, NodeFilter.SHOW_TEXT); let n;
+                while((n = w.nextNode())) { const i = n.data.search(/\\b${total}\\b/);
+                    if(i < 0 || n.parentElement.closest('.dec-row')?.textContent.includes('//')) continue;
+                    const r = d.createRange(); r.setStart(n, i + 1); r.setEnd(n, i + 2); const b = r.getBoundingClientRect();
+                    n.parentElement.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: b.left + 1, clientY: b.top + b.height / 2 }));
+                    return true; } })()`);
+            // (the tooltip is the expression gdb was given, and its value)
+            const tip = await until(`total's value from kuna (${total})`, "/\\$sp.*= -?\\d/.test(d.getElementById('hovertip').innerText) && d.getElementById('hovertip').innerText", 60);
+            console.log(`  kuna's total (${total}): ${tip.replace(/\s+/g, " ")}; gdb's: ${gdbTotal}`);
+            if(!new RegExp(`= ${gdbTotal}$`).test(tip.trim())) throw new Error(`kuna's total isn't gdb's (${gdbTotal})`);
+            const kunaText = await frame("d.getElementById('decomp').textContent");
+            await use("ghidra");
+            await until("Ghidra's hello again", `d.getElementById('decomp').textContent !== ${JSON.stringify(kunaText)} && /main\\s*\\(/.test(d.getElementById('decomp').textContent)`, 120);
+        }
         // busybox: a few thousand functions, read from its sidecar
         await frame("d.getElementById('btn-kill').click()");
         await sleep(1000);
@@ -177,6 +207,19 @@ async function main()
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
         await until("busybox's main decompiled", `d.querySelector('#center').innerText.includes(${JSON.stringify(mainName + " ·")}) && /"busybox"/.test(d.getElementById('decomp').textContent)`, 120);
         console.log("  busybox:", (await frame("d.getElementById('decomp').innerText")).replace(/\s+/g, " ").slice(0, 200));
+        // The same function decompiled by kuna, which this page runs as
+        // WebAssembly for the guest's gdb-wui (tools/kuna-web)
+        if(!process.env.NO_KUNA)
+        {
+            await until("the decompiler picker", pick, 60);
+            await use("kuna");
+            // kuna names the library calls through the PLT, and globals dat_
+            await until("busybox's main decompiled by kuna", "/\\bmallopt\\(/.test(d.getElementById('decomp').textContent) && /\\bdat_[0-9a-f]+/.test(d.getElementById('decomp').textContent)", 300);
+            console.log("  kuna:", (await frame("d.getElementById('decomp').innerText")).replace(/\s+/g, " ").slice(0, 200));
+            if(OUT) await shot("kuna");
+            await use("ghidra");
+            await until("Ghidra's again", "/\\bDAT_\\w+/.test(d.getElementById('decomp').textContent)", 120);
+        }
         // busybox's breakpoints mean nothing in the programs after it
         await type("delete", "/\\(gdb\\) delete/");
         await until("breakpoints deleted", "!d.querySelector('#breakpoints .list-row')", 30);
