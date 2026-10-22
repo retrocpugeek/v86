@@ -24,4 +24,12 @@ sed -e "s|src=\"libv86.js\"|src=\"libv86.js?v=$V\"|" -e "s|src=\"guest-web.js\"|
 [ -f "$OUT/images/manifest.json" ] || echo '{ "builds": [] }' > "$OUT/images/manifest.json"
 # Each image in a directory named after its contents (see the script)
 python3 tools/version-images.py "$OUT"
+# kuna, the decompiler the gdb-wui image asks this page for (see the script);
+# without a kuna checkout the site has none, and its Decompiled view shows
+# Ghidra's sidecars alone
+if [ -d "${KUNA_SRC:-$HOME/repo/kuna}" ]; then
+  tools/kuna-web/build.sh "$OUT"
+else
+  echo "no kuna checkout (KUNA_SRC): the site has no kuna"
+fi
 echo "site in $OUT ($(find "$OUT" -type f | wc -l) files)"
