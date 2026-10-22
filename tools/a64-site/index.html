@@ -22,6 +22,9 @@ main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
 #web.wide { flex-basis: 100%; }
 #web .bar { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
 #web-status { color: var(--muted); }
+/* gdb-wui's: it is a desktop application (guest-web.js) */
+#web-note { margin: 0 0 12px; padding: 6px 12px; border: 1px solid #665; background: #2a2a1c; }
+#web-note[hidden] { display: none; }
 #guest-web { flex: 1; min-height: 480px; width: 100%; border: 1px solid #444; background: #fff; }
 #guest-web:not([src]) { visibility: hidden; }
 #display { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
@@ -75,6 +78,7 @@ code { color: var(--fg); }
     <button type="button" data-log="close">Close</button>
   </div>
 </dialog>
+<p id="web-note" role="note" hidden></p>
 <main>
   <section id="display" hidden>
     <canvas id="screen" aria-label="Guest display"></canvas>

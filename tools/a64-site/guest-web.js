@@ -29,6 +29,11 @@ const WEB_APPS = {
         drop_headers: ["content-security-policy", "cross-origin-opener-policy"],
         height: "760px",
         wide: true,
+        // its decompiler: the guest's gdb-wui -kuna tcp:192.168.86.1:5717
+        // (tools/gdb-wui-guest/S95gdb-wui) is answered by serve_kuna
+        kuna_port: 5717,
+        // a debugger wants a wide screen and a keyboard
+        desktop_note: "gdb-wui is made for a desktop browser: it needs a wide screen, a mouse and a keyboard, and on a phone most of it is out of reach.",
     },
 };
 let guest_web = WEB_APPS.default;
@@ -552,6 +557,118 @@ function guest_read_port(adapter, port)
     });
 }
 
+// kuna, the decompiler gdb-wui in the guest uses when told to (gdb-wui -kuna
+// tcp:HOST:PORT; its internal/ghidra/kuna.go has the protocol): the guest
+// connects to this page on the port, and the page runs kuna as WebAssembly in
+// a worker (tools/kuna-web/build.sh put it in kuna/). Lines of JSON, one
+// request at a time; an upload is followed by the binary's bytes.
+function serve_kuna(adapter, port)
+{
+    let worker = null, next_id = 0;
+    const pending = new Map();
+    async function call(message, transfer)
+    {
+        if(!worker)
+        {
+            // Fetched on the first connection, not with the page: most visits
+            // never open the decompiler, and kuna is megabytes.
+            const manifest = await fetch("kuna/manifest.json", { cache: "no-cache" }).then(r =>
+            {
+                if(!r.ok) throw new Error("this site has no kuna (kuna/manifest.json: " + r.status + ")");
+                return r.json();
+            });
+            worker = new Worker(`kuna/${manifest.dir}/kuna-bridge-worker.js`, { type: "module" });
+            worker.onmessage = e =>
+            {
+                const p = pending.get(e.data.id);
+                pending.delete(e.data.id);
+                if(!p) return;
+                if(e.data.error !== undefined) p.reject(new Error(e.data.error));
+                else p.resolve(e.data.result);
+            };
+            worker.onerror = e =>
+            {
+                for(const p of pending.values()) p.reject(new Error("kuna's worker failed: " + (e.message || "error")));
+                pending.clear();
+                worker = null;
+            };
+        }
+        const id = ++next_id;
+        return new Promise((resolve, reject) =>
+        {
+            pending.set(id, { resolve, reject });
+            worker.postMessage({ ...message, id }, transfer || []);
+        });
+    }
+
+    adapter.bus.register("tcp-connection", conn =>
+    {
+        if(conn.sport !== port) return;
+        let buffer = new Uint8Array(0);
+        let upload = null;   // { request, size } while a binary's bytes arrive
+        let queue = Promise.resolve();
+        const reply = obj => conn.write(new TextEncoder().encode(JSON.stringify(obj) + "\n"));
+        async function request(req, bytes)
+        {
+            try
+            {
+                switch(req.op)
+                {
+                    case "load":
+                    {
+                        const have = await call({ op: "has", sha256: req.sha256 });
+                        const version = await call({ op: "version" }).then(v => v.kuna, () => "");
+                        return reply({ ok: true, have, version });
+                    }
+                    case "upload":
+                        await call({ op: "put", sha256: req.sha256, bytes: bytes.buffer }, [bytes.buffer]);
+                        return reply({ ok: true });
+                    case "run":
+                        return reply({ ok: true, result: await call({ op: "run", sha256: req.sha256, args: req.args }) });
+                    default:
+                        return reply({ ok: false, error: "unknown op " + req.op });
+                }
+            }
+            catch(e)
+            {
+                reply({ ok: false, error: e.message || String(e) });
+            }
+        }
+        conn.on("data", data =>
+        {
+            buffer = concat([buffer, data.slice()]);
+            for(;;)
+            {
+                if(upload)
+                {
+                    if(buffer.length < upload.size) return;
+                    const bytes = buffer.slice(0, upload.size);
+                    buffer = buffer.slice(upload.size);
+                    const req = upload.request;
+                    upload = null;
+                    queue = queue.then(() => request(req, bytes));
+                    continue;
+                }
+                const eol = buffer.indexOf(10);
+                if(eol < 0) return;
+                let req;
+                try
+                {
+                    req = JSON.parse(new TextDecoder().decode(buffer.subarray(0, eol)));
+                }
+                catch(e)
+                {
+                    req = { op: "unparseable" };
+                }
+                buffer = buffer.slice(eol + 1);
+                if(req.op === "upload") upload = { request: req, size: req.size | 0 };
+                else queue = queue.then(() => request(req));
+            }
+        });
+        conn.accept();
+    });
+}
+
 async function start_guest_web(emulator, build)
 {
     const section = document.getElementById("web");
@@ -563,6 +680,12 @@ async function start_guest_web(emulator, build)
     document.getElementById("web-title").textContent = guest_web.title;
     if(guest_web.height) frame.style.minHeight = guest_web.height;
     section.classList.toggle("wide", !!guest_web.wide);
+    const note = document.getElementById("web-note");
+    if(note)
+    {
+        note.textContent = guest_web.desktop_note || "";
+        note.hidden = !guest_web.desktop_note;
+    }
     section.hidden = false;
 
     if(!("serviceWorker" in navigator)) throw new Error("this browser has no service workers");
@@ -574,6 +697,7 @@ async function start_guest_web(emulator, build)
     const adapter = emulator.network_adapter;
     if(!adapter || typeof adapter.connect !== "function") throw new Error("needs the default network (no ?relay=)");
 
+    if(guest_web.kuna_port) serve_kuna(adapter, guest_web.kuna_port);
     if(guest_web.websocket)
     {
         window.v86_guest_websocket = (ws_path, on) => guest_websocket(adapter, ws_path, on);

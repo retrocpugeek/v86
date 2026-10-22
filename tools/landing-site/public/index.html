@@ -148,6 +148,13 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
         <code>gdbserver :1234 /root/demo/hello &amp;</code> on the console and click <em>connect</em> in
         gdb-wui's console bar to debug it remotely.
       </p>
+      <p>
+        Its Decompiled view works with no Ghidra in the guest: the example programs and the stripped
+        <code>/bin/busybox</code> were decompiled by Ghidra when the image was built, and a picker
+        switches to <a href="https://github.com/Noelo-Lab/kuna">kuna</a>, Ghidra's decompiler ported to
+        Rust, which the page runs as WebAssembly beside the emulator and gdb-wui asks over the virtual
+        network &mdash; for any program in the guest. gdb-wui is made for a desktop browser.
+      </p>
       <ul class="links">
         <li><a href="https://v86-arm.turret13.workers.dev/?build=gdb-wui">gdb-wui on ARM64</a><span>Buildroot, aarch64</span></li>
         <li><a href="https://v86-riscv.turret13.workers.dev/?build=gdb-wui">gdb-wui on RISC-V</a><span>Buildroot, riscv64</span></li>
