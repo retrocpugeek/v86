@@ -2,20 +2,26 @@
 # gdb-wui for the emulator page (the "gdb-wui" panel of tools/a64-site and
 # tools/rv64-site; tools/gdb-wui-guest/overlay.sh installs it).
 #
-# Port 80: gdb-wui itself, with /root/demo as its project. -listen-anywhere
+# Port 80: gdb-wui itself, with /root/demo as its project and the
+# decompilations of its programs (if the image has them). -listen-anywhere
 # only because the page connects over v86's virtual network, which nothing
 # but that page can reach.
 # Port 81: a fresh single-use login link (gdb-wui -print-url) per connection,
 # which the page reads before loading the UI.
 
 export HOME=/root XDG_RUNTIME_DIR=/run/gdb-wui
+# The programs' decompilations, written where the image was built
+# (overlay.sh): the Decompiled tab, with no Ghidra here
+SIDECARS=
+[ -d /usr/share/gdb-wui/sidecars ] && SIDECARS="-decomp-sidecars /usr/share/gdb-wui/sidecars"
+export SIDECARS
 
 case "$1" in
 start)
 	printf "Starting gdb-wui: "
 	mkdir -p -m 0700 "$XDG_RUNTIME_DIR"
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui.pid -x /bin/sh -- -c \
-		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config -project /root/demo >/tmp/gdb-wui.log 2>&1'
+		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config -project /root/demo $SIDECARS >/tmp/gdb-wui.log 2>&1'
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui-url.pid -x /usr/bin/socat -- \
 		TCP-LISTEN:81,reuseaddr,fork SYSTEM:"/usr/bin/gdb-wui -print-url 2>/dev/null"
 	echo "OK"

@@ -112,6 +112,30 @@ async function main()
     await until("stepped over a line", "d.getElementById('run-state').dataset.state === 'stopped' && /hello\\.c:14\\b/.test(d.getElementById('stack').textContent)", 120);
     console.log("  at:", await where());
     console.log("  locals:", (await frame("d.getElementById('variables').textContent")).replace(/\s+/g, " ").slice(0, 120));
+
+    // The Decompiled tab, from the image's sidecars (no Ghidra in the guest)
+    if(!process.env.NO_DECOMP)
+    {
+        await frame("d.querySelector('button.tab[data-center=decomp]').click()");
+        await until("hello's main decompiled", "/main\\s*\\(/.test(d.getElementById('decomp').textContent)", 120);
+        // busybox: a few thousand functions, read from its sidecar
+        await frame("d.getElementById('btn-kill').click()");
+        await sleep(1000);
+        await frame("!d.getElementById('confirm').classList.contains('is-hidden') && d.getElementById('confirm-yes').click()");
+        await frame("d.querySelector('.tree-row[data-path=\"busybox\"]').click()");
+        await until("busybox loaded", "d.getElementById('exe-name').textContent.includes('busybox')", 120);
+        await frame("d.getElementById('btn-run-main').click()");
+        await until("busybox stopped in main", "d.getElementById('run-state').dataset.state === 'stopped'", 300);
+        await frame("d.querySelector('button.tab[data-center=decomp]').click()");
+        await until("busybox's main decompiled", "/main\\s*\\(/.test(d.getElementById('decomp').textContent) && d.getElementById('decomp').textContent.length > 300", 300);
+        console.log("  busybox main:", (await frame("d.getElementById('decomp').textContent")).replace(/\s+/g, " ").slice(0, 160));
+        if(OUT) await shot("busybox");
+        await frame("d.getElementById('btn-kill').click()");
+        await sleep(1000);
+        await frame("!d.getElementById('confirm').classList.contains('is-hidden') && d.getElementById('confirm-yes').click()");
+        await frame("d.querySelector('.tree-row[data-path=\"hello\"]').click()");
+        await until("hello loaded again", "d.getElementById('exe-name').textContent.includes('hello')", 120);
+    }
     if(OUT) await shot("stopped");
 
     // "Open in new tab": the tab's WebSocket goes through this page (its opener)

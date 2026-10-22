@@ -5,12 +5,21 @@
 # sources) in /root/demo, and S95gdb-wui, which starts it at boot. The image
 # also needs gdb (BR2_PACKAGE_GDB_DEBUGGER) and socat.
 #
-#   tools/gdb-wui-guest/overlay.sh <GOARCH> <cross prefix> <gdb-wui source> <overlay dir>
+#   tools/gdb-wui-guest/overlay.sh <GOARCH> <cross prefix> <gdb-wui source> <overlay dir> [busybox]
 #
-# e.g. overlay.sh arm64 .../host/bin/aarch64-buildroot-linux-gnu- ~/gdb-wui out/overlay
+# e.g. overlay.sh arm64 .../host/bin/aarch64-buildroot-linux-gnu- ~/gdb-wui out/overlay \
+#        out/build/busybox-1.37.0/busybox_unstripped
+#
+# [busybox], Buildroot's unstripped busybox, goes into /root/demo too: a real
+# program of a few thousand functions to read decompiled.
+#
+# With Ghidra (GHIDRA_INSTALL_DIR), every program in /root/demo is decompiled
+# here, by gdb-wui -write-sidecar, into /usr/share/gdb-wui/sidecars, which
+# S95gdb-wui passes as -decomp-sidecars: the Decompiled tab then works in the
+# guest, where Ghidra itself could never run.
 set -eu
-[ $# -eq 4 ] || { echo "usage: $0 <GOARCH> <cross prefix> <gdb-wui source> <overlay dir>" >&2; exit 1; }
-GOARCH=$1 CROSS=$2 SRC=$(realpath "$3") OVERLAY=$(realpath -m "$4")
+[ $# -eq 4 ] || [ $# -eq 5 ] || { echo "usage: $0 <GOARCH> <cross prefix> <gdb-wui source> <overlay dir> [busybox]" >&2; exit 1; }
+GOARCH=$1 CROSS=$2 SRC=$(realpath "$3") OVERLAY=$(realpath -m "$4") BUSYBOX=${5:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
 # The toolchain's own directories, which the debug info would otherwise name
 HOST=$(realpath "$(dirname "$CROSS")/..")
@@ -37,10 +46,36 @@ for f in *.c; do
     esac
 done
 
+if [ -n "$BUSYBOX" ]; then
+    cp "$BUSYBOX" "$OVERLAY/root/demo/busybox"
+fi
+
+if [ -n "${GHIDRA_INSTALL_DIR:-}" ]; then
+    # gdb-wui for this machine, to write them with
+    HOSTBIN=$(mktemp -d)
+    (cd "$SRC" && CGO_ENABLED=0 go build -o "$HOSTBIN/gdb-wui" ./cmd/gdb-wui)
+    SIDECARS=$OVERLAY/usr/share/gdb-wui/sidecars
+    mkdir -p "$SIDECARS"
+    for f in "$OVERLAY"/root/demo/*; do
+        case $f in *.c) continue ;; esac
+        "$HOSTBIN/gdb-wui" -ghidra "$GHIDRA_INSTALL_DIR" -write-sidecar "$f" -decomp-sidecars "$SIDECARS"
+        # The program's path is where it was here: say where it is in the
+        # guest instead (it is only informational; the sha256 matches it)
+        n=$(basename "$f")
+        sed -i "0,/\"path\":/s|\"path\":\"[^\"]*\"|\"path\":\"/root/demo/$n\"|" "$SIDECARS/$n.decomp.json"
+    done
+    rm -r "${HOSTBIN:?}"
+else
+    echo "overlay.sh: GHIDRA_INSTALL_DIR is not set; no sidecars, so no decompilation in the guest" >&2
+fi
+
 cp "$HERE/S95gdb-wui" "$OVERLAY/etc/init.d/"
 cat > "$OVERLAY/etc/motd" <<'EOF'
 gdb-wui is running on this machine: its window is next to this console.
-Its project is /root/demo (gdb-wui's example programs, with their sources).
+Its project is /root/demo: gdb-wui's example programs, with their sources,
+and busybox. Their decompilations (the Decompiled tab) were made by Ghidra
+when this image was built. To run busybox under gdb, type in gdb-wui's
+console: set args ls -l /
 To debug under gdbserver: gdbserver :1234 /root/demo/hello &
 and click "connect" in gdb-wui's console bar.
 EOF
