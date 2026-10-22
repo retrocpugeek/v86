@@ -80,8 +80,8 @@ Its project is /root/demo: gdb-wui's example programs, with their sources,
 and busybox, which is /bin/busybox: stripped, so every name in it is the
 decompiler's. Their decompilations (the Decompiled tab) were made by Ghidra
 when this image was built. To run busybox ls: type  set args ls -l /  in
-gdb-wui's console and click Run->entry; in Symbols, right-click entry, Set
-breakpoint, and continue; entry hands main to __libc_start_main.
+gdb-wui's console; in Symbols, right-click entry, Set breakpoint, and click
+Run; entry hands main to __libc_start_main.
 To debug under gdbserver: gdbserver :1234 /root/demo/hello &
 and click "connect" in gdb-wui's console bar.
 EOF

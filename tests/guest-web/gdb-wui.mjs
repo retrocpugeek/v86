@@ -156,12 +156,11 @@ async function main()
             await breakVia(name, `[...d.querySelectorAll('#symbols .sym-row')].find(r => r.querySelector('.list-main').textContent === ${JSON.stringify(name)})`);
         };
         await type("set args ls -l /", "/\\(gdb\\) set args ls -l \\//");
-        // Started first: busybox is position-independent, and the decompiler's
-        // addresses mean nothing until it has been loaded somewhere
-        await frame("d.getElementById('btn-run-entry').click()");
-        await until("busybox started", "d.getElementById('run-state').dataset.state === 'stopped'", 300);
+        // On the decompiler's entry before the program has started: pending
+        // until it is loaded (busybox is position-independent), then placed
         await breakOnSymbol("entry");
-        await frame("d.getElementById('btn-continue').click()");
+        await until("entry's breakpoint pending", "/pending/i.test(d.getElementById('breakpoints').innerText) || d.querySelector('#breakpoints .is-pending')", 30).catch(() => {});
+        await frame("d.getElementById('btn-run').click()");
         await until("busybox stopped at entry", "d.getElementById('run-state').dataset.state === 'stopped' && /entry/.test(d.getElementById('stack').innerText)", 300);
         // (a stop with no source shows the disassembly)
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
