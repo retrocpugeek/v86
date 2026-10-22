@@ -22,4 +22,6 @@ V=$(cat build/libv86.js build/v86-rv64.wasm tools/a64-site/guest-web.js | sha256
 sed -e "s|src=\"libv86.js\"|src=\"libv86.js?v=$V\"|" -e "s|src=\"guest-web.js\"|src=\"guest-web.js?v=$V\"|" -e "s|wasm_path: \"v86-rv64.wasm\"|wasm_path: \"v86-rv64.wasm?v=$V\"|" \
   tools/rv64-site/index.html > "$OUT/index.html"
 [ -f "$OUT/images/manifest.json" ] || echo '{ "builds": [] }' > "$OUT/images/manifest.json"
+# Each image in a directory named after its contents (see the script)
+python3 tools/version-images.py "$OUT"
 echo "site in $OUT ($(find "$OUT" -type f | wc -l) files)"

@@ -52,3 +52,5 @@ if(i >= 0) m.builds[i] = entry; else m.builds.push(entry);
 fs.writeFileSync(file, JSON.stringify(m, null, 2) + "\n");
 console.log(`${id}: ${label}`);
 JS
+# Into a directory named after its contents (see the script)
+python3 "$ROOT/tools/version-images.py" "$ROOT/build/rv64-site"
