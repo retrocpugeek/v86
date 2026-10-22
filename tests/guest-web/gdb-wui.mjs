@@ -80,6 +80,9 @@ async function main()
                 if(OUT) await shot("timeout");
                 const log = (await ev("window.__o || ''")).split("\n").filter(l => /random|crng|gdb-wui|error|fail/i.test(l));
                 console.log(log.map(l => "  | " + l.trim()).join("\n"));
+                // gdb-wui's own log (the Log tab), and what it says about the program
+                const wui = await frame("[d.getElementById('log').innerText, d.getElementById('exe-name').textContent, d.getElementById('run-state').dataset.state, d.getElementById('status-message')?.textContent].join(' | ')").catch(e => e.message);
+                console.log("  gdb-wui log:", String(wui).replace(/\n+/g, "\n    ").slice(-3000));
                 throw new Error(`timed out: ${what} (web status: ${await ev("document.getElementById('web-status').textContent")})`);
             }
             await sleep(500);
@@ -123,17 +126,35 @@ async function main()
         await sleep(1000);
         await frame("!d.getElementById('confirm').classList.contains('is-hidden') && d.getElementById('confirm-yes').click()");
         await frame("d.querySelector('.tree-row[data-path=\"busybox\"]').click()");
+        // (the page asks before replacing a program it still thinks is live)
+        await sleep(300);
+        await frame("!d.getElementById('confirm').classList.contains('is-hidden') && d.getElementById('confirm-yes').click()");
         await until("busybox loaded", "d.getElementById('exe-name').textContent.includes('busybox')", 120);
-        await frame("d.getElementById('btn-run-main').click()");
-        await until("busybox stopped in main", "d.getElementById('run-state').dataset.state === 'stopped'", 300);
+        // As the try-online page says: ls's arguments and a breakpoint on
+        // ls_main, typed in gdb's console, then Run
+        const type = async line => {
+            await frame("d.querySelector('#gdbconsole .xterm-helper-textarea').focus()");
+            await send("Input.insertText", { text: line });
+            await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+            await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+            await sleep(1500);
+        };
+        await type("set args ls -l /");
+        await type("break ls_main");
+        await frame("d.getElementById('btn-run').click()");
+        await until("busybox stopped in ls_main", "d.getElementById('run-state').dataset.state === 'stopped' && /ls_main/.test(d.getElementById('stack').textContent)", 300);
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
-        await until("busybox's main decompiled", "/main\\s*\\(/.test(d.getElementById('decomp').textContent) && d.getElementById('decomp').textContent.length > 300", 300);
-        console.log("  busybox main:", (await frame("d.getElementById('decomp').textContent")).replace(/\s+/g, " ").slice(0, 160));
+        // (the pane renders only the lines in view; its header names the function)
+        await until("busybox's ls_main decompiled", "/getopt32|ls_main ·/.test(d.body.innerText) && /ls_main/.test(d.querySelector('#center').innerText)", 300);
+        console.log("  busybox:", (await frame("d.getElementById('decomp').textContent")).replace(/\s+/g, " ").slice(0, 160));
         if(OUT) await shot("busybox");
         await frame("d.getElementById('btn-kill').click()");
         await sleep(1000);
         await frame("!d.getElementById('confirm').classList.contains('is-hidden') && d.getElementById('confirm-yes').click()");
         await frame("d.querySelector('.tree-row[data-path=\"hello\"]').click()");
+        // (the page asks before replacing a program it still thinks is live)
+        await sleep(300);
+        await frame("!d.getElementById('confirm').classList.contains('is-hidden') && d.getElementById('confirm-yes').click()");
         await until("hello loaded again", "d.getElementById('exe-name').textContent.includes('hello')", 120);
     }
     if(OUT) await shot("stopped");
