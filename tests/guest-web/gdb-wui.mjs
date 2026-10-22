@@ -165,10 +165,13 @@ async function main()
         await until("busybox stopped at entry", "d.getElementById('run-state').dataset.state === 'stopped' && /entry/.test(d.getElementById('stack').innerText)", 300);
         // (a stop with no source shows the disassembly)
         await frame("d.querySelector('button.tab[data-center=decomp]').click()");
-        await until("entry decompiled", "/__libc_start_main\\(/.test(d.getElementById('decomp').textContent)", 300);
-        // main is what entry hands __libc_start_main, by whatever name Ghidra gave it
-        const mainName = await frame("d.getElementById('decomp').textContent.match(/__libc_start_main\\(([A-Za-z_]\\w*)/)[1]");
-        console.log("  entry calls __libc_start_main(" + mainName + ", ...)");
+        // main is what entry hands __libc_start_main, with argc from the stack.
+        // Ghidra names one or the other: aarch64 __libc_start_main(FUN_0010d620,
+        // in_stack_00000000, ...), riscv64 FUN_ram_0010b940(main, in_stack_00000000, ...)
+        const call = "/(\\w+)\\(([A-Za-z_]\\w*),in_stack_/";
+        await until("entry decompiled", `${call}.test(d.getElementById('decomp').textContent)`, 300);
+        const [callee, mainName] = await frame(`d.getElementById('decomp').textContent.match(${call}).slice(1)`);
+        console.log("  entry calls " + callee + "(" + mainName + ", ...)");
         await breakOnSymbol(mainName);
         await frame("d.getElementById('btn-continue').click()");
         await until("busybox stopped in its main", `d.getElementById('run-state').dataset.state === 'stopped' && d.getElementById('stack').innerText.includes(${JSON.stringify(mainName)})`, 300);
