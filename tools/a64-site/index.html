@@ -133,7 +133,9 @@ code { color: var(--fg); }
         location.search = params.toString();
     };
 
-    const base = "images/" + build.id + "/";
+    // Each version of an image has its own directory (tools/version-images.py),
+    // so cached parts of an earlier one are never mixed in
+    const base = "images/" + build.id + "/" + (build.dir ? build.dir + "/" : "");
     // By default the guest's HTTP goes through this site's /proxy (worker.js);
     // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
     const relay = params.get("relay") || "fetch";
