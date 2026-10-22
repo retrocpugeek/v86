@@ -40,10 +40,10 @@ grep -rlI --null "$OLD" "$TREE/out/host" "$TREE/out/staging" 2>/dev/null |
     xargs -0 -r sed -i "s|$OLD|$TREE|g"
 
 OVERLAY=$OUT/overlay
-# (with busybox's unstripped build, and with GHIDRA_INSTALL_DIR the programs'
+# (with busybox, the image's own /bin/busybox, and with GHIDRA_INSTALL_DIR the programs'
 # decompilations: see overlay.sh)
 "$PWD/tools/gdb-wui-guest/overlay.sh" riscv64 "$CROSS" "$SRC" "$OVERLAY" \
-    "$(ls "$TREE"/out/build/busybox-*/busybox_unstripped)"
+    "$(ls -d "$TREE"/out/build/busybox-*)/busybox"
 
 CONFIG=$TREE/out/.config
 cp "$PWD/tools/gdb-wui-guest/post-build.sh" "$OUT/post-build.sh"
