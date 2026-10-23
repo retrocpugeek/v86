@@ -216,6 +216,11 @@ async function main()
             // kuna names the library calls through the PLT, and globals dat_
             await until("busybox's main decompiled by kuna", "/\\bmallopt\\(/.test(d.getElementById('decomp').textContent) && /\\bdat_[0-9a-f]+/.test(d.getElementById('decomp').textContent)", 300);
             console.log("  kuna:", (await frame("d.getElementById('decomp').innerText")).replace(/\s+/g, " ").slice(0, 200));
+            // The header says which decompiler, which build and how much it
+            // knows; the log says which one each line is about
+            const header = await until("kuna's status in the header", "(d.querySelector('#center').innerText.match(/kuna [0-9a-f]{7} · \\d+ functions/) || [])[0]", 60);
+            console.log("  header:", header);
+            await until("kuna's lines in the log", "/kuna: decompiling busybox with kuna/.test(d.getElementById('log').innerText)", 30);
             if(OUT) await shot("kuna");
             await use("ghidra");
             await until("Ghidra's again", "/\\bDAT_\\w+/.test(d.getElementById('decomp').textContent)", 120);
