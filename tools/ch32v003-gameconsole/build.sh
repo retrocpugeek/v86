@@ -35,8 +35,11 @@ for game in $GAMES; do
     rm -f "$dir/bin/$game.bin" "$dir/bin/$game.hex"
     make -s -C "$dir" bin NEWLIB="$INCLUDE"
     cp "$dir/bin/$game.bin" "$OUT/"
-    # (the makefile removes the ELF; build it again for its sizes)
-    make -s -C "$dir" "bin/$game.elf" NEWLIB="$INCLUDE"
+    # (the makefile removes the ELF; build it again for its sizes, and for
+    # the v86-riscv site's gdb-wui image to debug it with: its debug info
+    # names the sources as /root/mcu/<game>, where that image has them;
+    # tools/rv64-gdb/build.sh)
+    make -s -C "$dir" "bin/$game.elf" NEWLIB="$INCLUDE" CC="${CROSS}gcc -fdebug-prefix-map=$dir=/root/mcu/$game"
     set -- $("${CROSS}size" "$dir/bin/$game.elf" | tail -1)
     printf '{ "flash": %d, "flash_size": 16384, "text": %d, "data": %d, "bss": %d, "ram_base": %d, "ram_size": 2048 }\n' \
         "$(stat -c %s "$OUT/$game.bin")" "$1" "$2" "$3" 0x20000000 > "$OUT/$game.json"

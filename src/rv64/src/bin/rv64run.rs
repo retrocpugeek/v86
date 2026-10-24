@@ -150,18 +150,22 @@ fn main() {
         let out = |b: u8| {
             let _ = std::io::stdout().write_all(&[b]);
         };
-        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let mut cpu = v86_rv64::dev::ch32::machine(*chip, &read(fw), Box::new(out), epoch).unwrap_or_else(|e| {
-            eprintln!("{chip:?}: {e}");
-            exit(1)
-        });
+        let image = read(fw);
+        let machine = || {
+            let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            v86_rv64::dev::ch32::machine(*chip, &image, Box::new(out), epoch).unwrap_or_else(|e| {
+                eprintln!("{chip:?}: {e}");
+                exit(1)
+            })
+        };
+        let mut cpu = machine();
         if let Some(script) = &args.script {
             run_script(&mut cpu, script, args.jitter);
             return;
         }
         if let Some(addr) = &args.gdb {
             cpu.realtime = true;
-            gdb_server(&mut cpu, addr, *chip, args.gdb_wait);
+            gdb_server(&mut cpu, addr, *chip, args.gdb_wait, &machine);
             return;
         }
         cpu.realtime = true;
@@ -601,8 +605,9 @@ fn compare(cpu: &mut Cpu, rec: &Record, prev_text: &str, recent: &VecDeque<u64>,
 }
 
 /// --gdb: the machine in real time, with a GDB remote stub on a TCP port. One
-/// debugger at a time; the hart runs on its own between them.
-fn gdb_server(cpu: &mut Cpu, addr: &str, chip: v86_rv64::dev::ch32::Chip, wait: bool) {
+/// debugger at a time; the hart runs on its own between them. `machine`
+/// builds a fresh one, for `monitor reset`.
+fn gdb_server(cpu: &mut Cpu, addr: &str, chip: v86_rv64::dev::ch32::Chip, wait: bool, machine: &dyn Fn() -> Cpu) {
     use std::net::TcpListener;
     use v86_rv64::gdb::{Gdb, Mode};
     let listener = TcpListener::bind(addr).unwrap_or_else(|e| {
@@ -643,6 +648,12 @@ fn gdb_server(cpu: &mut Cpu, addr: &str, chip: v86_rv64::dev::ch32::Chip, wait: 
                 s.set_nonblocking(true).unwrap();
                 g.out.clear();
             }
+        }
+        if let Some((_, g)) = client.as_mut().filter(|(_, g)| g.reset.is_some()) {
+            let breakpoints = std::mem::take(&mut cpu.breakpoints);
+            *cpu = machine();
+            cpu.realtime = true;
+            g.reattach(cpu, breakpoints);
         }
         if gone {
             eprintln!("rv64run: gdb disconnected");

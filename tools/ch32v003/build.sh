@@ -6,10 +6,16 @@
 #   CROSS=riscv32-buildroot-linux-gnu- tools/ch32v003/build.sh [out-dir]
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
-OUT=${1:-$HERE/../../build/ch32v003}
+OUT=$(realpath -m "${1:-$HERE/../../build/ch32v003}")
 CROSS=${CROSS:-riscv64-unknown-elf-}
 mkdir -p "$OUT"
-"${CROSS}gcc" -march=rv32ec_zicsr -mabi=ilp32e -Os -g -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -no-pie -static \
+# The debug info names the sources as /root/mcu/tetris, where the v86-riscv
+# site's gdb-wui image has them (tools/rv64-gdb/build.sh) to debug this
+# with, and the compiler's own headers as under /usr (built here, so that
+# the build directory is the sources')
+TOOLCHAIN=$(realpath "$(dirname "$(command -v "${CROSS}gcc")")/..")
+cd "$HERE"
+"${CROSS}gcc" -march=rv32ec_zicsr -mabi=ilp32e -Os -g -fdebug-prefix-map="$TOOLCHAIN=/usr" -fdebug-prefix-map="$HERE=/root/mcu/tetris" -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -no-pie -static \
   -ffunction-sections -fdata-sections -Wall -Wextra \
   -T "$HERE/link.ld" -Wl,--gc-sections -Wl,-Map,"$OUT/tetris.map" \
   -o "$OUT/tetris.elf" "$HERE/start.S" "$HERE/tetris.c" "$HERE/libgcc.c"

@@ -13,6 +13,7 @@ use crate::bus::{Bus, DevCtx, Device, Plic, RAM_BASE};
 use crate::cpu::{Cpu, RunExit};
 use crate::dev::rtc::Rtc;
 use crate::dev::uart::Uart;
+use crate::gdb::Gdb;
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -33,6 +34,10 @@ const NUM_IRQ_LINES: usize = 64;
 /// PLIC source levels written by JS, plus a dirty flag at the end.
 static mut IRQ_LINES: [u8; NUM_IRQ_LINES + 1] = [0; NUM_IRQ_LINES + 1];
 static mut CPU: Option<Box<Cpu>> = None;
+/// The debugger attached to a microcontroller (rv64_gdb_*), whose bytes the
+/// page relays from gdb in another machine.
+static mut GDB: Option<Gdb> = None;
+static mut GDB_IN: [u8; 4096] = [0; 4096];
 static mut UART_RX: Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>> = None;
 
 fn apply_irq_lines(plic: &mut Plic) {
@@ -120,6 +125,9 @@ pub extern "C" fn rv64_set_xlen32(on: u32) { cpu().xlen32 = on != 0 }
 /// if the firmware doesn't fit.
 #[no_mangle]
 pub extern "C" fn rv64_init_ch32(chip: u32, ptr: u32, len: u32, epoch_secs: f64) -> i32 {
+    // A reset with a debugger attached keeps it, and its breakpoints
+    #[allow(static_mut_refs)]
+    let breakpoints = unsafe { CPU.as_deref_mut() }.map(|c| std::mem::take(&mut c.breakpoints)).unwrap_or_default();
     unsafe {
         *addr_of_mut!(CPU) = None;
         *addr_of_mut!(IRQ_LINES) = [0; NUM_IRQ_LINES + 1];
@@ -131,8 +139,68 @@ pub extern "C" fn rv64_init_ch32(chip: u32, ptr: u32, len: u32, epoch_secs: f64)
     cpu.bus.log_unmapped = false;
     cpu.realtime = true;
     unsafe { *addr_of_mut!(UART_RX) = Some(cpu.bus.ch32.as_ref().unwrap().rx.clone()) };
+    if let Some(g) = gdb() {
+        g.reattach(&mut cpu, breakpoints);
+    }
     unsafe { *addr_of_mut!(CPU) = Some(Box::new(cpu)) };
     0
+}
+
+// ---- the GDB stub (src/gdb.rs), for a microcontroller ----
+
+#[allow(static_mut_refs)]
+fn gdb() -> Option<&'static mut Gdb> { unsafe { GDB.as_mut() } }
+
+/// A debugger connects: the hart stops. Returns 0, or -1 if this isn't a
+/// microcontroller.
+#[no_mangle]
+pub extern "C" fn rv64_gdb_attach() -> i32 {
+    let Some(chip) = ch32().map(|c| c.chip) else { return -1 };
+    let v003 = chip == crate::dev::ch32::Chip::V003;
+    let g = Gdb::attach(cpu(), v003, !v003);
+    unsafe { *addr_of_mut!(GDB) = Some(g) };
+    0
+}
+
+/// The debugger went away: the hart runs on undisturbed.
+#[no_mangle]
+pub extern "C" fn rv64_gdb_detach() {
+    #[allow(static_mut_refs)]
+    if let Some(mut g) = unsafe { GDB.take() } {
+        g.detach(cpu());
+    }
+}
+
+/// The debugger has the hart stopped: rv64_run would do nothing, and time
+/// stands still.
+#[no_mangle]
+pub extern "C" fn rv64_gdb_halted() -> u32 { gdb().is_some_and(|g| g.mode == crate::gdb::Mode::Halted && g.reset.is_none()) as u32 }
+
+/// Where JS puts gdb's bytes for rv64_gdb_input (4096 of them).
+#[no_mangle]
+pub extern "C" fn rv64_gdb_in_ptr() -> u32 { addr_of!(GDB_IN) as u32 }
+
+/// `len` bytes from gdb, in rv64_gdb_in_ptr's buffer.
+#[no_mangle]
+pub extern "C" fn rv64_gdb_input(len: u32) {
+    let data = unsafe { &(&*addr_of!(GDB_IN))[..(len as usize).min(4096)] };
+    if let Some(g) = gdb() {
+        g.input(cpu(), data);
+    }
+}
+
+/// The bytes for gdb (rv64_gdb_out_len of them), until rv64_gdb_out_clear.
+#[no_mangle]
+pub extern "C" fn rv64_gdb_out_ptr() -> u32 { gdb().map_or(0, |g| g.out.as_ptr() as u32) }
+
+#[no_mangle]
+pub extern "C" fn rv64_gdb_out_len() -> u32 { gdb().map_or(0, |g| g.out.len() as u32) }
+
+#[no_mangle]
+pub extern "C" fn rv64_gdb_out_clear() {
+    if let Some(g) = gdb() {
+        g.out.clear();
+    }
 }
 
 /// A CH32V GPIO port's output register (0: port A, 1: B, ...), or 0.
@@ -277,13 +345,23 @@ pub extern "C" fn rv64_serial_in(byte: u32) {
 }
 
 /// Run up to `budget` steps. Returns 0 = budget used, 1 = idle (waiting for an
-/// interrupt), 2 = powered off, 3 = reset requested.
+/// interrupt), 2 = powered off, 3 = reset requested, 4 = stopped for the
+/// debugger (rv64_gdb_*; it has bytes for gdb).
 #[no_mangle]
 pub extern "C" fn rv64_run(budget: u32) -> u32 {
     let cpu = cpu();
     apply_irq_lines(&mut cpu.bus.plic);
     cpu.update_mip();
-    let r = cpu.run(budget as u64);
+    let r = match gdb() {
+        // `monitor reset`: JS rebuilds the machine (rv64_init_ch32)
+        Some(g) if g.reset.is_some() => return 3,
+        // (a stop is RunExit::Debug)
+        Some(g) => match g.poll(cpu, budget as u64) {
+            None => return 4,
+            Some(r) => r,
+        },
+        None => cpu.run(budget as u64),
+    };
     // Input that arrived while running, and devices' pending work
     cpu.bus.now_ns = cpu.now_ns();
     cpu.bus.poll_devices();

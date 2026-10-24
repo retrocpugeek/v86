@@ -1625,6 +1625,38 @@ V86.prototype.take_gpio_edges = function()
 };
 
 /**
+ * Microcontrollers: a debugger connects to the GDB stub (src/rv64/src/gdb.rs),
+ * as through a debug probe. The hart stops; `output` gets the stub's bytes
+ * for gdb, and gdb_input takes gdb's. Returns false for other machines.
+ * @param {function(!Uint8Array)} output
+ * @return {boolean}
+ */
+V86.prototype.gdb_attach = function(output)
+{
+    const cpu = this.v86.cpu;
+    return cpu.gdb_attach ? cpu.gdb_attach(output) : false;
+};
+
+/**
+ * Microcontrollers: bytes from gdb for the stub (see gdb_attach).
+ * @param {!Uint8Array} data
+ */
+V86.prototype.gdb_input = function(data)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.gdb_input) cpu.gdb_input(data);
+};
+
+/**
+ * Microcontrollers: the debugger went away; the hart runs on.
+ */
+V86.prototype.gdb_detach = function()
+{
+    const cpu = this.v86.cpu;
+    if(cpu.gdb_detach) cpu.gdb_detach();
+};
+
+/**
  * Reads data from memory at specified offset.
  *
  * @param {number} offset

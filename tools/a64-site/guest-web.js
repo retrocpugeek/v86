@@ -669,7 +669,45 @@ function serve_kuna(adapter, port)
     });
 }
 
-async function start_guest_web(emulator, build)
+// A microcontroller's GDB stub (src/rv64/src/gdb.rs, in another emulator on
+// this page) for the guest's gdb, as a debug probe would offer it on a port:
+// the guest connects to this page, its gateway, on `port` (S95gdb-wui does,
+// with gdb-wui -gdb-command 'target remote ...'), and the bytes go between
+// gdb and target's stub (V86.gdb_attach). One debugger at a time: a new
+// connection takes over. on_change(true or false) says whether one is
+// attached.
+function serve_gdb_stub(adapter, port, target, on_change)
+{
+    let current = null;
+    adapter.bus.register("tcp-connection", conn =>
+    {
+        if(conn.sport !== port) return;
+        if(current)
+        {
+            const old = current;
+            current = null;
+            target.gdb_detach();
+            old.close();
+        }
+        if(!target.gdb_attach(bytes => conn === current && conn.write(bytes))) return;
+        current = conn;
+        conn.on("data", data => { if(conn === current) target.gdb_input(data.slice()); });
+        const gone = () =>
+        {
+            if(conn !== current) return;
+            current = null;
+            target.gdb_detach();
+            on_change(false);
+        };
+        conn.on("shutdown", () => { gone(); conn.close(); });
+        conn.on("close", gone);
+        conn.accept();
+        on_change(true);
+    });
+}
+
+// options.gdb_stub: { port, target, on_change } for serve_gdb_stub
+async function start_guest_web(emulator, build, options = {})
 {
     const section = document.getElementById("web");
     const status = document.getElementById("web-status");
@@ -698,6 +736,11 @@ async function start_guest_web(emulator, build)
     if(!adapter || typeof adapter.connect !== "function") throw new Error("needs the default network (no ?relay=)");
 
     if(guest_web.kuna_port) serve_kuna(adapter, guest_web.kuna_port);
+    if(options.gdb_stub)
+    {
+        const { port, target, on_change } = options.gdb_stub;
+        serve_gdb_stub(adapter, port, target, on_change || (() => {}));
+    }
     if(guest_web.websocket)
     {
         window.v86_guest_websocket = (ws_path, on) => guest_websocket(adapter, ws_path, on);

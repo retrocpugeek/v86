@@ -82,6 +82,8 @@ export function RV64CPU(bus, wasm, stop_idling)
 
     this.powered_off = false;
     this.settings = null;
+    /** @type {?function(!Uint8Array)} where the GDB stub's replies go while a debugger is attached */
+    this.gdb_output = null;
 
     // JIT (src/rv64/src/jit.rs): compiled regions go into the core's function table
     this.jit_table = this.wasm["__indirect_function_table"];
@@ -529,6 +531,11 @@ RV64CPU.prototype.main_loop = function()
     {
         return 1000;
     }
+    if(this.gdb_output && this.wasm["rv64_gdb_halted"]())
+    {
+        // Stopped by the debugger, whose next packet wakes us
+        return 1000;
+    }
     const start = now();
     for(;;)
     {
@@ -556,6 +563,12 @@ RV64CPU.prototype.main_loop = function()
             // Idle: sleep until the next timer (devices wake us via stop_idling).
             const ms = this.wasm["rv64_ms_until_timer"]();
             return ms < 0 ? 100 : Math.min(ms, 100);
+        }
+        else if(exit === 4)
+        {
+            // Stopped for the debugger: tell it
+            this.gdb_flush();
+            return 1000;
         }
         else if(exit === 2)
         {
@@ -605,6 +618,59 @@ RV64CPU.prototype.jit_compile = function(ptr, len, index, cookie)
         this.wasm["rv64_jit_done"](cookie, 0);
     });
     return 0;
+};
+
+// ---- the GDB stub (src/rv64/src/gdb.rs), for a microcontroller ----
+
+/**
+ * A debugger connects: the hart stops, and the stub's replies go to
+ * `output`. Returns false if this isn't a microcontroller.
+ * @param {function(!Uint8Array)} output
+ * @return {boolean}
+ */
+RV64CPU.prototype.gdb_attach = function(output)
+{
+    if(!this.ch32 || this.wasm["rv64_gdb_attach"]() !== 0) return false;
+    this.gdb_output = output;
+    return true;
+};
+
+/** The debugger went away: the hart runs on. */
+RV64CPU.prototype.gdb_detach = function()
+{
+    if(!this.gdb_output) return;
+    this.wasm["rv64_gdb_detach"]();
+    this.gdb_output = null;
+    this.stop_idling();
+};
+
+/**
+ * Bytes from the debugger.
+ * @param {!Uint8Array} data
+ */
+RV64CPU.prototype.gdb_input = function(data)
+{
+    if(!this.gdb_output) return;
+    const ptr = this.wasm["rv64_gdb_in_ptr"]();
+    for(let i = 0; i < data.length; i += 4096)
+    {
+        const chunk = data.subarray(i, i + 4096);
+        new Uint8Array(this.wasm_memory.buffer, ptr, chunk.length).set(chunk);
+        this.wasm["rv64_gdb_input"](chunk.length);
+    }
+    this.gdb_flush();
+    // It may have resumed the hart
+    this.stop_idling();
+};
+
+/** Pass the stub's replies on. */
+RV64CPU.prototype.gdb_flush = function()
+{
+    const len = this.wasm["rv64_gdb_out_len"]();
+    if(!len || !this.gdb_output) return;
+    const bytes = new Uint8Array(this.wasm_memory.buffer, this.wasm["rv64_gdb_out_ptr"](), len).slice();
+    this.wasm["rv64_gdb_out_clear"]();
+    this.gdb_output(bytes);
 };
 
 /** @return {Array<number>} JIT counters: compiled, entered, stale, failed, instructions, slow loads/stores */

@@ -54,6 +54,9 @@ pub struct Gdb {
     embedded: bool,
     fpu: bool,
     tdesc: String,
+    /// gdb asked for a reset (`monitor reset`; true: `monitor reset halt`).
+    /// The transport rebuilds the machine and calls reattach().
+    pub reset: Option<bool>,
 }
 
 impl Gdb {
@@ -65,7 +68,7 @@ impl Gdb {
         cpu.debug_ebreak = true;
         cpu.debug_stop = false;
         let tdesc = target_description(cpu.xlen32, embedded, fpu);
-        Gdb { mode: Mode::Halted, out: Vec::new(), buf: Vec::new(), in_packet: false, no_ack: false, embedded, fpu, tdesc }
+        Gdb { mode: Mode::Halted, out: Vec::new(), buf: Vec::new(), in_packet: false, no_ack: false, embedded, fpu, tdesc, reset: None }
     }
 
     /// Lets the hart run on undisturbed, as a debugger that goes away does.
@@ -76,6 +79,17 @@ impl Gdb {
         cpu.debug_resume = None;
         self.mode = Mode::Running;
         resume_clock(cpu);
+    }
+
+    /// Carries on with a new machine, the reset of the old one: its
+    /// breakpoints, and stopped at the reset vector if gdb asked for that
+    /// (`monitor reset halt`), else as it was.
+    pub fn reattach(&mut self, cpu: &mut Cpu, breakpoints: Vec<u64>) {
+        cpu.debug_ebreak = true;
+        cpu.breakpoints = breakpoints;
+        if self.reset.take() == Some(true) {
+            self.mode = Mode::Halted;
+        }
     }
 
     /// The bytes gdb sent.
@@ -304,6 +318,31 @@ impl Gdb {
                 }
             }
             self.send(&r);
+        } else if let Some(hex) = s.strip_prefix("qRcmd,") {
+            // monitor <command>
+            let cmd: String = (0..hex.len() / 2)
+                .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+                .map(char::from)
+                .collect();
+            let say = |s: &str| "O".to_string() + &s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+            match cmd.trim() {
+                "reset" | "reset run" => {
+                    self.reset = Some(false);
+                    self.reply("OK");
+                }
+                "reset halt" => {
+                    // gdb keeps the registers it read before
+                    self.reset = Some(true);
+                    let m = say("Reset, stopped at the reset vector; `maint flush register-cache` shows its registers.\n");
+                    self.reply(&m);
+                    self.reply("OK");
+                }
+                _ => {
+                    let m = say("monitor commands: reset [halt|run]\n");
+                    self.reply(&m);
+                    self.reply("OK");
+                }
+            }
         } else if s == "qAttached" {
             self.reply("1");
         } else if s == "qC" {

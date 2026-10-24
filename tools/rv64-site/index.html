@@ -27,6 +27,31 @@ main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
 #web-note[hidden] { display: none; }
 #guest-web { flex: 1; min-height: 480px; width: 100%; border: 1px solid #444; background: #fff; }
 #guest-web:not([src]) { visibility: hidden; }
+/* ?debug: gdb-wui's machine, next to the microcontroller */
+#debug-console { flex-basis: 100%; }
+#debug-console[hidden] { display: none; }
+#debug-console summary { color: var(--muted); cursor: pointer; }
+#debug-terminal { padding: 4px; background: #000; margin-top: 6px; overflow-x: auto; }
+#mcu-debug { margin: 0 0 12px; }
+#debug-arch { flex-basis: 100%; max-width: 900px; }
+#debug-arch[hidden] { display: none; }
+#debug-arch summary { color: var(--muted); cursor: pointer; }
+#debug-arch svg { display: block; width: 100%; height: auto; margin-top: 8px; font: 13px system-ui, sans-serif; }
+#debug-arch text { fill: var(--fg); }
+#debug-arch text.h { font-weight: 600; }
+#debug-arch text.m { fill: var(--muted); font-size: 12px; }
+#debug-arch text.l { fill: var(--accent); font-size: 12px; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+#debug-arch .tab { fill: none; stroke: #444; stroke-dasharray: 6 4; }
+#debug-arch .box { stroke-width: 1.5; }
+#debug-arch .ui { fill: #1d2430; stroke: #5a6f8f; }
+#debug-arch .vm { fill: #1e2a22; stroke: #5d8a68; }
+#debug-arch .mcu { fill: #2a2420; stroke: #9a7a52; }
+#debug-arch .js { fill: #1f1f28; stroke: #6a6a8a; }
+#debug-arch .inner { fill: #00000040; stroke: #555; }
+#debug-arch .inner.stub { stroke: var(--accent); }
+#debug-arch .link { stroke: var(--accent); stroke-width: 1.6; }
+#debug-arch marker path { fill: var(--accent); }
+#mcu-debug[hidden] { display: none; }
 button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1px 8px; }
 .log-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .log-tools button { padding: 4px 10px; }
@@ -171,6 +196,7 @@ code { color: var(--fg); }
     <span id="shell-note" class="live"></span>
   </section>
   <section id="mcu-info" hidden>
+    <p id="mcu-debug" hidden></p>
     <div id="leds" hidden></div>
     <h2>Emulated hardware</h2>
     <table id="mcu-hw"></table>
@@ -193,6 +219,91 @@ code { color: var(--fg); }
     </div>
     <iframe id="guest-web" title="Guest web interface"></iframe>
   </section>
+  <details id="debug-arch" hidden>
+    <summary>How the debugging works</summary>
+    <svg viewBox="0 0 900 490" role="img" aria-labelledby="debug-arch-title">
+      <title id="debug-arch-title">Two emulators in this page: gdb and gdb-wui in a riscv64 Linux machine, connected through the page's JavaScript to the GDB stub in the emulated CH32V003, and gdb-wui's frontend in an iframe</title>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+      </defs>
+      <rect class="tab" x="4" y="4" width="892" height="482" rx="10"/>
+      <text class="h" x="20" y="28">Your browser: this tab</text>
+
+      <rect class="box ui" x="20" y="44" width="230" height="232" rx="8"/>
+      <text class="h" x="34" y="70">gdb-wui's frontend</text>
+      <text x="34" y="92">in an iframe: source,</text>
+      <text x="34" y="110">disassembly, registers,</text>
+      <text x="34" y="128">memory, breakpoints,</text>
+      <text x="34" y="146">Decompiled view</text>
+      <text class="m" x="34" y="176">served by the guest:</text>
+      <text class="m" x="34" y="194">pages through sw.js,</text>
+      <text class="m" x="34" y="212">live state over a</text>
+      <text class="m" x="34" y="230">WebSocket</text>
+
+      <rect class="box vm" x="276" y="44" width="310" height="232" rx="8"/>
+      <text class="h" x="290" y="70">Emulator 2: v86 riscv64</text>
+      <text class="m" x="290" y="88">Buildroot Linux, the gdb-wui image; virtio-net</text>
+      <rect class="inner" x="290" y="104" width="112" height="122" rx="6"/>
+      <text class="h" x="302" y="128">gdb-wui</text>
+      <text x="302" y="148">server (Go),</text>
+      <text x="302" y="166">port 80</text>
+      <text class="m" x="302" y="190">project:</text>
+      <text class="m" x="302" y="208">/root/mcu/…</text>
+      <rect class="inner" x="462" y="104" width="112" height="122" rx="6"/>
+      <text class="h" x="474" y="128">gdb</text>
+      <text x="474" y="148">firmware ELF</text>
+      <text x="474" y="166">and sources</text>
+      <text class="m" x="474" y="190">riscv:rv32,</text>
+      <text class="m" x="474" y="208">DWARF</text>
+      <text class="l" x="432" y="152" text-anchor="middle">GDB/MI</text>
+      <line class="link" x1="404" y1="166" x2="460" y2="166" marker-start="url(#arr)" marker-end="url(#arr)"/>
+
+      <rect class="box mcu" x="612" y="44" width="270" height="232" rx="8"/>
+      <text class="h" x="626" y="70">Emulator 1: v86 CH32V003</text>
+      <text class="m" x="626" y="88">RV32EC: this page's microcontroller</text>
+      <rect class="inner" x="626" y="104" width="242" height="52" rx="6"/>
+      <text class="h" x="638" y="128">Hart, flash, SRAM</text>
+      <text x="638" y="148">the firmware; serial or OLED</text>
+      <rect class="inner stub" x="626" y="186" width="242" height="76" rx="6"/>
+      <text class="h" x="638" y="210">GDB stub (gdb.rs)</text>
+      <text x="638" y="230">registers, memory, breakpoints,</text>
+      <text x="638" y="250">step, halt; ebreak stops</text>
+      <line class="link" x1="747" y1="158" x2="747" y2="184" marker-start="url(#arr)" marker-end="url(#arr)"/>
+
+      <rect class="box js" x="20" y="340" width="862" height="134" rx="8"/>
+      <rect class="inner" x="34" y="354" width="250" height="80" rx="6"/>
+      <text class="h" x="46" y="378">sw.js + WebSocket relay</text>
+      <text x="46" y="398">the frontend's requests</text>
+      <text x="46" y="416">to the guest's port 80</text>
+      <rect class="inner" x="308" y="354" width="250" height="80" rx="6"/>
+      <text class="h" x="320" y="378">kuna, port 5717</text>
+      <text x="320" y="398">a decompiler, as</text>
+      <text x="320" y="416">WebAssembly in a worker</text>
+      <rect class="inner stub" x="582" y="354" width="286" height="80" rx="6"/>
+      <text class="h" x="594" y="378">The probe, port 3333</text>
+      <text x="594" y="398">TCP from gdb ⇄ the stub:</text>
+      <text x="594" y="416">V86.gdb_input / gdb_attach</text>
+      <text class="h" x="34" y="460">The page's JavaScript: the guests' gateway, 192.168.86.1, on v86's virtual network</text>
+
+      <line class="link" x1="100" y1="278" x2="100" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="108" y="306">fetch,</text>
+      <text class="l" x="108" y="322">WebSocket</text>
+      <line class="link" x1="320" y1="228" x2="230" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="216" y="300">TCP :80</text>
+      <line class="link" x1="380" y1="228" x2="420" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="408" y="300">TCP :5717</text>
+      <line class="link stub-link" x1="530" y1="228" x2="640" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="594" y="294">TCP :3333, the GDB</text>
+      <text class="l" x="594" y="310">remote protocol</text>
+      <line class="link stub-link" x1="830" y1="264" x2="830" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="822" y="300" text-anchor="end">packets in,</text>
+      <text class="l" x="822" y="316" text-anchor="end">replies out</text>
+    </svg>
+  </details>
+  <details id="debug-console" hidden>
+    <summary>gdb-wui's Linux machine: its console</summary>
+    <div id="debug-terminal"></div>
+  </details>
 </main>
 <footer>
   <p id="mcu-about" hidden></p>
@@ -232,48 +343,19 @@ code { color: var(--fg); }
         location.search = params.toString();
     };
 
-    // Each version of an image has its own directory (tools/version-images.py),
-    // so cached parts of an earlier one are never mixed in
-    const base = "images/" + build.id + "/" + (build.dir ? build.dir + "/" : "");
-    // By default the guest's HTTP goes through this site's /proxy (worker.js);
-    // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
-    const relay = params.get("relay") || "fetch";
-    const cors_proxy = params.has("relay") ? undefined : location.origin + "/proxy?url=";
+    const base = image_base(build);
 
     if(MCUS[build.arch])
     {
-        start_mcu(build, base, status);
+        // ?debug: and gdb-wui debugging its firmware (builds with "debug")
+        const gdb_build = params.has("debug") && build.debug && manifest.builds.find(b => b.web_app === "gdb-wui");
+        start_mcu(build, base, status, gdb_build || null, manifest);
         return;
     }
 
     status.textContent = "Downloading kernel";
     const kernel = await fetch_kernel(base + build.kernel, status);
-
-    const emulator = window.emulator = new V86({
-        // riscv64, or riscv32 for an RV32 image (add-image.sh ARCH=riscv32)
-        arch: build.arch || "riscv64",
-        wasm_path: "v86-rv64.wasm",
-        // ?jit=0 turns off the JIT (compiled blocks; src/rv64/src/jit.rs)
-        rv64_jit: params.get("jit") !== "0",
-        // OpenSBI (fw_dynamic), which starts the kernel in S mode
-        bios: { url: base + build.bios },
-        memory_size: (build.memory_mb || 256) * 1024 * 1024,
-        kernel: { buffer: kernel },
-        hda: {
-            url: base + "rootfs/" + build.rootfs.ext,
-            size: build.rootfs.size,
-            fixed_chunk_size: build.rootfs.chunk_size,
-            use_parts: true,
-            async: true,
-        },
-        cmdline: build.cmdline,
-        net_device: { type: "virtio", relay_url: relay, cors_proxy },
-        serial_console: { type: "xtermjs", container: document.getElementById("terminal") },
-        autostart: true,
-        disable_keyboard: true,
-        disable_mouse: true,
-        disable_speaker: true,
-    });
+    const emulator = window.emulator = start_linux(build, kernel, document.getElementById("terminal"), "");
 
     setup_console_log(emulator, build);
 
@@ -294,6 +376,50 @@ code { color: var(--fg); }
     document.getElementById("status").textContent = "Error: " + e.message;
     throw e;
 });
+
+// Each version of an image has its own directory (tools/version-images.py),
+// so cached parts of an earlier one are never mixed in
+function image_base(build)
+{
+    return "images/" + build.id + "/" + (build.dir ? build.dir + "/" : "");
+}
+
+// A Linux machine (riscv64, or riscv32) for build, with its console in
+// `container`, and cmdline_extra after the image's command line.
+function start_linux(build, kernel, container, cmdline_extra)
+{
+    const params = new URLSearchParams(location.search);
+    const base = image_base(build);
+    // By default the guest's HTTP goes through this site's /proxy (worker.js);
+    // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
+    const relay = params.get("relay") || "fetch";
+    const cors_proxy = params.has("relay") ? undefined : location.origin + "/proxy?url=";
+    return new V86({
+        // riscv64, or riscv32 for an RV32 image (add-image.sh ARCH=riscv32)
+        arch: build.arch || "riscv64",
+        wasm_path: "v86-rv64.wasm",
+        // ?jit=0 turns off the JIT (compiled blocks; src/rv64/src/jit.rs)
+        rv64_jit: params.get("jit") !== "0",
+        // OpenSBI (fw_dynamic), which starts the kernel in S mode
+        bios: { url: base + build.bios },
+        memory_size: (build.memory_mb || 256) * 1024 * 1024,
+        kernel: { buffer: kernel },
+        hda: {
+            url: base + "rootfs/" + build.rootfs.ext,
+            size: build.rootfs.size,
+            fixed_chunk_size: build.rootfs.chunk_size,
+            use_parts: true,
+            async: true,
+        },
+        cmdline: [build.cmdline, cmdline_extra].filter(Boolean).join(" "),
+        net_device: { type: "virtio", relay_url: relay, cors_proxy },
+        serial_console: { type: "xtermjs", container },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+}
 
 // The emulated microcontrollers (src/rv64/src/dev/ch32.rs): specs for the
 // page, the clock CPU load is measured against, what the firmware does.
@@ -365,12 +491,12 @@ const MCUS = {
 // A microcontroller with build.bios as its flash: no kernel or disk. The
 // terminal is sized to build.cols x build.rows, with the font scaled to fit
 // the page's width.
-function start_mcu(build, base, status)
+function start_mcu(build, base, status, gdb_build, manifest)
 {
     const mcu = MCUS[build.board || build.arch];
     if(build.board === "gameconsole")
     {
-        start_game_console(build, base, status, mcu);
+        start_game_console(build, base, status, mcu, gdb_build, manifest);
         return;
     }
     const cols = build.cols || 46, rows = build.rows || 25;
@@ -393,13 +519,15 @@ function start_mcu(build, base, status)
         wasm_path: "v86-rv64.wasm",
         bios: { url: base + build.bios },
         serial_console: { type: "xtermjs", container: document.getElementById("terminal"), xterm_lib: SizedTerminal },
-        autostart: true,
+        // held at reset for the debugger
+        autostart: !gdb_build,
         disable_keyboard: true,
         disable_mouse: true,
         disable_speaker: true,
     });
     setup_console_log(emulator, build);
-    emulator.add_listener("emulator-ready", () => { status.textContent = "Running"; });
+    emulator.add_listener("emulator-ready", () => { if(!gdb_build) status.textContent = "Running"; });
+    setup_debugging(emulator, build, status, gdb_build, manifest);
     if(build.controls === "tetris")
     {
         setup_pad(emulator);
@@ -413,7 +541,7 @@ function start_mcu(build, base, status)
 
 // The CH32V003 game console (tools/ch32v003-gameconsole): the OLED display
 // (src/rv64/src/dev/ssd1306.rs) on a canvas, the buttons and the buzzer.
-function start_game_console(build, base, status, mcu)
+function start_game_console(build, base, status, mcu, gdb_build, manifest)
 {
     const about = document.getElementById("mcu-about");
     about.innerHTML = mcu.about;
@@ -426,19 +554,84 @@ function start_game_console(build, base, status, mcu)
         arch: build.arch,
         wasm_path: "v86-rv64.wasm",
         bios: { url: base + build.bios },
-        autostart: true,
+        // held at reset for the debugger
+        autostart: !gdb_build,
         disable_keyboard: true,
         disable_mouse: true,
         disable_speaker: true,
     });
+    setup_debugging(emulator, build, status, gdb_build, manifest);
     emulator.add_listener("emulator-ready", () =>
     {
-        status.textContent = "Running";
+        if(!gdb_build) status.textContent = "Running";
         draw_oled(emulator);
         setup_console_buttons(emulator);
         setup_buzzer(emulator);
     });
     show_mcu_info(emulator, mcu, build);
+}
+
+// Debugging the firmware with gdb-wui (?debug, for builds with "debug": the
+// name of its project in the gdb-wui image, /root/mcu/<debug>, with its ELF
+// and sources; tools/rv64-gdb/build.sh). gdb-wui's Linux machine, the gdb-wui
+// image, runs next to the microcontroller, and its gdb connects to the
+// microcontroller's GDB stub (src/rv64/src/gdb.rs) through this page as
+// through a debug probe: S95gdb-wui, told the project on the kernel command
+// line, runs target remote to its gateway's port 3333 (serve_gdb_stub in
+// guest-web.js). The microcontroller is held at reset until gdb connects.
+const GDB_STUB_PORT = 3333;
+
+function setup_debugging(emulator, build, status, gdb_build, manifest)
+{
+    const offer = document.getElementById("mcu-debug");
+    const can_debug = build.debug && manifest.builds.some(b => b.web_app === "gdb-wui");
+    if(!can_debug) return;
+    if(!gdb_build)
+    {
+        offer.innerHTML = `<a href="?build=${encodeURIComponent(build.id)}&amp;debug">Debug this firmware with gdb</a>: ` +
+            "source-level debugging in gdb-wui, in a Linux machine next to this one, as through a debug probe " +
+            "(a desktop browser, and a minute to boot).";
+        offer.hidden = false;
+        document.getElementById("debug-arch").hidden = false;
+        return;
+    }
+    const arch = document.getElementById("debug-arch");
+    arch.hidden = false;
+    arch.open = true;
+    offer.innerHTML = `Debugging with gdb-wui, below. <a href="?build=${encodeURIComponent(build.id)}">Without the debugger</a>`;
+    offer.hidden = false;
+    status.textContent = "Held at reset until gdb-wui connects: its machine is starting";
+    let started = false;
+    document.getElementById("debug-console").hidden = false;
+    const web_status = document.getElementById("web-status");
+    (async () =>
+    {
+        // (the web section, shown by start_guest_web, says how far it is)
+        document.getElementById("web").hidden = false;
+        document.getElementById("web-title").textContent = "gdb-wui";
+        web_status.textContent = "Downloading kernel";
+        const kernel = await fetch_kernel(image_base(gdb_build) + gdb_build.kernel, web_status);
+        const vm = window.debugger_emulator =
+            start_linux(gdb_build, kernel, document.getElementById("debug-terminal"), "gdb_wui.mcu=" + build.debug);
+        await start_guest_web(vm, gdb_build, {
+            gdb_stub: {
+                port: GDB_STUB_PORT,
+                target: emulator,
+                on_change: attached =>
+                {
+                    if(attached && !started)
+                    {
+                        started = true;
+                        emulator.run();
+                    }
+                    status.textContent = attached ? "gdb-wui is attached" : "Running (gdb-wui detached)";
+                },
+            },
+        });
+    })().catch(e =>
+    {
+        web_status.textContent = "Unavailable: " + e.message;
+    });
 }
 
 // The display, redrawn when it changes: lit pixels in an OLED's blue-white,

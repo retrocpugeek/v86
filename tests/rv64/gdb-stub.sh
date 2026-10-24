@@ -5,6 +5,10 @@
 # (tools/ch32v003-gameconsole), from their ELFs, checking what gdb says.
 #
 #   tests/rv64/gdb-stub.sh
+#   STUB=node tests/rv64/gdb-stub.sh
+#
+# STUB=node: the stub in the browser build instead, through the V86 API, as
+# the site's pages use it (tests/rv64/gdb-bridge.mjs; make build/v86-rv64.wasm).
 #
 # Needs gdb-multiarch, rv64run (cd src/rv64 && cargo build --release --bin
 # rv64run) and the firmware (tools/ch32v003/build.sh,
@@ -23,9 +27,15 @@ fail=0
 session() {
     name=$1 bin=$2 elf=$3
     shift 3
-    "$RUN" --ch32v003 "$bin" --gdb "127.0.0.1:$PORT" --gdb-wait >/dev/null 2>"$TMP/stub.err" &
-    echo $! > "$TMP/pid"
-    sleep 0.3
+    if [ "${STUB:-}" = node ]; then
+        node tests/rv64/gdb-bridge.mjs ch32v003 "$bin" "$PORT" >/dev/null 2>"$TMP/stub.err" &
+        echo $! > "$TMP/pid"
+        sleep 1.5
+    else
+        "$RUN" --ch32v003 "$bin" --gdb "127.0.0.1:$PORT" --gdb-wait >/dev/null 2>"$TMP/stub.err" &
+        echo $! > "$TMP/pid"
+        sleep 0.3
+    fi
     { printf 'set pagination off\nset confirm off\nfile %s\ntarget remote 127.0.0.1:%s\n' "$elf" "$PORT"; cat; echo detach; } > "$TMP/cmds"
     timeout 60 gdb-multiarch -nx -batch -x "$TMP/cmds" > "$TMP/out" 2>&1 || true
     kill "$(cat "$TMP/pid")" 2>/dev/null || true
@@ -48,7 +58,9 @@ session tetris build/ch32v003/tetris.bin build/ch32v003/tetris.elf \
     '^#1 .* in main \(\) at .*tetris\.c' \
     '^a5[[:space:]]' \
     '^\$1 = 4242$' \
-    '^\$2 = 0x904$' <<'EOF'
+    '^\$2 = 0x904$' \
+    'Reset, stopped at the reset vector' \
+    '^\$3 = .* 0x0 <_start>' <<'EOF'
 info registers pc
 show architecture
 break main
@@ -60,9 +72,15 @@ info registers
 set var score = 4242
 p score
 p/x $mtvec
+monitor reset halt
+maint flush register-cache
+p $pc
+continue
 EOF
 # RV32E: no a6
 if grep -qE '^a6[[:space:]]' "$TMP/out"; then echo "FAIL tetris: registers RV32E doesn't have"; fail=1; fi
+# After the reset, main again: its breakpoint is kept
+if [ "$(grep -c '^Breakpoint 1, main' "$TMP/out")" != 2 ]; then echo "FAIL tetris: main's breakpoint not hit after monitor reset"; fail=1; fi
 
 G=build/ch32v003-gameconsole/src/software/tiny_tris/bin/tiny_tris.elf
 session tiny_tris build/ch32v003-gameconsole/tiny_tris.bin "$G" \

@@ -2,7 +2,8 @@
 # gdb-wui for the emulator page (the "gdb-wui" panel of tools/a64-site and
 # tools/rv64-site; tools/gdb-wui-guest/overlay.sh installs it).
 #
-# Port 80: gdb-wui itself, with /root/demo as its project, the
+# Port 80: gdb-wui itself, with /root/demo as its project (or a
+# microcontroller's firmware: gdb_wui.mcu below), the
 # decompilations of its programs (if the image has them) and kuna. -listen-anywhere
 # only because the page connects over v86's virtual network, which nothing
 # but that page can reach.
@@ -21,13 +22,27 @@ export SIDECARS
 GATEWAY=$(ip route 2>/dev/null | awk '/^default/ { print $3; exit }')
 KUNA="-kuna tcp:${GATEWAY:-192.168.86.1}:5717"
 export KUNA
+# gdb_wui.mcu=NAME on the kernel command line: debug a microcontroller's
+# firmware instead, /root/mcu/NAME/NAME.elf with its sources, on the
+# microcontroller the page runs next to this machine. The page offers its
+# GDB stub on its port 3333 (tools/rv64-site/index.html, ?debug), as a
+# debug probe would.
+PROJECT=/root/demo
+TARGET=
+MCU=$(sed -n 's/.*gdb_wui\.mcu=\([A-Za-z0-9_.-]*\).*/\1/p' /proc/cmdline)
+if [ -n "$MCU" ] && [ -f "/root/mcu/$MCU/$MCU.elf" ]; then
+	PROJECT=/root/mcu/$MCU
+	TARGET="target remote ${GATEWAY:-192.168.86.1}:3333"
+fi
+export PROJECT MCU TARGET
 
 case "$1" in
 start)
 	printf "Starting gdb-wui: "
 	mkdir -p -m 0700 "$XDG_RUNTIME_DIR"
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui.pid -x /bin/sh -- -c \
-		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config -project /root/demo $SIDECARS $KUNA >/tmp/gdb-wui.log 2>&1'
+		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config -project "$PROJECT" $SIDECARS $KUNA \
+			${TARGET:+-exe "$MCU.elf" -gdb-command "$TARGET"} >/tmp/gdb-wui.log 2>&1'
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui-url.pid -x /usr/bin/socat -- \
 		TCP-LISTEN:81,reuseaddr,fork SYSTEM:"/usr/bin/gdb-wui -print-url 2>/dev/null"
 	echo "OK"
