@@ -83,6 +83,9 @@ pub enum RunExit {
     Idle,
     PowerOff,
     Reset,
+    /// A debugger's breakpoint was reached, or an ebreak executed while one
+    /// is attached (debug_ebreak): the hart is stopped at pc, before it.
+    Debug,
 }
 
 /// Host-time jumps larger than this (the host didn't run us) aren't passed on.
@@ -138,6 +141,17 @@ pub struct Cpu {
     /// RV32 (XLEN 32): registers hold sign-extended 32-bit values, pc and
     /// addresses are 32 bits, Sv32 paging (see exec32).
     pub xlen32: bool,
+    /// A debugger's breakpoints (gdb.rs): run stops before executing any of
+    /// these, through run_debug, which doesn't use the JIT.
+    pub breakpoints: Vec<u64>,
+    /// A debugger is attached: ebreak stops the hart (RunExit::Debug) instead
+    /// of trapping, as a debug module with dcsr.ebreakm set does.
+    pub debug_ebreak: bool,
+    /// Set when a breakpoint or an ebreak stopped the hart.
+    pub debug_stop: bool,
+    /// Resuming from a breakpoint at this pc: it isn't hit again before the
+    /// instruction there has run.
+    pub debug_resume: Option<u64>,
     /// CH32V (QingKe) hardware prologue/epilogue: per trap taken, the
     /// caller-saved registers HPE pushed (interrupts with INTSYSCR.HWSTKEN),
     /// which its mret restores.
@@ -200,6 +214,10 @@ impl Cpu {
             jit_hops: 0,
             block_start: true,
             xlen32: false,
+            breakpoints: Vec::new(),
+            debug_ebreak: false,
+            debug_stop: false,
+            debug_resume: None,
             hpe_stack: Vec::new(),
         }
     }
@@ -487,6 +505,12 @@ impl Cpu {
             self.block_start = r.is_err() || !compiled || self.pc != pc.wrapping_add(len as u64);
         }
         if let Err(e) = r {
+            if e.cause == cause::BREAKPOINT && self.debug_ebreak {
+                // Stopped before the ebreak, for the debugger
+                self.pc = pc;
+                self.debug_stop = true;
+                return;
+            }
             if e.cause == cause::ILLEGAL_INSN && self.log_illegal {
                 eprintln!("rv64: illegal insn {:08x} at {pc:#x} (prv {})", e.tval, self.prv);
             }
@@ -521,6 +545,9 @@ impl Cpu {
 
     /// Run up to `budget` steps (instructions or traps).
     pub fn run(&mut self, budget: u64) -> RunExit {
+        if self.debug_ebreak {
+            return self.run_debug(budget);
+        }
         let mut n = 0;
         while n < budget {
             if let Some(exit) = self.housekeeping() {
@@ -549,6 +576,40 @@ impl Cpu {
                 while n < end && !self.stop_batch && !self.waiting {
                     self.step_inner::<false>();
                     n += 1;
+                }
+            }
+        }
+        RunExit::Budget
+    }
+
+    /// run() with a debugger attached: one instruction at a time, without the
+    /// JIT, stopping before a breakpoint and at an ebreak.
+    fn run_debug(&mut self, budget: u64) -> RunExit {
+        let mut n = 0;
+        while n < budget {
+            if let Some(exit) = self.housekeeping() {
+                return exit;
+            }
+            let mut limit = budget - n;
+            if self.next_timer_ns != u64::MAX && self.ns_per_insn != 0 {
+                let left = self.next_timer_ns.saturating_sub(self.now_ns());
+                limit = limit.min(left.div_ceil(self.ns_per_insn).max(1));
+            }
+            let end = n + limit;
+            self.stop_batch = false;
+            while n < end && !self.stop_batch && !self.waiting {
+                if !self.breakpoints.is_empty()
+                    && self.breakpoints.contains(&self.pc)
+                    && self.debug_resume != Some(self.pc)
+                {
+                    self.debug_stop = true;
+                    return RunExit::Debug;
+                }
+                self.debug_resume = None;
+                self.step_inner::<false>();
+                n += 1;
+                if self.debug_stop {
+                    return RunExit::Debug;
                 }
             }
         }

@@ -4,6 +4,11 @@
 //!           [--mem 256] [--steps N] [--log-illegal] [--lockstep qemu-cpu.log] [--xlen 32]
 //!           [--disk-slot N]
 //!   rv64run (--ch32v003 | --ch32v307) firmware.bin [--steps N] [--script "..."]
+//!           [--gdb ADDR [--gdb-wait]]
+//!
+//! --gdb serves a GDB remote stub (gdb.rs) on ADDR (e.g. 127.0.0.1:3333), as a
+//! debug probe would: `target remote` stops the hart, and breakpoints work in
+//! flash. With --gdb-wait the hart doesn't start until gdb has connected.
 //!
 //! --ch32v003 and --ch32v307 run a WCH CH32V microcontroller (dev/ch32.rs)
 //! instead, in real time, with USART1 on stdin/stdout. With --script, it
@@ -55,6 +60,8 @@ struct Args {
     ch32: Option<(v86_rv64::dev::ch32::Chip, String)>,
     script: Option<String>,
     jitter: bool,
+    gdb: Option<String>,
+    gdb_wait: bool,
 }
 
 fn usage() -> ! {
@@ -77,6 +84,8 @@ fn parse_args() -> Args {
         ch32: None,
         script: None,
         jitter: false,
+        gdb: None,
+        gdb_wait: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -94,6 +103,8 @@ fn parse_args() -> Args {
             "--ch32v307" => a.ch32 = Some((v86_rv64::dev::ch32::Chip::V307, val())),
             "--script" => a.script = Some(val()),
             "--jitter" => a.jitter = true,
+            "--gdb" => a.gdb = Some(val()),
+            "--gdb-wait" => a.gdb_wait = true,
             "--disk-slot" => a.disk_slot = val().parse().ok().filter(|&n| n < 8).unwrap_or_else(|| usage()),
             "--xlen" => {
                 a.xlen32 = match val().as_str() {
@@ -146,6 +157,11 @@ fn main() {
         });
         if let Some(script) = &args.script {
             run_script(&mut cpu, script, args.jitter);
+            return;
+        }
+        if let Some(addr) = &args.gdb {
+            cpu.realtime = true;
+            gdb_server(&mut cpu, addr, *chip, args.gdb_wait);
             return;
         }
         cpu.realtime = true;
@@ -311,6 +327,7 @@ fn interactive(cpu: &mut Cpu, rx: Arc<Mutex<VecDeque<u8>>>, steps: u64) {
             }
             RunExit::PowerOff => break "power off",
             RunExit::Reset => break "reset",
+            RunExit::Debug => {}
         }
     };
     let _ = std::io::stdout().flush();
@@ -581,4 +598,88 @@ fn compare(cpu: &mut Cpu, rec: &Record, prev_text: &str, recent: &VecDeque<u64>,
     eprintln!("QEMU previous record:\n{prev_text}");
     eprintln!("QEMU record:\n{}", rec.text);
     exit(1);
+}
+
+/// --gdb: the machine in real time, with a GDB remote stub on a TCP port. One
+/// debugger at a time; the hart runs on its own between them.
+fn gdb_server(cpu: &mut Cpu, addr: &str, chip: v86_rv64::dev::ch32::Chip, wait: bool) {
+    use std::net::TcpListener;
+    use v86_rv64::gdb::{Gdb, Mode};
+    let listener = TcpListener::bind(addr).unwrap_or_else(|e| {
+        eprintln!("rv64run: --gdb {addr}: {e}");
+        exit(1)
+    });
+    listener.set_nonblocking(true).unwrap();
+    eprintln!("rv64run: gdb stub on {}", listener.local_addr().unwrap());
+    let (embedded, fpu) = match chip {
+        v86_rv64::dev::ch32::Chip::V003 => (true, false),
+        _ => (false, true),
+    };
+    let start = Instant::now();
+    let mut client: Option<(std::net::TcpStream, Gdb)> = None;
+    let mut buf = [0u8; 4096];
+    let mut waiting = wait;
+    loop {
+        if client.is_none() {
+            if let Ok((s, peer)) = listener.accept() {
+                s.set_nonblocking(true).unwrap();
+                let _ = s.set_nodelay(true);
+                eprintln!("rv64run: gdb connected from {peer}");
+                client = Some((s, Gdb::attach(cpu, embedded, fpu)));
+                waiting = false;
+            }
+        }
+        let mut gone = false;
+        if let Some((s, g)) = client.as_mut() {
+            match s.read(&mut buf) {
+                Ok(0) => gone = true,
+                Ok(n) => g.input(cpu, &buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => gone = true,
+            }
+            if !gone && !g.out.is_empty() {
+                s.set_nonblocking(false).unwrap();
+                gone = s.write_all(&g.out).is_err();
+                s.set_nonblocking(true).unwrap();
+                g.out.clear();
+            }
+        }
+        if gone {
+            eprintln!("rv64run: gdb disconnected");
+            if let Some((_, mut g)) = client.take() {
+                g.detach(cpu);
+            }
+        }
+        let halted = waiting || client.as_ref().is_some_and(|(_, g)| g.mode == Mode::Halted);
+        if halted {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        cpu.sync_host_ns(start.elapsed().as_nanos() as u64);
+        let r = match client.as_mut() {
+            Some((_, g)) => g.poll(cpu, 20_000).unwrap_or(RunExit::Budget),
+            None => cpu.run(20_000),
+        };
+        cpu.bus.now_ns = cpu.now_ns();
+        cpu.bus.poll_devices();
+        cpu.update_mip();
+        let _ = std::io::stdout().flush();
+        match r {
+            RunExit::Idle => {
+                let ns = cpu.ns_until_timer().unwrap_or(1_000_000).min(1_000_000);
+                std::thread::sleep(std::time::Duration::from_nanos(ns))
+            }
+            RunExit::PowerOff | RunExit::Reset => {
+                eprintln!("rv64run: the machine stopped ({})", if matches!(r, RunExit::Reset) { "reset" } else { "power off" });
+                return;
+            }
+            RunExit::Budget | RunExit::Debug => {
+                // Real time: don't get ahead of the host clock
+                let ahead = cpu.ns_ahead(start.elapsed().as_nanos() as u64);
+                if ahead > 2_000_000 {
+                    std::thread::sleep(std::time::Duration::from_nanos(ahead.min(5_000_000)));
+                }
+            }
+        }
+    }
 }

@@ -293,6 +293,7 @@ pub extern "C" fn rv64_run(budget: u32) -> u32 {
         RunExit::Idle => 1,
         RunExit::PowerOff => 2,
         RunExit::Reset => 3,
+        RunExit::Debug => 4,
     }
 }
 

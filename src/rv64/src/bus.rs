@@ -335,7 +335,7 @@ impl Bus {
         }
     }
 
-    fn rom_offset(&self, pa: u64) -> Option<usize> {
+    pub fn rom_offset(&self, pa: u64) -> Option<usize> {
         let len = self.rom.len() as u64;
         let off = pa.wrapping_sub(self.rom_base);
         if off < len {
