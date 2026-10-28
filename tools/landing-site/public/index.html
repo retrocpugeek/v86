@@ -111,12 +111,14 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
             <li><a href="#gdb-wui">gdb-wui</a>: debug programs in the guest from a web UI next to the console</li>
             <li>Stefan Wagner's CH32V003 Mini Game Console: its OLED display, buttons and buzzer, with six games (Tris, Invaders, Arkanoid, Pacman, Lander, Life)</li>
             <li>A WCH CH32V307 microcontroller (RV32IMAFC, 64 KB of RAM) running the RT-Thread shell, with snake, an analog clock, CoreMark and Lua</li>
+            <li><a href="#mcu-debug">Debug the CH32V003's firmware</a> with gdb-wui, through a GDB stub in the emulated core</li>
           </ul>
           <a class="go" href="https://v86-riscv.turret13.workers.dev/">Boot RISC-V Linux</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris">Play Tetris on an emulated CH32V003</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=gameconsole-tris">Play the CH32V003 game console</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v307-rtthread">Try the RT-Thread shell on an emulated CH32V307</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=gdb-wui">Debug with gdb-wui on RISC-V</a>
+          <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&amp;debug">Debug Tetris on the CH32V003 with gdb-wui</a>
         </article>
 
         <article class="card x86">
@@ -155,9 +157,19 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
         Rust, which the page runs as WebAssembly beside the emulator and gdb-wui asks over the virtual
         network &mdash; for any program in the guest. gdb-wui is made for a desktop browser.
       </p>
+      <p id="mcu-debug">
+        It debugs the microcontrollers' firmware too. Add <code>&amp;debug</code> to a CH32V003 page
+        (Tetris or a game console game): the microcontroller is held at reset, and the page boots the
+        riscv64 gdb-wui image beside it with the firmware's ELF and sources. The emulated core has a GDB
+        stub, which the page offers on the guest's network as a debug probe would, so gdb in the guest
+        connects with <code>target remote</code>: breakpoints in flash, stepping through the C source,
+        registers, memory and <code>monitor reset halt</code>, while the display keeps drawing.
+      </p>
       <ul class="links">
         <li><a href="https://v86-arm.turret13.workers.dev/?build=gdb-wui">gdb-wui on ARM64</a><span>Buildroot, aarch64</span></li>
         <li><a href="https://v86-riscv.turret13.workers.dev/?build=gdb-wui">gdb-wui on RISC-V</a><span>Buildroot, riscv64</span></li>
+        <li><a href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&amp;debug">Debug Tetris on the CH32V003</a><span>Bare-metal firmware, through the core's GDB stub</span></li>
+        <li><a href="https://v86-riscv.turret13.workers.dev/?build=gameconsole-tris&amp;debug">Debug Tiny Tris on the game console</a><span>CH32V003 firmware, in gdb-wui</span></li>
         <li><a href="https://retrocpugeek.github.io/gdb-wui/">gdb-wui documentation</a><span>With screenshots and a guided first session</span></li>
       </ul>
     </div>
