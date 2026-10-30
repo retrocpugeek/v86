@@ -26,7 +26,12 @@ boards PebbleOS's own emulator provides:
 [the Pebble 2 Duo](https://v86-arm.turret13.workers.dev/?build=pebble-flint),
 with its display and four buttons, and
 [the round Pebble Round 2](https://v86-arm.turret13.workers.dev/?build=pebble-round2),
-with its colour display, buttons and touch screen.
+with its colour display, buttons and touch screen. The same core runs
+[the card10 badge](https://v86-arm.turret13.workers.dev/?build=card10)
+from the Chaos Communication Camp 2019: its MAX32666's two Cortex-M4F
+cores, Epicardium (FreeRTOS) on one and Pycardium (MicroPython) on the
+other, calling each other through shared memory and the chip's hardware
+semaphores, with its display, buttons and MicroPython's REPL.
 
 **RISC-V (RV64GC and RV32GC)**: a hart with machine, supervisor and user
 modes, Sv39 and Sv32 paging, CLINT, PLIC, a 16550 UART and virtio devices,
@@ -57,7 +62,7 @@ stepping through the C source, registers and `monitor reset halt`.
 | [`src/a64`](src/a64), [`src/a64_cpu.js`](src/a64_cpu.js) | The AArch64 core (Rust, built to `build/v86-a64.wasm`) and its glue |
 | [`src/rv64`](src/rv64), [`src/rv64_cpu.js`](src/rv64_cpu.js) | The RISC-V core and the CH32V microcontrollers (`build/v86-rv64.wasm`) |
 | [`tools/a64-site`](tools/a64-site), [`tools/rv64-site`](tools/rv64-site), [`tools/landing-site`](tools/landing-site) | The three websites (Cloudflare Workers) and the scripts that build their images |
-| [`src/cm`](src/cm), [`src/cm_cpu.js`](src/cm_cpu.js) | The Cortex-M core (`build/v86-cm.wasm`), for the Pebble watch |
+| [`src/cm`](src/cm), [`src/cm_cpu.js`](src/cm_cpu.js) | The Cortex-M core (`build/v86-cm.wasm`), for the Pebble watches and the card10 badge |
 | [`tools/gdb-wui-guest`](tools/gdb-wui-guest), [`tools/kuna-web`](tools/kuna-web) | gdb-wui in the guest, and kuna for the page |
 | [`tests/a64`](tests/a64), [`tests/rv64`](tests/rv64), [`tests/guest-web`](tests/guest-web) | Boot, microcontroller and page tests |
 
