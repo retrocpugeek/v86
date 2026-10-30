@@ -26,8 +26,8 @@ by `src/cm_cpu.js` as `arch: "pebble-flint"`, `"pebble-emery"` or
 
 ## Running
 
-PebbleOS is built for `qemu_flint` with its own tooling (see the Pebble
-emulation notes; it runs in a container). Then:
+PebbleOS is built for `qemu_flint` with its own tooling, in a container
+(`tools/a64-site/pebble/build.sh` says what it needs). Then:
 
 ```sh
 cargo build --release
@@ -43,7 +43,8 @@ In node and the browser: `tests/cm/pebble.mjs` (the V86 API) and
 
 ## Checking against QEMU
 
-`tools/cm-ref/lockstep.sh` runs Pebble's QEMU with a fixed 16 ns per
+`tools/cm-ref/lockstep.sh` runs Pebble's QEMU (from the PebbleOS SDK, in
+the same container) with a fixed 16 ns per
 instruction and its register dumps, runs `cmrun` the same way, and prints
 the first instruction where the registers differ. Values from the host's
 clock differ by nature (the RTC, and QEMU's virtual clock runs slightly
