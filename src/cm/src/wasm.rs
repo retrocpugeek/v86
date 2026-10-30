@@ -5,7 +5,7 @@
 use std::ptr::addr_of_mut;
 
 use crate::cpu::{Cpu, Stop};
-use crate::dev::pebble::{self, Board, Gpio, Uart, GPIO_BASE, UART_BASE};
+use crate::dev::pebble::{self, Board, Gpio, Touch, Uart, GPIO_BASE, TOUCH_BASE, UART_BASE};
 
 static mut CPU: Option<Box<Cpu>> = None;
 static mut PIXELS: Vec<u8> = Vec::new();
@@ -116,6 +116,23 @@ pub extern "C" fn cm_set_buttons(state: u32) {
     c.bus.scs.dirty = true;
     c.wake_check();
 }
+
+/// The finger on the touch screen (boards with one): down or up, at (x, y)
+/// in display pixels.
+#[no_mangle]
+pub extern "C" fn cm_touch(down: u32, x: u32, y: u32) {
+    let c = cpu();
+    if let Some(t) = c.bus.device::<Touch>(TOUCH_BASE) {
+        t.input(down != 0, x, y);
+    }
+    c.bus.sync_all_irqs();
+    c.bus.scs.dirty = true;
+    c.wake_check();
+}
+
+/// Does the board have a touch screen?
+#[no_mangle]
+pub extern "C" fn cm_has_touch() -> u32 { cpu().bus.device::<Touch>(TOUCH_BASE).is_some() as u32 }
 
 /// Take what UART `n` sent since the last call: returns its length; the
 /// bytes are at cm_out_ptr().

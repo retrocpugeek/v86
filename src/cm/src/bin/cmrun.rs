@@ -3,13 +3,14 @@
 //!
 //!   cmrun --board flint --elf pebbleos.elf --spi qemu_spi_flash.bin \
 //!         [--seconds 20] [--screenshot out.ppm] [--keys 'select@8,back@12'] [--trace N]
+//!         [--touch 'X,Y@S;...']  (a tap at display pixel X,Y at S seconds; X,Y-X2,Y2@S swipes)
 //!
 //! --trace N prints the first N instructions' PC and registers (for
 //! lockstep comparison with QEMU's -d exec,cpu log).
 
 use std::io::Write;
 
-use v86_cm::dev::pebble::{self, Board, Gpio, Uart, GPIO_BASE, UART_BASE};
+use v86_cm::dev::pebble::{self, Board, Gpio, Touch, Uart, GPIO_BASE, TOUCH_BASE, UART_BASE};
 
 fn usage() -> ! {
     eprintln!("usage: cmrun --board flint|emery|gabbro --elf FILE [--spi FILE] [--seconds S] [--screenshot FILE.ppm] [--keys back|up|select|down@S,...] [--trace N]");
@@ -20,6 +21,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let (mut board, mut elf, mut spi, mut seconds, mut shot, mut keys, mut trace) =
         (Board::Flint, None, None, 10.0f64, None, Vec::new(), 0u64);
+    // Touches: when (s), and the finger's path (a tap: one point)
+    let mut touches: Vec<(f64, Vec<(u32, u32)>)> = Vec::new();
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_else(|| usage());
         match a.as_str() {
@@ -49,6 +52,19 @@ fn main() {
                 }
             }
             "--trace" => trace = val().parse().unwrap_or_else(|_| usage()),
+            "--touch" => {
+                for t in val().split(';') {
+                    let (path, at) = t.split_once('@').unwrap_or_else(|| usage());
+                    let pts = path
+                        .split('-')
+                        .map(|p| {
+                            let (x, y) = p.split_once(',').unwrap_or_else(|| usage());
+                            (x.parse().unwrap_or_else(|_| usage()), y.parse().unwrap_or_else(|_| usage()))
+                        })
+                        .collect();
+                    touches.push((at.parse().unwrap_or_else(|_| usage()), pts));
+                }
+            }
             _ => usage(),
         }
     }
@@ -119,6 +135,25 @@ fn main() {
             cpu.bus.sync_all_irqs();
         }
         let sample_from: f64 = std::env::var("CM_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::MAX);
+        while let Some((at, _)) = touches.first() {
+            if *at > now_s {
+                break;
+            }
+            let (_, path) = touches.remove(0);
+            // Down at the first point, through the others (20 ms apart), up
+            let (x0, y0) = path[0];
+            let (x1, y1) = *path.last().unwrap();
+            let steps = if path.len() > 1 { 8 } else { 1 };
+            for k in 0..steps {
+                let x = x0 as i64 + (x1 as i64 - x0 as i64) * k / steps.max(1);
+                let y = y0 as i64 + (y1 as i64 - y0 as i64) * k / steps.max(1);
+                cpu.bus.device::<Touch>(TOUCH_BASE).unwrap().input(true, x as u32, y as u32);
+                cpu.bus.sync_all_irqs();
+                cpu.run(1_280_000);
+            }
+            cpu.bus.device::<Touch>(TOUCH_BASE).unwrap().input(false, x1, y1);
+            cpu.bus.sync_all_irqs();
+        }
         let stop = if cpu.now_ns() as f64 / 1e9 >= sample_from {
             let mut s = v86_cm::cpu::Stop::Budget;
             for _ in 0..100 {

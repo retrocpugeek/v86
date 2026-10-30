@@ -54,8 +54,12 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
     background: linear-gradient(145deg, #2a2d33, #16181c); border: 1px solid #3a3e46; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; }
 .pebble .face { padding: 14px; border-radius: 12px; background: #050607; border: 1px solid #000; }
-#watch-screen { display: block; width: 288px; height: 336px; max-width: calc(100vw - 150px); height: auto; aspect-ratio: 144 / 168;
-    image-rendering: pixelated; background: #000; }
+#watch-screen { display: block; width: 288px; max-width: calc(100vw - 150px); height: auto; aspect-ratio: 144 / 168;
+    image-rendering: pixelated; background: #000; touch-action: none; }
+/* Round watches (the Pebble Round 2): a round face, the screen a circle */
+.pebble.round { border-radius: 50%; padding: 44px 30px; }
+.pebble.round .face { border-radius: 50%; padding: 10px; }
+.pebble.round #watch-screen { border-radius: 50%; image-rendering: auto; }
 .pebble .side { display: flex; flex-direction: column; gap: 26px; }
 .pebble button { width: 26px; height: 56px; border-radius: 8px; background: #4a4f58; border: 1px solid #626874; color: #cfd3da;
     font-size: 11px; padding: 0; touch-action: none; }
@@ -64,6 +68,7 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 /* Phones: a slimmer body, the screen as wide as what's left */
 @media (max-width: 480px) {
     .pebble { padding: 22px 10px; gap: 8px; border-radius: 26px; }
+    .pebble.round { padding: 30px 8px; }
     .pebble .face { padding: 8px; }
     .pebble button { width: 22px; font-size: 9px; }
     #watch-screen { max-width: calc(100vw - 32px - 112px); }
@@ -120,7 +125,8 @@ code { color: var(--fg); }
         <button type="button" data-button="8" aria-label="Down">DOWN</button>
       </div>
     </div>
-    <span id="watch-keys">Keyboard: arrows (left is Back, right is Select), or Esc, Backspace and Enter.</span>
+    <span id="watch-keys">Keyboard: arrows (left is Back, right is Select), or Esc, Backspace and Enter.<span id="watch-touch" hidden>
+      Tap and swipe the screen.</span></span>
     <p id="watch-about"></p>
     <pre id="watch-log" aria-label="The watch's log"></pre>
   </section>
@@ -286,9 +292,57 @@ async function start_watch(build, base, status)
     });
     setup_console_log(emulator, build);
     emulator.add_listener("emulator-ready", () => { status.textContent = "Starting"; });
+    // The screen's size on the page: Flint's 144 x 168 at twice its size,
+    // the bigger ones at 1.2 times (for small screens, CSS limits it)
+    const screen = document.getElementById("watch-screen");
+    const size = { flint: [144, 168, 2], emery: [200, 228, 1.2], gabbro: [260, 260, 1.2] }[build.watch] || [144, 168, 2];
+    screen.width = size[0];
+    screen.height = size[1];
+    screen.style.width = size[0] * size[2] + "px";
+    screen.style.aspectRatio = size[0] + " / " + size[1];
+    document.querySelector(".pebble").classList.toggle("round", build.watch === "gabbro");
     watch_log(emulator, status);
     draw_watch(emulator);
     watch_buttons(emulator);
+    if(build.watch !== "flint")
+    {
+        watch_touch(emulator, screen);
+    }
+}
+
+// The touch screen (Emery, Gabbro): a pointer on the screen is the finger,
+// in display pixels
+function watch_touch(emulator, screen)
+{
+    document.getElementById("watch-touch").hidden = false;
+    let down = false;
+    const at = e =>
+    {
+        const r = screen.getBoundingClientRect();
+        const x = Math.round((e.clientX - r.left) / r.width * screen.width);
+        const y = Math.round((e.clientY - r.top) / r.height * screen.height);
+        return [Math.max(0, Math.min(screen.width - 1, x)), Math.max(0, Math.min(screen.height - 1, y))];
+    };
+    screen.addEventListener("pointerdown", e =>
+    {
+        e.preventDefault();
+        screen.setPointerCapture(e.pointerId);
+        down = true;
+        emulator.touch_screen(true, ...at(e));
+    });
+    screen.addEventListener("pointermove", e =>
+    {
+        if(down) emulator.touch_screen(true, ...at(e));
+    });
+    const up = e =>
+    {
+        if(!down) return;
+        down = false;
+        emulator.touch_screen(false, ...at(e));
+    };
+    screen.addEventListener("pointerup", up);
+    screen.addEventListener("pointercancel", up);
+    screen.addEventListener("contextmenu", e => e.preventDefault());
 }
 
 // The firmware's log: PULSE frames (0x55-delimited, COBS with 0x55 as 0, a
@@ -359,7 +413,7 @@ function draw_watch(emulator)
         if(d && d.pixels)
         {
             frame = d.frame;
-            if(!ctx || canvas.width !== d.width || canvas.height !== d.height)
+            if(!ctx || image.width !== d.width || image.height !== d.height)
             {
                 canvas.width = d.width;
                 canvas.height = d.height;

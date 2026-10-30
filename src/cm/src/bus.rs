@@ -58,13 +58,13 @@ pub struct Bus {
 }
 
 impl Bus {
-    pub fn new(flash_size: usize, sram_size: usize, cpu_hz: u64, ref_hz: u64) -> Bus {
+    pub fn new(flash_size: usize, sram_size: usize, cpu_hz: u64, ref_hz: u64, v8m: bool) -> Bus {
         Bus {
             flash: vec![0xff; flash_size],
             sram: vec![0; sram_size],
             xip: Vec::new(),
             xip_base: 0,
-            scs: Scs::new(cpu_hz, ref_hz),
+            scs: Scs::new(cpu_hz, ref_hz, v8m),
             maps: Vec::new(),
             now_ns: 0,
             cycles: 0,

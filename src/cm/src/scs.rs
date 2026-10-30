@@ -44,6 +44,9 @@ pub const UFSR_DIVBYZERO: u32 = 1 << 25;
 pub const HFSR_FORCED: u32 = 1 << 30;
 
 pub struct Scs {
+    /// ARMv8-M (the Cortex-M33) rather than ARMv7-M (the Cortex-M4): its
+    /// CPUID, CCR and MPU register layout (RBAR/RLAR, MAIR)
+    pub v8m: bool,
     pub pending: [bool; NUM_EXC],
     pub active: [bool; NUM_EXC],
     /// External interrupts' enables (NVIC ISER)
@@ -81,7 +84,9 @@ pub struct Scs {
     pub mpu_ctrl: u32,
     pub mpu_rnr: u32,
     pub mpu_rbar: [u32; 8],
+    /// RASR (ARMv7-M) or RLAR (ARMv8-M)
     pub mpu_rasr: [u32; 8],
+    pub mpu_mair: [u32; 2],
     // DWT and debug
     pub demcr: u32,
     pub dwt_ctrl: u32,
@@ -96,8 +101,9 @@ pub struct Scs {
 }
 
 impl Scs {
-    pub fn new(cpu_hz: u64, ref_hz: u64) -> Scs {
+    pub fn new(cpu_hz: u64, ref_hz: u64, v8m: bool) -> Scs {
         Scs {
+            v8m,
             pending: [false; NUM_EXC],
             active: [false; NUM_EXC],
             enabled: [false; NUM_IRQS],
@@ -106,8 +112,9 @@ impl Scs {
             vtor: 0,
             aircr_prigroup: 0,
             scr: 0,
-            // STKALIGN set (the Cortex-M4's reset value)
-            ccr: 1 << 9,
+            // STKALIGN set (the Cortex-M4's reset value; RES1 on ARMv8-M, as
+            // is bit 0)
+            ccr: if v8m { 1 << 9 | 1 } else { 1 << 9 },
             shcsr: 0,
             cfsr: 0,
             hfsr: 0,
@@ -127,6 +134,7 @@ impl Scs {
             mpu_rnr: 0,
             mpu_rbar: [0; 8],
             mpu_rasr: [0; 8],
+            mpu_mair: [0; 2],
             demcr: 0,
             dwt_ctrl: 0x4000_0000,
             dwt_cyc0: 0,
@@ -304,8 +312,8 @@ impl Scs {
                 let i = (off - 0x400) as usize;
                 (0..4).map(|k| self.prio.get(16 + i + k).copied().unwrap_or(0) as u32).rev().fold(0, |v, p| v << 8 | p)
             }
-            // CPUID: Cortex-M4 r0p1
-            0xd00 => 0x410f_c241,
+            // CPUID: Cortex-M4 r0p1, or Cortex-M33 r0p3
+            0xd00 => if self.v8m { 0x410f_d213 } else { 0x410f_c241 },
             0xd04 => self.icsr(),
             0xd08 => self.vtor,
             0xd0c => 0xfa05_0000 | self.aircr_prigroup << 8,
@@ -340,6 +348,10 @@ impl Scs {
             0xd90 => 8 << 8,
             0xd94 => self.mpu_ctrl,
             0xd98 => self.mpu_rnr,
+            // (the aliases are regions RNR + 1..3 on ARMv8-M)
+            0xd9c | 0xda4 | 0xdac | 0xdb4 if self.v8m => self.mpu_rbar[self.mpu_alias(off)],
+            0xda0 | 0xda8 | 0xdb0 | 0xdb8 if self.v8m => self.mpu_rasr[self.mpu_alias(off)],
+            0xdc0 | 0xdc4 if self.v8m => self.mpu_mair[((off - 0xdc0) / 4) as usize],
             0xd9c | 0xda4 | 0xdac | 0xdb4 => self.mpu_rbar[(self.mpu_rnr & 7) as usize] | (self.mpu_rnr & 7),
             0xda0 | 0xda8 | 0xdb0 | 0xdb8 => self.mpu_rasr[(self.mpu_rnr & 7) as usize],
             0xdfc => self.demcr,
@@ -464,7 +476,7 @@ impl Scs {
                 }
             }
             0xd10 => self.scr = v & 0x16,
-            0xd14 => self.ccr = v & 0x31b,
+            0xd14 => self.ccr = (v & 0x31b) | if self.v8m { 1 << 9 | 1 } else { 0 },
             0xd18..=0xd20 => {
                 for k in 0..4 {
                     self.write_byte(a + k, (v >> (8 * k)) as u8);
@@ -492,6 +504,15 @@ impl Scs {
             0xd88 => self.cpacr = v & 0x00f0_0000,
             0xd94 => self.mpu_ctrl = v & 7,
             0xd98 => self.mpu_rnr = v & 0xff,
+            0xd9c | 0xda4 | 0xdac | 0xdb4 if self.v8m => {
+                let r = self.mpu_alias(off);
+                self.mpu_rbar[r] = v;
+            }
+            0xda0 | 0xda8 | 0xdb0 | 0xdb8 if self.v8m => {
+                let r = self.mpu_alias(off);
+                self.mpu_rasr[r] = v;
+            }
+            0xdc0 | 0xdc4 if self.v8m => self.mpu_mair[((off - 0xdc0) / 4) as usize] = v,
             0xd9c | 0xda4 | 0xdac | 0xdb4 => {
                 if v & 0x10 != 0 {
                     self.mpu_rnr = v & 7;
@@ -513,6 +534,9 @@ impl Scs {
             _ => {}
         }
     }
+
+    /// The MPU region an ARMv8-M RBAR/RLAR (or alias) register addresses.
+    fn mpu_alias(&self, off: u32) -> usize { ((self.mpu_rnr + (off - 0xd9c) / 8) & 7) as usize }
 
     /// A byte write: the priority registers are byte-accessible.
     pub fn write_byte(&mut self, a: u32, b: u8) {

@@ -1634,6 +1634,19 @@ V86.prototype.set_buttons = function(state)
 };
 
 /**
+ * Cortex-M machines with a touch screen: the finger, down or up at (x, y) in
+ * display pixels.
+ * @param {boolean} down
+ * @param {number} x
+ * @param {number} y
+ */
+V86.prototype.touch_screen = function(down, x, y)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.touch) cpu.touch(down, x, y);
+};
+
+/**
  * Cortex-M machines: the display's state; see CmCPU.display.
  * @param {number} last_frame
  */

@@ -24,7 +24,8 @@ const entry = {
         (version ? ` ${version.replace(/[<&]/g, "")}` : "") + `, built for its <code>qemu_${watch}</code> emulator board ` +
         `(<a href="https://github.com/retrocpugeek/v86/tree/ports/tools/a64-site/pebble">build script</a>), running on v86's ` +
         `Cortex-M core in your browser. Its machine is the one PebbleOS's own emulator provides: a framebuffer display, ` +
-        `four buttons, simple UARTs, timers, an RTC and external flash. The clock shows UTC; there's no phone to connect yet.`,
+        `four buttons` + (watch === "flint" ? "" : `, a touch screen`) + `, simple UARTs, timers, an RTC and external flash. ` +
+        `The clock shows UTC; there's no phone to connect yet.`,
 };
 const i = m.builds.findIndex(b => b.id === id);
 if(i >= 0) m.builds[i] = entry; else m.builds.push(entry);

@@ -706,24 +706,51 @@ impl Device for Audio {
 
 // ---------------------------------------------------------------- touch
 
-/// pebble-touch: one finger's position and whether it's down, with an
-/// interrupt on changes. (Its registers follow hw/misc/pebble_touch.c.)
+/// pebble-touch: one finger: down or not (STATE), its position (X, Y), and
+/// an interrupt for each change (a press or release, or a move while down).
 #[derive(Default)]
 pub struct Touch {
+    pub down: bool,
     pub x: u32,
     pub y: u32,
-    pub down: bool,
-    regs: [u32; 16],
+    intctrl: u32,
+    intstat: u32,
+}
+
+impl Touch {
+    /// The host's finger: down at (x, y) in display pixels, moved, or up.
+    pub fn input(&mut self, down: bool, x: u32, y: u32) {
+        let moved = x != self.x || y != self.y;
+        self.x = x;
+        self.y = y;
+        if down != self.down || (down && moved) {
+            self.intstat |= 1;
+        }
+        self.down = down;
+    }
 }
 
 impl Device for Touch {
-    fn read(&mut self, off: u32, _size: u32, _now: u64) -> u32 { self.regs.get((off / 4) as usize).copied().unwrap_or(0) }
-
-    fn write(&mut self, off: u32, _size: u32, v: u32, _now: u64) {
-        if let Some(r) = self.regs.get_mut((off / 4) as usize) {
-            *r = v;
+    fn read(&mut self, off: u32, _size: u32, _now: u64) -> u32 {
+        match off {
+            0x00 => self.down as u32,
+            0x04 => self.x,
+            0x08 => self.y,
+            0x0c => self.intctrl,
+            0x10 => self.intstat,
+            _ => 0,
         }
     }
+
+    fn write(&mut self, off: u32, _size: u32, v: u32, _now: u64) {
+        match off {
+            0x0c => self.intctrl = v & 1,
+            0x10 => self.intstat &= !v,
+            _ => {}
+        }
+    }
+
+    fn irq(&self) -> bool { self.intctrl & 1 != 0 && self.intstat & 1 != 0 }
 
     fn as_any(&mut self) -> &mut dyn std::any::Any { self }
 }
@@ -841,7 +868,8 @@ impl Device for Watchdog {
 /// at `epoch` (UTC seconds).
 pub fn machine(board: Board, firmware: &[u8], spi_image: &[u8], epoch: i64) -> Result<Cpu, String> {
     let cfg = board.config();
-    let mut bus = Bus::new(cfg.flash_size, cfg.ram_size, SYSCLK_HZ, REFCLK_HZ);
+    // Flint's Cortex-M4; Emery's and Gabbro's Cortex-M33 (ARMv8-M)
+    let mut bus = Bus::new(cfg.flash_size, cfg.ram_size, SYSCLK_HZ, REFCLK_HZ, board != Board::Flint);
     bus.xip = vec![0xff; EXTFLASH_SIZE];
     bus.xip_base = EXTFLASH_BASE;
     let n = spi_image.len().min(EXTFLASH_SIZE);

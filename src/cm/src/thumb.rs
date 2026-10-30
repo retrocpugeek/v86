@@ -793,6 +793,37 @@ impl Cpu {
             if w {
                 self.set_reg(rn, off);
             }
+        } else if op1 == 1 && op3 >= 8 {
+            // ARMv8-M load-acquire / store-release: LDA(B/H), STL(B/H), and
+            // their exclusive forms LDAEX(B/H), STLEX(B/H) (op3 1x00 byte,
+            // 1x01 halfword, 1x10 word; bit 2 exclusive)
+            let size = match op3 & 3 {
+                0 => 1,
+                1 => 2,
+                2 => 4,
+                _ => return self.undefined(i),
+            };
+            let exclusive = op3 & 4 != 0;
+            let a = self.reg(rn);
+            if op2 & 1 != 0 {
+                if exclusive {
+                    self.excl = Some(a);
+                }
+                let v = self.read(a, size);
+                self.set_reg(rt, v);
+            } else if exclusive {
+                let rd = bits(i, 3, 0);
+                let ok = self.excl == Some(a);
+                if ok {
+                    let v = self.reg(rt);
+                    self.write(a, size, v);
+                }
+                self.excl = None;
+                self.set_reg(rd, !ok as u32);
+            } else {
+                let v = self.reg(rt);
+                self.write(a, size, v);
+            }
         } else if op1 == 1 && op2 == 0 {
             // STREXB / STREXH
             let a = self.reg(rn);
@@ -1083,6 +1114,8 @@ impl Cpu {
                     0
                 }
             }
+            10 if self.bus.scs.v8m && self.privileged() => self.msplim,
+            11 if self.bus.scs.v8m && self.privileged() => self.psplim,
             16 => self.primask as u32,
             17 | 18 => self.basepri as u32,
             19 => self.faultmask as u32,
@@ -1109,6 +1142,8 @@ impl Cpu {
             _ if !self.privileged() => {}
             8 => self.msp = v & !3,
             9 => self.psp = v & !3,
+            10 if self.bus.scs.v8m => self.msplim = v & !7,
+            11 if self.bus.scs.v8m => self.psplim = v & !7,
             16 => self.primask = v & 1 != 0,
             17 => self.basepri = v as u8 & 0xe0,
             18 => {

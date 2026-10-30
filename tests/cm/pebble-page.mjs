@@ -2,7 +2,8 @@
 // PebbleOS must start (the page's status says Running once its log says
 // it's ready), the screen must show the launcher, the keyboard's Left arrow
 // (Back) the watchface and the on-screen Select button the launcher again;
-// the log view must show decoded lines; no page exceptions.
+// on a touch screen (BUILD=pebble-round2), a swipe up must scroll it; the
+// log view must show decoded lines; no page exceptions.
 //
 //   SITE=http://localhost:8788 node tests/cm/pebble-page.mjs [screenshot-prefix]
 //
@@ -107,6 +108,24 @@ async function main()
     await sleep(2500);
     const again = await screen();
     if(again.hash === face.hash) throw new Error("the Select button didn't open the launcher");
+    if(await ev("!document.getElementById('watch-touch').hidden"))
+    {
+        // A touch screen: a swipe up on it scrolls the launcher
+        const c = await ev(`(() => { const b = document.getElementById("watch-screen").getBoundingClientRect(); return [b.x, b.y, b.width, b.height]; })()`);
+        const x = c[0] + c[2] / 2;
+        await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: c[1] + c[3] * 0.8 }] });
+        for(let k = 1; k <= 8; k++)
+        {
+            await sleep(25);
+            await send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: c[1] + c[3] * (0.8 - 0.07 * k) }] });
+        }
+        await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await sleep(2000);
+        const swiped = await screen();
+        await shot("swiped");
+        if(swiped.hash === again.hash) throw new Error("a swipe on the touch screen didn't scroll");
+        console.log("touch: the swipe scrolled the launcher");
+    }
     const lines = await ev("document.getElementById('watch-log').textContent.split('\\n').length");
     const sample = await ev("document.getElementById('watch-log').textContent.split('\\n').find(l => l.includes('PebbleOS')) || ''");
     console.log(`log: ${lines} lines, e.g. "${sample}"`);

@@ -46,6 +46,9 @@ pub struct Cpu {
     pub basepri: u8,
     /// CONTROL: nPRIV (bit 0), SPSEL (bit 1), FPCA (bit 2)
     pub control: u32,
+    /// ARMv8-M's stack limits (not enforced)
+    pub msplim: u32,
+    pub psplim: u32,
     /// LDREX/STREX's exclusive monitor
     pub excl: Option<u32>,
     pub bus: Bus,
@@ -94,6 +97,8 @@ impl Cpu {
             faultmask: false,
             basepri: 0,
             control: 0,
+            msplim: 0,
+            psplim: 0,
             excl: None,
             bus,
             icount: 0,

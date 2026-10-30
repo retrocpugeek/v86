@@ -1,15 +1,19 @@
 # v86-cm: Cortex-M core (work in progress)
 
-An ARMv7-M / ARMv7E-M (Cortex-M4, Thumb-2 with the DSP instructions, no
-FPU yet) system emulator core for microcontroller firmware. The first
-target is PebbleOS's emulator boards: the "pebble-generic" machine of
-Pebble's QEMU fork (`dev/pebble.rs`), on which PebbleOS for `qemu_flint`
-(the Pebble 2 Duo's platform) boots to its menu, watchface and apps, with
-its buttons. Like `src/a64` and `src/rv64`, it's a standalone crate: a
+An ARMv7-M / ARMv7E-M and ARMv8-M Mainline (Cortex-M4 and Cortex-M33:
+Thumb-2 with the DSP instructions, load-acquire/store-release, the stack
+limit registers; no FPU or Security Extension yet) system emulator core
+for microcontroller firmware. The first target is PebbleOS's emulator
+boards: the "pebble-generic" machine of Pebble's QEMU fork
+(`dev/pebble.rs`), on which PebbleOS for `qemu_flint` (the Pebble 2 Duo's
+platform, a Cortex-M4) and `qemu_gabbro` (the Pebble Round 2's, a
+Cortex-M33 with a round touch screen) boots to its menu, watchfaces and
+apps, with its buttons and touch screen. Like `src/a64` and `src/rv64`, it's a standalone crate: a
 native runner (`cmrun`), and the browser build (`build/v86-cm.wasm`, run
 by `src/cm_cpu.js` as `arch: "pebble-flint"`, `"pebble-emery"` or
 `"pebble-gabbro"`), which the v86-arm site shows as a watch
-(`?build=pebble-flint`; `tools/a64-site/pebble/build.sh`, `add-watch.sh`).
+(`?build=pebble-flint`, `?build=pebble-round2`; `tools/a64-site/pebble/build.sh`,
+`add-watch.sh`).
 
 ## Layout
 
@@ -17,10 +21,10 @@ by `src/cm_cpu.js` as `arch: "pebble-flint"`, `"pebble-emery"` or
 |---|---|
 | `cpu.rs` | Registers, the banked stack pointers (MSP/PSP), special registers, IT state, the run loop, exception entry and return, faults, SVC, WFI |
 | `thumb.rs` | The 16- and 32-bit Thumb-2 instructions (ARMv7-M ARM chapter A5) |
-| `scs.rs` | The System Control Space: NVIC, SCB, SysTick, the MPU's registers (not enforced), DWT's cycle counter |
+| `scs.rs` | The System Control Space: NVIC, SCB, SysTick, the MPU's registers (ARMv7-M's or ARMv8-M's layout; not enforced), DWT's cycle counter |
 | `bus.rs` | The memory map: flash, SRAM, bit-band aliases, external flash (XIP), devices with interrupt lines |
 | `elf.rs` | Loading firmware from an ELF file (its segments at their load addresses) |
-| `dev/pebble.rs` | Pebble's emulator devices: UARTs, timers, RTC, buttons, system control, display (1-bit and 8-bit, round), external flash, audio, touch (registers only), the CMSDK watchdog |
+| `dev/pebble.rs` | Pebble's emulator devices: UARTs, timers, RTC, buttons, system control, display (1-bit and 8-bit, round), external flash, audio, touch, the CMSDK watchdog |
 | `wasm.rs` | The browser build's interface (`src/cm_cpu.js` drives it in real time) |
 | `bin/cmrun.rs` | Native runner |
 
@@ -33,6 +37,7 @@ PebbleOS is built for `qemu_flint` with its own tooling, in a container
 cargo build --release
 target/release/cmrun --board flint --elf pebbleos.elf --spi qemu_spi_flash.bin \
     --seconds 26 --keys back@20 --screenshot watchface.ppm
+target/release/cmrun --board gabbro ... --touch '130,220-130,60@20'   # a swipe up
 ```
 
 The firmware's log (Pebble's binary framing, PULSE, on UART2) goes to

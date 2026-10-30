@@ -146,6 +146,25 @@ CmCPU.prototype.set_buttons = function(state)
 };
 
 /**
+ * The finger on the touch screen (boards with one): down or up, at (x, y)
+ * in display pixels.
+ * @param {boolean} down
+ * @param {number} x
+ * @param {number} y
+ */
+CmCPU.prototype.touch = function(down, x, y)
+{
+    this.wasm["cm_touch"](+down, x, y);
+    this.stop_idling();
+};
+
+/** @return {boolean} */
+CmCPU.prototype.has_touch = function()
+{
+    return !!this.wasm["cm_has_touch"]();
+};
+
+/**
  * Bytes into UART n.
  * @param {number} n
  * @param {!Uint8Array} bytes
