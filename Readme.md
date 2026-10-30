@@ -19,10 +19,14 @@ compiles hot code to WebAssembly. It runs:
 - [U-Boot booting Linux from the disk](https://v86-arm.turret13.workers.dev/?build=u-boot)
 - [An X11 desktop](https://v86-arm.turret13.workers.dev/?build=x11): openbox, xterm, an on-screen keyboard
 
-The ARM site also has [a Pebble 2 Duo watch](https://v86-arm.turret13.workers.dev/?build=pebble-flint)
-running [PebbleOS](https://github.com/coredevices/PebbleOS) on a new Cortex-M
-core (ARMv7E-M, Thumb-2, [`src/cm`](src/cm)): the emulator board PebbleOS's own
-emulator provides, with the watch's display and four buttons.
+The ARM site also has Pebble watches running
+[PebbleOS](https://github.com/coredevices/PebbleOS) on a new Cortex-M core
+(Cortex-M4 and Cortex-M33, Thumb-2, [`src/cm`](src/cm)), on the emulator
+boards PebbleOS's own emulator provides:
+[the Pebble 2 Duo](https://v86-arm.turret13.workers.dev/?build=pebble-flint),
+with its display and four buttons, and
+[the round Pebble Round 2](https://v86-arm.turret13.workers.dev/?build=pebble-round2),
+with its colour display, buttons and touch screen.
 
 **RISC-V (RV64GC and RV32GC)**: a hart with machine, supervisor and user
 modes, Sv39 and Sv32 paging, CLINT, PLIC, a 16550 UART and virtio devices,
