@@ -12,6 +12,8 @@
 body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
 header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 12px; }
 h1 { font-size: 18px; margin: 0; }
+/* Back to the landing page, at the header's end */
+header .home { margin-left: auto; font-size: 14px; }
 #status { color: var(--muted); }
 select { background: #222; color: var(--fg); border: 1px solid #444; padding: 2px 4px; }
 main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
@@ -60,6 +62,7 @@ code { color: var(--fg); }
     <button type="button" data-log="view">View</button>
     <span id="log-note" role="status"></span>
   </div>
+  <a class="home" href="https://v86-ports.turret13.workers.dev">All the v86 ports</a>
 </header>
 <div id="crash" role="alert" hidden>
   <strong>The guest kernel reported an error.</strong>
@@ -101,7 +104,8 @@ code { color: var(--fg); }
   appears next to the console once it's up: user <code>root</code>, empty password). Disk changes stay in this tab.
   Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
   isn't supported (<code>?relay=wisps://…</code> selects a full network relay).
-  <a href="https://github.com/retrocpugeek/v86/tree/ports">Source</a>
+  <a href="https://github.com/retrocpugeek/v86/tree/ports">Source</a> ·
+  <a href="https://v86-ports.turret13.workers.dev">All the v86 ports</a>
 </footer>
 
 <script>
