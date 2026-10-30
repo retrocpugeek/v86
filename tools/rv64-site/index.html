@@ -930,6 +930,7 @@ function setup_console_buttons(emulator, pins)
     };
     const key = (e, down) =>
     {
+        if(typing(e)) return;
         const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key];
         if(!k || e.ctrlKey || e.metaKey || e.altKey) return;
         e.preventDefault();
@@ -1013,6 +1014,15 @@ function setup_buzzer(emulator)
             gain.gain.setValueAtTime(0, t1);
         }
     }, 25);
+}
+
+// Is the key for something being typed into (a text field, or a terminal
+// such as the debugger machine's console), not for the page's game controls?
+function typing(e)
+{
+    const t = e.target;
+    return t instanceof Element &&
+        (t.matches("input, textarea, select, [contenteditable]") || !!t.closest(".xterm, #debug-console, #web"));
 }
 
 // Keys a phone's keyboard lacks, and one-tap commands, for a serial shell.
@@ -1155,7 +1165,7 @@ function setup_pad(emulator)
     };
     document.addEventListener("keydown", e =>
     {
-        if(document.getElementById("terminal").contains(document.activeElement)) return;
+        if(document.getElementById("terminal").contains(document.activeElement) || typing(e)) return;
         const k = keyboard[e.key];
         if(k && !e.ctrlKey && !e.metaKey && !e.altKey)
         {
