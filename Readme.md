@@ -27,6 +27,7 @@ instruction by instruction against QEMU, and has a JIT. It runs:
 - Buildroot Linux, riscv64 and riscv32
 - [Tetris on a WCH CH32V003 microcontroller](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris) (RV32EC, 2 KB of RAM), with touch controls on phones
 - [Stefan Wagner's CH32V003 Mini Game Console](https://v86-riscv.turret13.workers.dev/?build=gameconsole-tris) ([source](https://github.com/wagiminator/CH32V003-GameConsole)), with its OLED display, buttons and buzzer, and six games
+- [Maksym Curul's CH32V003 Mini Game Console](https://v86-riscv.turret13.workers.dev/?build=minigameconsole) ([source](https://github.com/max7d3/CH32V003-MiniGameConsole)), with its colour ST7735 LCD, buttons and buzzer: Snake, Pong, Jump Bird and Dino Run, with high scores saved in its flash
 - [The RT-Thread shell on a WCH CH32V307](https://v86-riscv.turret13.workers.dev/?build=ch32v307-rtthread) (RV32IMAFC)
 
 **Debugging in the browser**: both sites have an image that runs
@@ -35,7 +36,8 @@ the guest next to the console ([ARM64](https://v86-arm.turret13.workers.dev/?bui
 [RISC-V](https://v86-riscv.turret13.workers.dev/?build=gdb-wui)). Its Decompiled
 view uses [kuna](https://github.com/Noelo-Lab/kuna), run as WebAssembly by the
 page. The RISC-V core also has a GDB stub, so adding `&debug` to a CH32V003
-page ([Tetris](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&debug))
+page ([Tetris](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&debug),
+[the mini game console](https://v86-riscv.turret13.workers.dev/?build=minigameconsole&debug))
 debugs the microcontroller's firmware in gdb-wui: breakpoints in flash,
 stepping through the C source, registers and `monitor reset halt`.
 
