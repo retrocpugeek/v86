@@ -19,6 +19,11 @@ compiles hot code to WebAssembly. It runs:
 - [U-Boot booting Linux from the disk](https://v86-arm.turret13.workers.dev/?build=u-boot)
 - [An X11 desktop](https://v86-arm.turret13.workers.dev/?build=x11): openbox, xterm, an on-screen keyboard
 
+The ARM site also has [a Pebble 2 Duo watch](https://v86-arm.turret13.workers.dev/?build=pebble-flint)
+running [PebbleOS](https://github.com/coredevices/PebbleOS) on a new Cortex-M
+core (ARMv7E-M, Thumb-2, [`src/cm`](src/cm)): the emulator board PebbleOS's own
+emulator provides, with the watch's display and four buttons.
+
 **RISC-V (RV64GC and RV32GC)**: a hart with machine, supervisor and user
 modes, Sv39 and Sv32 paging, CLINT, PLIC, a 16550 UART and virtio devices,
 started by OpenSBI. It passes the riscv-tests ISA suites, is checked
@@ -48,6 +53,7 @@ stepping through the C source, registers and `monitor reset halt`.
 | [`src/a64`](src/a64), [`src/a64_cpu.js`](src/a64_cpu.js) | The AArch64 core (Rust, built to `build/v86-a64.wasm`) and its glue |
 | [`src/rv64`](src/rv64), [`src/rv64_cpu.js`](src/rv64_cpu.js) | The RISC-V core and the CH32V microcontrollers (`build/v86-rv64.wasm`) |
 | [`tools/a64-site`](tools/a64-site), [`tools/rv64-site`](tools/rv64-site), [`tools/landing-site`](tools/landing-site) | The three websites (Cloudflare Workers) and the scripts that build their images |
+| [`src/cm`](src/cm), [`src/cm_cpu.js`](src/cm_cpu.js) | The Cortex-M core (`build/v86-cm.wasm`), for the Pebble watch |
 | [`tools/gdb-wui-guest`](tools/gdb-wui-guest), [`tools/kuna-web`](tools/kuna-web) | gdb-wui in the guest, and kuna for the page |
 | [`tests/a64`](tests/a64), [`tests/rv64`](tests/rv64), [`tests/guest-web`](tests/guest-web) | Boot, microcontroller and page tests |
 
