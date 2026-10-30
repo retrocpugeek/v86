@@ -6,7 +6,10 @@ target is PebbleOS's emulator boards: the "pebble-generic" machine of
 Pebble's QEMU fork (`dev/pebble.rs`), on which PebbleOS for `qemu_flint`
 (the Pebble 2 Duo's platform) boots to its menu, watchface and apps, with
 its buttons. Like `src/a64` and `src/rv64`, it's a standalone crate: a
-native runner (`cmrun`) now, and a browser build later.
+native runner (`cmrun`), and the browser build (`build/v86-cm.wasm`, run
+by `src/cm_cpu.js` as `arch: "pebble-flint"`, `"pebble-emery"` or
+`"pebble-gabbro"`), which the v86-arm site shows as a watch
+(`?build=pebble-flint`; `tools/a64-site/pebble/build.sh`, `add-watch.sh`).
 
 ## Layout
 
@@ -18,6 +21,7 @@ native runner (`cmrun`) now, and a browser build later.
 | `bus.rs` | The memory map: flash, SRAM, bit-band aliases, external flash (XIP), devices with interrupt lines |
 | `elf.rs` | Loading firmware from an ELF file (its segments at their load addresses) |
 | `dev/pebble.rs` | Pebble's emulator devices: UARTs, timers, RTC, buttons, system control, display (1-bit and 8-bit, round), external flash, audio, touch (registers only), the CMSDK watchdog |
+| `wasm.rs` | The browser build's interface (`src/cm_cpu.js` drives it in real time) |
 | `bin/cmrun.rs` | Native runner |
 
 ## Running
@@ -31,7 +35,11 @@ target/release/cmrun --board flint --elf pebbleos.elf --spi qemu_spi_flash.bin \
     --seconds 26 --keys back@20 --screenshot watchface.ppm
 ```
 
-The firmware's log (Pebble's binary framing) goes to standard output.
+The firmware's log (Pebble's binary framing, PULSE, on UART2) goes to
+standard output.
+
+In node and the browser: `tests/cm/pebble.mjs` (the V86 API) and
+`tests/cm/pebble-page.mjs` (the site's watch page).
 
 ## Checking against QEMU
 

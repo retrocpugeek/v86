@@ -8,3 +8,5 @@ pub mod dev;
 pub mod elf;
 pub mod scs;
 pub mod thumb;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;

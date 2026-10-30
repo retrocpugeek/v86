@@ -47,6 +47,31 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #log-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 #log-text { box-sizing: border-box; width: 100%; height: 60vh; background: #000; color: var(--fg); font: 12px/1.3 monospace; white-space: pre; }
 #log-dialog .log-tools { margin-top: 8px; }
+/* A Pebble watch (builds with "watch": PebbleOS on the Cortex-M core) */
+#watch { display: flex; flex-direction: column; align-items: center; gap: 12px; width: 100%; max-width: 560px; }
+#watch[hidden] { display: none; }
+.pebble { position: relative; display: flex; align-items: center; gap: 10px; padding: 34px 26px; border-radius: 34px;
+    background: linear-gradient(145deg, #2a2d33, #16181c); border: 1px solid #3a3e46; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; }
+.pebble .face { padding: 14px; border-radius: 12px; background: #050607; border: 1px solid #000; }
+#watch-screen { display: block; width: 288px; height: 336px; max-width: calc(100vw - 150px); height: auto; aspect-ratio: 144 / 168;
+    image-rendering: pixelated; background: #000; }
+.pebble .side { display: flex; flex-direction: column; gap: 26px; }
+.pebble button { width: 26px; height: 56px; border-radius: 8px; background: #4a4f58; border: 1px solid #626874; color: #cfd3da;
+    font-size: 11px; padding: 0; touch-action: none; }
+.pebble button.down { background: #7a8392; }
+.pebble .side.left button { height: 70px; }
+/* Phones: a slimmer body, the screen as wide as what's left */
+@media (max-width: 480px) {
+    .pebble { padding: 22px 10px; gap: 8px; border-radius: 26px; }
+    .pebble .face { padding: 8px; }
+    .pebble button { width: 22px; font-size: 9px; }
+    #watch-screen { max-width: calc(100vw - 32px - 112px); }
+}
+#watch-keys { color: var(--muted); font-size: 13px; text-align: center; }
+#watch-about { color: var(--muted); font-size: 13px; max-width: 560px; }
+#watch-log { box-sizing: border-box; width: 100%; height: 220px; margin: 0; overflow: auto; background: #000; color: #bbb;
+    font: 11px/1.35 monospace; white-space: pre; padding: 6px; border: 1px solid #333; }
 footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
 a { color: var(--accent); }
 code { color: var(--fg); }
@@ -85,6 +110,20 @@ code { color: var(--fg); }
 </dialog>
 <p id="web-note" role="note" hidden></p>
 <main>
+  <section id="watch" hidden aria-label="Pebble watch">
+    <div class="pebble">
+      <div class="side left"><button type="button" data-button="1" aria-label="Back">BACK</button></div>
+      <div class="face"><canvas id="watch-screen" width="144" height="168" aria-label="The watch's display"></canvas></div>
+      <div class="side right">
+        <button type="button" data-button="2" aria-label="Up">UP</button>
+        <button type="button" data-button="4" aria-label="Select">SEL</button>
+        <button type="button" data-button="8" aria-label="Down">DOWN</button>
+      </div>
+    </div>
+    <span id="watch-keys">Keyboard: arrows (left is Back, right is Select), or Esc, Backspace and Enter.</span>
+    <p id="watch-about"></p>
+    <pre id="watch-log" aria-label="The watch's log"></pre>
+  </section>
   <section id="display" hidden>
     <canvas id="screen" aria-label="Guest display"></canvas>
     <span id="display-note">Click the screen to type into it; the serial console is next to it.</span>
@@ -101,11 +140,11 @@ code { color: var(--fg); }
   </section>
 </main>
 <footer>
-  Buildroot arm64 Linux running on v86's AArch64 core (ARMv8.0, QEMU <code>virt</code>-like machine), entirely in your browser.
+  <span id="linux-about">Buildroot arm64 Linux running on v86's AArch64 core (ARMv8.0, QEMU <code>virt</code>-like machine), entirely in your browser.
   Log in as <code>root</code> (OpenWrt: press Enter once the console is ready; LuCI, the web interface,
   appears next to the console once it's up: user <code>root</code>, empty password). Disk changes stay in this tab.
   Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
-  isn't supported (<code>?relay=wisps://…</code> selects a full network relay).
+  isn't supported (<code>?relay=wisps://…</code> selects a full network relay).</span>
   <a href="https://github.com/retrocpugeek/v86/tree/ports">Source</a> ·
   <a href="https://v86-ports.turret13.workers.dev">All the v86 ports</a>
 </footer>
@@ -146,6 +185,11 @@ code { color: var(--fg); }
     // Each version of an image has its own directory (tools/version-images.py),
     // so cached parts of an earlier one are never mixed in
     const base = "images/" + build.id + "/" + (build.dir ? build.dir + "/" : "");
+    if(build.watch)
+    {
+        await start_watch(build, base, status);
+        return;
+    }
     // By default the guest's HTTP goes through this site's /proxy (worker.js);
     // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
     const relay = params.get("relay") || "fetch";
@@ -209,6 +253,172 @@ code { color: var(--fg); }
     document.getElementById("status").textContent = "Error: " + e.message;
     throw e;
 });
+
+// A Pebble watch: PebbleOS built for one of its emulator boards (tools/a64-site/pebble),
+// on v86's Cortex-M core (src/cm, v86-cm.wasm): the display in a watch body, its
+// four buttons, and its log (PULSE frames on UART2, decoded to lines).
+async function start_watch(build, base, status)
+{
+    document.getElementById("terminal").hidden = true;
+    document.getElementById("linux-about").hidden = true;
+    document.getElementById("watch").hidden = false;
+    document.querySelector("h1").textContent = "v86 Pebble";
+    document.title = "v86 Pebble: " + build.label.replace(/^.*: /, "");
+    document.getElementById("watch-about").innerHTML = build.about || "";
+    status.textContent = "Downloading the firmware";
+    const fetch_buffer = async (file, gz) =>
+    {
+        const response = await fetch(base + file);
+        if(!response.ok) throw new Error(file + ": " + response.status);
+        const body = gz ? response.body.pipeThrough(new DecompressionStream("gzip")) : response.body;
+        return new Response(body).arrayBuffer();
+    };
+    const [firmware, spi] = await Promise.all([fetch_buffer(build.firmware, false), fetch_buffer(build.spi, build.spi.endsWith(".gz"))]);
+    const emulator = window.emulator = new V86({
+        arch: "pebble-" + build.watch,
+        wasm_path: "v86-cm.wasm",
+        bios: { buffer: firmware },
+        spi_flash: { buffer: spi },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+    setup_console_log(emulator, build);
+    emulator.add_listener("emulator-ready", () => { status.textContent = "Starting"; });
+    watch_log(emulator, status);
+    draw_watch(emulator);
+    watch_buttons(emulator);
+}
+
+// The firmware's log: PULSE frames (0x55-delimited, COBS with 0x55 as 0, a
+// CRC-32) carrying protocol 0x5021, port 3 messages: a 29-byte header (file,
+// level, task, ms timestamp, line) and the text. As lines in the page's log
+// view and the console log tools.
+function watch_log(emulator, status)
+{
+    const view = document.getElementById("watch-log");
+    let frame = [];
+    let lines = [];
+    const cobs = bytes =>
+    {
+        const out = [];
+        for(let i = 0; i < bytes.length;)
+        {
+            const code = bytes[i++];
+            for(let k = 1; k < code && i < bytes.length; k++) out.push(bytes[i++]);
+            if(code < 0xff && i < bytes.length) out.push(0);
+        }
+        return out;
+    };
+    const message = raw =>
+    {
+        const d = cobs(raw.map(b => b === 0 ? 0x55 : b)).slice(0, -4);
+        if(d.length < 6 + 29 || d[0] !== 0x50 || d[1] !== 0x21 || d[3] !== 3) return;
+        const p = d.slice(6);
+        const name = p.slice(1, 17);
+        const file = String.fromCharCode(...name.slice(0, name.indexOf(0) < 0 ? 16 : name.indexOf(0)));
+        const level = String.fromCharCode(p[17]);
+        const ms = p.slice(19, 27).reduce((v, b, i) => v + b * 2 ** (8 * i), 0);
+        const lineno = p[27] | p[28] << 8;
+        const text = new TextDecoder().decode(new Uint8Array(p.slice(29)));
+        const time = new Date(ms).toISOString().slice(11, 23);
+        const line = `${level} ${time} ${file}:${lineno}> ${text}`;
+        lines.push(line);
+        if(lines.length > 400) lines = lines.slice(-300);
+        for(const c of line + "\n") emulator.emulator_bus.send("serial0-output-byte", c.charCodeAt(0) & 0xff);
+        if(text.includes("Ready for communication")) status.textContent = "Running";
+    };
+    emulator.add_listener("cortex-m-uart2", bytes =>
+    {
+        for(const b of bytes)
+        {
+            if(b === 0x55)
+            {
+                if(frame.length) message(frame);
+                frame = [];
+            }
+            else if(frame.length < 4096)
+            {
+                frame.push(b);
+            }
+        }
+        const at_end = view.scrollTop + view.clientHeight >= view.scrollHeight - 4;
+        view.textContent = lines.join("\n");
+        if(at_end) view.scrollTop = view.scrollHeight;
+    });
+}
+
+function draw_watch(emulator)
+{
+    const canvas = document.getElementById("watch-screen");
+    let ctx = null, image = null, frame = -1;
+    const draw = () =>
+    {
+        const d = emulator.get_watch_display(frame);
+        if(d && d.pixels)
+        {
+            frame = d.frame;
+            if(!ctx || canvas.width !== d.width || canvas.height !== d.height)
+            {
+                canvas.width = d.width;
+                canvas.height = d.height;
+                ctx = canvas.getContext("2d");
+                image = ctx.createImageData(d.width, d.height);
+            }
+            image.data.set(d.pixels);
+            ctx.putImageData(image, 0, 0);
+        }
+        requestAnimationFrame(draw);
+    };
+    emulator.add_listener("emulator-ready", draw);
+}
+
+// The buttons: on screen (held while touched) and the keyboard's arrows
+function watch_buttons(emulator)
+{
+    const held = new Set();
+    let keys = 0, touch = 0;
+    const update = () =>
+    {
+        const state = keys | touch;
+        for(const b of document.querySelectorAll(".pebble button"))
+        {
+            b.classList.toggle("down", !!(state & +b.dataset.button));
+        }
+        emulator.set_buttons(state);
+    };
+    for(const b of document.querySelectorAll(".pebble button"))
+    {
+        const bit = +b.dataset.button;
+        b.addEventListener("pointerdown", e =>
+        {
+            e.preventDefault();
+            b.setPointerCapture(e.pointerId);
+            if(navigator.vibrate) navigator.vibrate(8);
+            touch |= bit;
+            update();
+        });
+        const up = () => { touch &= ~bit; update(); };
+        b.addEventListener("pointerup", up);
+        b.addEventListener("pointercancel", up);
+        b.addEventListener("contextmenu", e => e.preventDefault());
+    }
+    const KEYS = { ArrowLeft: 1, Escape: 1, Backspace: 1, ArrowUp: 2, ArrowRight: 4, Enter: 4, ArrowDown: 8 };
+    const key = (e, down) =>
+    {
+        const bit = KEYS[e.key];
+        if(!bit || e.ctrlKey || e.metaKey || e.altKey) return;
+        if(e.target instanceof Element && e.target.closest("input, textarea, select, dialog")) return;
+        e.preventDefault();
+        if(down) held.add(e.key); else held.delete(e.key);
+        keys = [...held].reduce((v, k) => v | KEYS[k], 0);
+        update();
+    };
+    document.addEventListener("keydown", e => key(e, true));
+    document.addEventListener("keyup", e => key(e, false));
+    window.addEventListener("blur", () => { held.clear(); keys = 0; update(); });
+}
 
 // The console's output, for copying, saving or sharing (copying out of the
 // terminal is hard on phones). A banner offers it when the kernel reports an

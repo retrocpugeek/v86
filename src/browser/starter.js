@@ -53,7 +53,8 @@ export function V86(options)
     this.cpu_is_running = false;
     this.cpu_exception_hook = function(n) {};
 
-    /** "x86" (default), "aarch64", "riscv64", "riscv32", "ch32v003" or "ch32v307" */
+    /** "x86" (default), "aarch64", "riscv64", "riscv32", "ch32v003", "ch32v307",
+        or a Cortex-M machine: "pebble-flint", "pebble-emery" or "pebble-gabbro" */
     const arch = options.arch || "x86";
 
     const bus = Bus.create();
@@ -131,7 +132,7 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch.startsWith("ch32v") ? "v86-rv64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch.startsWith("ch32v") ? "v86-rv64.wasm" : arch.startsWith("pebble-") ? "v86-cm.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
                 if(options.wasm_path)
@@ -428,6 +429,9 @@ V86.prototype.continue_init = async function(emulator, options)
             case "bios":
                 settings.bios = buffer.buffer;
                 break;
+            case "spi_flash":
+                settings.spi_flash = buffer.buffer;
+                break;
             case "vga_bios":
                 settings.vga_bios = buffer.buffer;
                 break;
@@ -463,7 +467,7 @@ V86.prototype.continue_init = async function(emulator, options)
         if(name === "bios" || name === "vga_bios" ||
             name === "initial_state" || name === "multiboot" ||
             name === "bzimage" || name === "initrd" ||
-            name === "kernel" || name === "dtb")
+            name === "kernel" || name === "dtb" || name === "spi_flash")
         {
             // Ignore async for these because they must be available before boot.
             // This should make result.buffer available after the object is loaded
@@ -511,6 +515,8 @@ V86.prototype.continue_init = async function(emulator, options)
     add_file("initrd", options.initrd);
     add_file("kernel", options.kernel);
     add_file("dtb", options.dtb);
+    // A Cortex-M machine's external flash (arch "pebble-*")
+    add_file("spi_flash", options.spi_flash);
 
     if(options.filesystem && options.filesystem.handle9p)
     {
@@ -1614,6 +1620,39 @@ V86.prototype.get_lcd_display = function(last_frame)
 {
     const cpu = this.v86.cpu;
     return cpu.ch32_lcd ? cpu.ch32_lcd(last_frame) : null;
+};
+
+/**
+ * Cortex-M machines (arch "pebble-*"): the buttons held (bit 0 back, 1 up,
+ * 2 select, 3 down).
+ * @param {number} state
+ */
+V86.prototype.set_buttons = function(state)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.set_buttons) cpu.set_buttons(state);
+};
+
+/**
+ * Cortex-M machines: the display's state; see CmCPU.display.
+ * @param {number} last_frame
+ */
+V86.prototype.get_watch_display = function(last_frame)
+{
+    const cpu = this.v86.cpu;
+    return cpu.display ? cpu.display(last_frame) : null;
+};
+
+/**
+ * Cortex-M machines: bytes into UART n (their output comes as
+ * "cortex-m-uart<n>" events).
+ * @param {number} n
+ * @param {!Uint8Array} bytes
+ */
+V86.prototype.uart_input = function(n, bytes)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.uart_input) cpu.uart_input(n, bytes);
 };
 
 /**

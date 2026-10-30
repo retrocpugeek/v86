@@ -84,7 +84,7 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
 	   bus.js log.js cpu.js \
 	   elf.js kernel.js \
-	   a64_cpu.js a64_display.js rv64_cpu.js pl011.js pl031.js virtio_blk.js virtio_input.js fdt.js
+	   a64_cpu.js a64_display.js rv64_cpu.js cm_cpu.js pl011.js pl031.js virtio_blk.js virtio_input.js fdt.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
@@ -232,6 +232,15 @@ build/v86-rv64.wasm: $(RV64_RUST_FILES)
 	cp src/rv64/target/wasm32-unknown-unknown/release/v86_rv64.wasm build/v86-rv64.wasm
 	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86-rv64.wasm -o build/v86-rv64.wasm
 	BLOCK_SIZE=K ls -l build/v86-rv64.wasm
+
+# Cortex-M core (src/cm), likewise.
+CM_RUST_FILES=$(shell find src/cm/src -name '*.rs') src/cm/Cargo.toml
+build/v86-cm.wasm: $(CM_RUST_FILES)
+	mkdir -p build/
+	cd src/cm && CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --release --lib --target wasm32-unknown-unknown
+	cp src/cm/target/wasm32-unknown-unknown/release/v86_cm.wasm build/v86-cm.wasm
+	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86-cm.wasm -o build/v86-cm.wasm
+	BLOCK_SIZE=K ls -l build/v86-cm.wasm
 
 build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
