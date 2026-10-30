@@ -27,6 +27,8 @@ main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
 /* gdb-wui's: it is a desktop application (guest-web.js) */
 #web-note { margin: 0 0 12px; padding: 6px 12px; border: 1px solid #665; background: #2a2a1c; }
 #web-note[hidden] { display: none; }
+/* (it's for small screens and touch: a wide screen with a mouse needn't be told) */
+@media (min-width: 1000px) and (not (pointer: coarse)) { #web-note { display: none; } }
 #guest-web { flex: 1; min-height: 480px; width: 100%; border: 1px solid #444; background: #fff; }
 #guest-web:not([src]) { visibility: hidden; }
 /* ?debug: gdb-wui's machine, next to the microcontroller */
