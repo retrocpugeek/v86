@@ -24,3 +24,5 @@ overflow-checks = false
 [profile.release]
 opt-level = 3
 debug = 1
+lto = "fat"
+codegen-units = 1

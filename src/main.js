@@ -30,7 +30,7 @@ export function v86(bus, wasm)
         /** @type {?} */ (new A64CPU(bus, wasm, stop_idling)) :
         wasm.arch === "riscv64" || wasm.arch === "riscv32" || wasm.arch === "ch32v003" || wasm.arch === "ch32v307" ?
         /** @type {?} */ (new RV64CPU(bus, wasm, stop_idling)) :
-        wasm.arch.startsWith("pebble-") ?
+        wasm.arch.startsWith("pebble-") || wasm.arch === "card10" ?
         /** @type {?} */ (new CmCPU(bus, wasm, stop_idling)) :
         new CPU(bus, wasm, stop_idling);
 

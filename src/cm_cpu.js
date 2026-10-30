@@ -1,8 +1,10 @@
 // A Cortex-M machine for v86: the Rust core in src/cm (v86-cm.wasm), running
 // PebbleOS's emulator boards (arch "pebble-flint", "pebble-emery" or
 // "pebble-gabbro"): the firmware ELF as `bios`, the external flash's image as
+// `spi_flash`; or the card10 badge (arch "card10", two cores): Epicardium's
+// ELF as `bios`, Pycardium's as `core1`, the FAT file system's image as
 // `spi_flash`. The machine keeps to real time: it runs while it's behind the
-// wall clock and sleeps (the page's event loop) while PebbleOS idles.
+// wall clock and sleeps (the page's event loop) while its firmware idles.
 
 import { dbg_assert } from "./log.js";
 
@@ -10,7 +12,7 @@ import { dbg_assert } from "./log.js";
 const STEPS_PER_RUN = 100000;
 const TIME_PER_SLICE = 10;
 
-const BOARDS = { "pebble-flint": 0, "pebble-emery": 1, "pebble-gabbro": 2 };
+const BOARDS = { "pebble-flint": 0, "pebble-emery": 1, "pebble-gabbro": 2, "card10": 3 };
 
 const now = () => typeof performance !== "undefined" ? performance.now() : Date.now();
 
@@ -33,6 +35,11 @@ export function CmCPU(bus, wasm, stop_idling)
     this.halted = false;
     /** The buttons held (bit 0 back, 1 up, 2 select, 3 down) */
     this.buttons = 0;
+    /** How much slower than its own the CPU's clock runs (cm_set_clock_scale),
+        when this host can't keep up with the machine; and when it was last
+        looked at */
+    this.clock_scale = 1;
+    this.scale_checked = 0;
 }
 
 CmCPU.prototype.init = function(settings, device_bus)
@@ -47,13 +54,20 @@ CmCPU.prototype.boot = function()
     dbg_assert(settings.bios, "cortex-m: the firmware (bios, an ELF) is required");
     const elf = new Uint8Array(settings.bios);
     const spi = settings.spi_flash ? new Uint8Array(settings.spi_flash) : new Uint8Array(0);
+    const core1 = settings.core1 ? new Uint8Array(settings.core1) : new Uint8Array(0);
     const ep = this.wasm["cm_alloc"](elf.length);
     const sp = this.wasm["cm_alloc"](spi.length);
+    const cp = this.wasm["cm_alloc"](core1.length);
     new Uint8Array(this.wasm_memory.buffer, ep, elf.length).set(elf);
     new Uint8Array(this.wasm_memory.buffer, sp, spi.length).set(spi);
-    const result = this.wasm["cm_init"](this.board, ep, elf.length, sp, spi.length, Date.now() / 1000);
+    new Uint8Array(this.wasm_memory.buffer, cp, core1.length).set(core1);
+    const epoch = Date.now() / 1000;
+    const result = this.board === BOARDS["card10"] ?
+        this.wasm["cm_init_card10"](ep, elf.length, cp, core1.length, sp, spi.length, epoch) :
+        this.wasm["cm_init"](this.board, ep, elf.length, sp, spi.length, epoch);
     this.wasm["cm_free"](ep, elf.length);
     this.wasm["cm_free"](sp, spi.length);
+    this.wasm["cm_free"](cp, core1.length);
     dbg_assert(result === 0, "cortex-m: the firmware doesn't load");
     this.clock_offset = now();
     this.halted = false;
@@ -71,6 +85,7 @@ CmCPU.prototype.main_loop = function()
         // Where the machine should be, and where it is
         const target = now() - this.clock_offset;
         const machine = this.wasm["cm_now_ms"]();
+        this.adjust_clock(target - machine);
         if(machine > target + 1)
         {
             // Ahead of real time (busy-waiting firmware): let time catch up
@@ -83,6 +98,11 @@ CmCPU.prototype.main_loop = function()
         }
         const exit = this.wasm["cm_run"](STEPS_PER_RUN);
         this.flush_uarts();
+        if(exit === 3)
+        {
+            // reset: a new machine, at its own clock
+            this.wasm["cm_set_clock_scale"](this.clock_scale);
+        }
         if(exit === 1)
         {
             // Idle: wake at the next event, or now if it's already due
@@ -106,6 +126,38 @@ CmCPU.prototype.main_loop = function()
         {
             return 0;
         }
+    }
+};
+
+/**
+ * Keep the machine to real time on a host too slow for it (the card10's two
+ * busy cores): while it falls behind, its CPU's clock runs slower (each
+ * instruction takes more of the machine's time), as if the chip were clocked
+ * lower; when it keeps up again, back towards its own clock. Its timers,
+ * clocks and RTC go on in real time either way.
+ * @param {number} lag how far behind real time the machine is (ms)
+ */
+CmCPU.prototype.adjust_clock = function(lag)
+{
+    const t = now();
+    if(t - this.scale_checked < 500)
+    {
+        return;
+    }
+    this.scale_checked = t;
+    let scale = this.clock_scale;
+    if(lag > 200)
+    {
+        scale = Math.min(scale * 1.25, 8);
+    }
+    else if(lag < 20 && scale > 1)
+    {
+        scale = Math.max(scale / 1.05, 1);
+    }
+    if(scale !== this.clock_scale)
+    {
+        this.clock_scale = scale;
+        this.wasm["cm_set_clock_scale"](scale);
     }
 };
 

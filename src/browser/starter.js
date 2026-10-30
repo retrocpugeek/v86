@@ -54,7 +54,8 @@ export function V86(options)
     this.cpu_exception_hook = function(n) {};
 
     /** "x86" (default), "aarch64", "riscv64", "riscv32", "ch32v003", "ch32v307",
-        or a Cortex-M machine: "pebble-flint", "pebble-emery" or "pebble-gabbro" */
+        or a Cortex-M machine: "pebble-flint", "pebble-emery", "pebble-gabbro"
+        or "card10" */
     const arch = options.arch || "x86";
 
     const bus = Bus.create();
@@ -132,7 +133,7 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch.startsWith("ch32v") ? "v86-rv64.wasm" : arch.startsWith("pebble-") ? "v86-cm.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch.startsWith("ch32v") ? "v86-rv64.wasm" : arch.startsWith("pebble-") || arch === "card10" ? "v86-cm.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
                 if(options.wasm_path)
@@ -432,6 +433,9 @@ V86.prototype.continue_init = async function(emulator, options)
             case "spi_flash":
                 settings.spi_flash = buffer.buffer;
                 break;
+            case "core1":
+                settings.core1 = buffer.buffer;
+                break;
             case "vga_bios":
                 settings.vga_bios = buffer.buffer;
                 break;
@@ -467,7 +471,7 @@ V86.prototype.continue_init = async function(emulator, options)
         if(name === "bios" || name === "vga_bios" ||
             name === "initial_state" || name === "multiboot" ||
             name === "bzimage" || name === "initrd" ||
-            name === "kernel" || name === "dtb" || name === "spi_flash")
+            name === "kernel" || name === "dtb" || name === "spi_flash" || name === "core1")
         {
             // Ignore async for these because they must be available before boot.
             // This should make result.buffer available after the object is loaded
@@ -515,8 +519,10 @@ V86.prototype.continue_init = async function(emulator, options)
     add_file("initrd", options.initrd);
     add_file("kernel", options.kernel);
     add_file("dtb", options.dtb);
-    // A Cortex-M machine's external flash (arch "pebble-*")
+    // A Cortex-M machine's external flash (arch "pebble-*", "card10"), and the
+    // card10's second core's firmware (Pycardium)
     add_file("spi_flash", options.spi_flash);
+    add_file("core1", options.core1);
 
     if(options.filesystem && options.filesystem.handle9p)
     {

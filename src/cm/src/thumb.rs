@@ -542,7 +542,7 @@ impl Cpu {
                     match bits(i, 7, 4) {
                         2 => self.wfe(),
                         3 => self.wfi(),
-                        4 => self.event = true,
+                        4 => self.sev(),
                         _ => {}
                     }
                 }
@@ -553,14 +553,24 @@ impl Cpu {
 
     pub(crate) fn privileged(&self) -> bool { self.handler_mode() || self.control & 1 == 0 }
 
-    fn wfi(&mut self) { self.sleeping = true; }
+    fn wfi(&mut self) {
+        self.sleeping = true;
+        self.in_wfe = false;
+    }
 
     fn wfe(&mut self) {
         if self.event {
             self.event = false;
         } else {
             self.sleeping = true;
+            self.in_wfe = true;
         }
+    }
+
+    /// SEV: this core's event, and the others' (the machine passes it on).
+    fn sev(&mut self) {
+        self.event = true;
+        self.sev = true;
     }
 
     /// PUSH / STMDB SP!: registers in `list`, lowest at the lowest address.
@@ -651,9 +661,11 @@ impl Cpu {
     }
 
     fn coprocessor(&mut self, i: u32) {
-        // No FPU here: NOCP if the coprocessor's disabled, else undefined
         let cp = bits(i, 11, 8);
-        if (cp == 10 || cp == 11) && self.bus.scs.cpacr >> 20 & 0xf == 0 {
+        if self.fpu {
+            self.fp_instruction(i);
+        } else if (cp == 10 || cp == 11) && self.bus.scs.cpacr >> 20 & 0xf == 0 {
+            // No FPU: NOCP if the coprocessor's disabled, else undefined
             let at = self.pc;
             self.usage_fault_at(scs::UFSR_NOCP, at);
         } else {
@@ -1051,7 +1063,7 @@ impl Cpu {
                     match bits(i, 7, 0) {
                         2 => self.wfe(),
                         3 => self.wfi(),
-                        4 => self.event = true,
+                        4 => self.sev(),
                         _ => {}
                     }
                 }

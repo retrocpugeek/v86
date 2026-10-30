@@ -42,16 +42,21 @@ pub struct Mapping {
 
 pub struct Bus {
     pub flash: Vec<u8>,
+    /// Where flash is (FLASH_BASE, unless the machine says otherwise)
+    pub flash_base: u32,
     pub sram: Vec<u8>,
     /// Memory-mapped external flash (read and write), at xip_base
     pub xip: Vec<u8>,
     pub xip_base: u32,
     pub scs: Scs,
     pub maps: Vec<Mapping>,
-    /// The machine's time (ns) and cycle count, kept up to date by the CPU
-    /// before device accesses
-    pub now_ns: u64,
+    /// The CPU's instruction count (kept up to date before each
+    /// instruction), and how that makes the machine's time (ns): as
+    /// Cpu::now_ns, worked out only when a device needs it
     pub cycles: u64,
+    pub warp_ns: u64,
+    pub icount_base: u64,
+    pub ns_per_insn_x1000: u64,
     pub log_unmapped: bool,
     /// Index into maps of the last device hit (most accesses repeat)
     last_map: usize,
@@ -61,13 +66,16 @@ impl Bus {
     pub fn new(flash_size: usize, sram_size: usize, cpu_hz: u64, ref_hz: u64, v8m: bool) -> Bus {
         Bus {
             flash: vec![0xff; flash_size],
+            flash_base: FLASH_BASE,
             sram: vec![0; sram_size],
             xip: Vec::new(),
             xip_base: 0,
             scs: Scs::new(cpu_hz, ref_hz, v8m),
             maps: Vec::new(),
-            now_ns: 0,
             cycles: 0,
+            warp_ns: 0,
+            icount_base: 0,
+            ns_per_insn_x1000: 1_000_000_000_000 / cpu_hz.max(1),
             log_unmapped: false,
             last_map: 0,
         }
@@ -96,7 +104,7 @@ impl Bus {
 
     #[inline(always)]
     fn flash_off(&self, a: u32, size: u32) -> Option<usize> {
-        let off = a.wrapping_sub(FLASH_BASE) as usize;
+        let off = a.wrapping_sub(self.flash_base) as usize;
         (off + size as usize <= self.flash.len()).then_some(off)
     }
 
@@ -139,11 +147,11 @@ impl Bus {
             return self.read(w, 1) >> bit & 1;
         }
         if a & !0xfff == SCS_BASE || a & !0xfff == DWT_BASE {
-            let w = self.scs.read(a & !3, self.now_ns, self.cycles);
+            let w = self.scs.read(a & !3, self.now(), self.cycles);
             return w >> ((a & 3) * 8) & mask(size);
         }
         if let Some(i) = self.find(a) {
-            let now = self.now_ns;
+            let now = self.now();
             let m = &mut self.maps[i];
             let v = m.dev.read(a - m.base, size, now);
             self.sync_irq(i);
@@ -173,7 +181,7 @@ impl Bus {
                 self.scs.write_byte(a, v as u8);
                 self.scs.write_byte(a + 1, (v >> 8) as u8);
             } else {
-                self.scs.write(a, v, self.now_ns, self.cycles);
+                self.scs.write(a, v, self.now(), self.cycles);
             }
             return;
         }
@@ -183,7 +191,7 @@ impl Bus {
             return;
         }
         if let Some(i) = self.find(a) {
-            let now = self.now_ns;
+            let now = self.now();
             let m = &mut self.maps[i];
             m.dev.write(a - m.base, size, v, now);
             for (o, n) in m.dev.xip_erases() {
@@ -201,7 +209,9 @@ impl Bus {
 
     fn find(&mut self, a: u32) -> Option<usize> {
         let hit = |m: &Mapping| a.wrapping_sub(m.base) < m.size;
-        if self.maps.get(self.last_map).is_some_and(hit) {
+        // (the last mapping may be a catch-all under the others: a hit on it
+        // is checked against them)
+        if self.last_map + 1 < self.maps.len() && self.maps.get(self.last_map).is_some_and(hit) {
             return Some(self.last_map);
         }
         let i = self.maps.iter().position(hit)?;
@@ -220,9 +230,14 @@ impl Bus {
         }
     }
 
+    /// The machine's time (ns), from the instruction count.
+    #[inline]
+    pub fn now(&self) -> u64 {
+        (self.cycles.saturating_sub(self.icount_base) as u128 * self.ns_per_insn_x1000 as u128 / 1000) as u64 + self.warp_ns
+    }
+
     /// Bring the devices and SysTick up to `now`.
     pub fn update(&mut self, now: u64) {
-        self.now_ns = now;
         self.scs.update(now);
         for i in 0..self.maps.len() {
             if self.maps[i].dev.next_event_ns() <= now {

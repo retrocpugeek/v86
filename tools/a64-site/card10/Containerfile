@@ -1,0 +1,10 @@
+# The card10 firmware's build environment (tools/a64-site/card10/build.sh):
+# its how-to-build page's packages, on Ubuntu 22.04 (GCC 10, close to the
+# firmware's 2022 toolchain), and mtools to make its FAT file system.
+FROM docker.io/library/ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install \
+        gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
+        python3 python3-pip python3-crcmod python3-pil ninja-build meson git \
+        mtools dosfstools && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /firmware

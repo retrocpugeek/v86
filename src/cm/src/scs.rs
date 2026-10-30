@@ -5,7 +5,7 @@
 //!
 //! Following the ARMv7-M Architecture Reference Manual (DDI 0403E), with the
 //! implementation choices of QEMU's armv7m model where the firmware can tell:
-//! 3 priority bits (as Pebble's machines configure it), 32 external
+//! 3 priority bits (as Pebble's machines and the MAX32665 have), 128 external
 //! interrupts, the Cortex-M4's CPUID. The MPU's registers hold what's written
 //! but don't restrict accesses (yet).
 
@@ -21,7 +21,7 @@ pub const DEBUGMON: usize = 12;
 pub const PENDSV: usize = 14;
 pub const SYSTICK: usize = 15;
 /// External interrupts: exception 16 + n
-pub const NUM_IRQS: usize = 32;
+pub const NUM_IRQS: usize = 128;
 pub const NUM_EXC: usize = 16 + NUM_IRQS;
 
 pub const SCS_BASE: u32 = 0xe000_e000;
@@ -96,6 +96,8 @@ pub struct Scs {
     pub fpccr: u32,
     pub fpcar: u32,
     pub fpdscr: u32,
+    /// ICTR: how many 32s of external interrupts there are, less one
+    pub ictr: u32,
     /// Something pending_exception() depends on changed
     pub dirty: bool,
 }
@@ -142,6 +144,7 @@ impl Scs {
             fpccr: 0xc000_0000,
             fpcar: 0,
             fpdscr: 0,
+            ictr: 0,
             dirty: true,
         }
     }
@@ -291,8 +294,8 @@ impl Scs {
         let off = a.wrapping_sub(SCS_BASE);
         self.update(now);
         match off {
-            // ICTR: 32 interrupts
-            0x004 => 0,
+            // ICTR: the interrupts the machine says it has, in 32s
+            0x004 => self.ictr,
             0x010 => {
                 let v = self.stk_ctrl;
                 // COUNTFLAG clears on read
@@ -433,7 +436,13 @@ impl Scs {
                 self.stk_ctrl = (self.stk_ctrl & (1 << 16)) | (v & 7);
                 self.stk_restart(now, val);
             }
-            0x014 => self.stk_load = v & 0xff_ffff,
+            0x014 => {
+                // The count goes on as it is: the new LOAD is reloaded when
+                // it next reaches 0
+                let val = self.stk_value(now);
+                self.stk_load = v & 0xff_ffff;
+                self.stk_restart(now, val);
+            }
             // Writing VAL clears it (and COUNTFLAG)
             0x018 => {
                 self.stk_ctrl &= !(1 << 16);

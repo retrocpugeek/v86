@@ -73,7 +73,29 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
     .pebble button { width: 22px; font-size: 9px; }
     #watch-screen { max-width: calc(100vw - 32px - 112px); }
 }
-#watch-keys { color: var(--muted); font-size: 13px; text-align: center; }
+/* The card10 badge (builds with "card10": its firmware on the Cortex-M core):
+   the display (160 x 80, at three times its size) and its four buttons, at
+   the corners as on the badge */
+#card10 { display: flex; flex-direction: column; align-items: center; gap: 12px; width: 100%; max-width: 640px; }
+#card10[hidden] { display: none; }
+.card10 { display: flex; align-items: center; gap: 12px; padding: 26px 18px; border-radius: 44px;
+    background: linear-gradient(145deg, #2f3b2f, #172017); border: 1px solid #3f4f3f; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; }
+.card10 .face { padding: 10px; border-radius: 8px; background: #050607; border: 1px solid #000; }
+#card10-screen { display: block; width: 480px; max-width: calc(100vw - 150px); height: auto; aspect-ratio: 160 / 80;
+    image-rendering: pixelated; background: #000; }
+.card10 .side { display: flex; flex-direction: column; justify-content: space-between; align-self: stretch; gap: 30px; }
+.card10 button { width: 30px; height: 44px; border-radius: 10px; background: #4a4f58; border: 1px solid #626874; color: #cfd3da;
+    font-size: 10px; padding: 0; touch-action: none; }
+.card10 button.down { background: #7a8392; }
+.card10 button.sym { font-size: 18px; }
+@media (max-width: 480px) {
+    .card10 { padding: 18px 8px; gap: 8px; border-radius: 30px; }
+    .card10 button { width: 24px; }
+    #card10-screen { max-width: calc(100vw - 32px - 96px); }
+}
+#card10-keys, 
+#card10-about { color: var(--muted); font-size: 13px; max-width: 640px; }
 #watch-about { color: var(--muted); font-size: 13px; max-width: 560px; }
 #watch-log { box-sizing: border-box; width: 100%; height: 220px; margin: 0; overflow: auto; background: #000; color: #bbb;
     font: 11px/1.35 monospace; white-space: pre; padding: 6px; border: 1px solid #333; }
@@ -129,6 +151,24 @@ code { color: var(--fg); }
       Tap and swipe the screen.</span></span>
     <p id="watch-about"></p>
     <pre id="watch-log" aria-label="The watch's log"></pre>
+  </section>
+  <section id="card10" hidden aria-label="card10 badge">
+    <div class="card10">
+      <div class="side left">
+        <button type="button" data-button="8" aria-label="Top left (menu, power)" class="sym">≡</button>
+        <button type="button" data-button="1" aria-label="Bottom left">◀</button>
+      </div>
+      <div class="face"><canvas id="card10-screen" width="160" height="80" aria-label="The badge's display"></canvas></div>
+      <div class="side right">
+        <button type="button" data-button="4" aria-label="Top right (select)">SEL</button>
+        <button type="button" data-button="2" aria-label="Bottom right">▶</button>
+      </div>
+    </div>
+    <span id="card10-keys">Keyboard (outside the console): Esc for the top left button (the menu; held, power),
+      the left and right arrows for the bottom ones, Enter for the top right one. The console below is its serial port:
+      Epicardium's log, and MicroPython's REPL: Ctrl-C stops the app, and Ctrl-C again once the menu's up gives the
+      <code>&gt;&gt;&gt;</code> prompt.</span>
+    <p id="card10-about"></p>
   </section>
   <section id="display" hidden>
     <canvas id="screen" aria-label="Guest display"></canvas>
@@ -194,6 +234,11 @@ code { color: var(--fg); }
     if(build.watch)
     {
         await start_watch(build, base, status);
+        return;
+    }
+    if(build.card10)
+    {
+        await start_card10(build, base, status);
         return;
     }
     // By default the guest's HTTP goes through this site's /proxy (worker.js);
@@ -403,9 +448,9 @@ function watch_log(emulator, status)
     });
 }
 
-function draw_watch(emulator)
+function draw_watch(emulator, canvas_id = "watch-screen")
 {
-    const canvas = document.getElementById("watch-screen");
+    const canvas = document.getElementById(canvas_id);
     let ctx = null, image = null, frame = -1;
     const draw = () =>
     {
@@ -428,21 +473,24 @@ function draw_watch(emulator)
     emulator.add_listener("emulator-ready", draw);
 }
 
-// The buttons: on screen (held while touched) and the keyboard's arrows
-function watch_buttons(emulator)
+// The buttons: on screen (held while touched) and the keyboard (not while
+// typing into the console)
+const PEBBLE_KEYS = { ArrowLeft: 1, Escape: 1, Backspace: 1, ArrowUp: 2, ArrowRight: 4, Enter: 4, ArrowDown: 8 };
+
+function watch_buttons(emulator, selector = ".pebble button", KEYS = PEBBLE_KEYS)
 {
     const held = new Set();
     let keys = 0, touch = 0;
     const update = () =>
     {
         const state = keys | touch;
-        for(const b of document.querySelectorAll(".pebble button"))
+        for(const b of document.querySelectorAll(selector))
         {
             b.classList.toggle("down", !!(state & +b.dataset.button));
         }
         emulator.set_buttons(state);
     };
-    for(const b of document.querySelectorAll(".pebble button"))
+    for(const b of document.querySelectorAll(selector))
     {
         const bit = +b.dataset.button;
         b.addEventListener("pointerdown", e =>
@@ -458,12 +506,11 @@ function watch_buttons(emulator)
         b.addEventListener("pointercancel", up);
         b.addEventListener("contextmenu", e => e.preventDefault());
     }
-    const KEYS = { ArrowLeft: 1, Escape: 1, Backspace: 1, ArrowUp: 2, ArrowRight: 4, Enter: 4, ArrowDown: 8 };
     const key = (e, down) =>
     {
         const bit = KEYS[e.key];
         if(!bit || e.ctrlKey || e.metaKey || e.altKey) return;
-        if(e.target instanceof Element && e.target.closest("input, textarea, select, dialog")) return;
+        if(e.target instanceof Element && e.target.closest("input, textarea, select, dialog, .xterm")) return;
         e.preventDefault();
         if(down) held.add(e.key); else held.delete(e.key);
         keys = [...held].reduce((v, k) => v | KEYS[k], 0);
@@ -472,6 +519,62 @@ function watch_buttons(emulator)
     document.addEventListener("keydown", e => key(e, true));
     document.addEventListener("keyup", e => key(e, false));
     window.addEventListener("blur", () => { held.clear(); keys = 0; update(); });
+}
+
+// The card10 badge: its firmware (tools/a64-site/card10) on v86's Cortex-M
+// core, both of its cores (src/cm/src/dev/max32665.rs): the display, the four
+// buttons, and its serial port (UART0) in the console, both ways
+const CARD10_KEYS = { Escape: 8, ArrowLeft: 1, ArrowUp: 1, ArrowRight: 2, ArrowDown: 2, Enter: 4 };
+
+async function start_card10(build, base, status)
+{
+    document.getElementById("linux-about").hidden = true;
+    document.getElementById("card10").hidden = false;
+    document.querySelector("h1").textContent = "v86 card10";
+    document.title = "v86 card10";
+    document.getElementById("card10-about").innerHTML = build.about || "";
+    status.textContent = "Downloading the firmware";
+    const fetch_buffer = async (file, gz) =>
+    {
+        const response = await fetch(base + file);
+        if(!response.ok) throw new Error(file + ": " + response.status);
+        const body = gz ? response.body.pipeThrough(new DecompressionStream("gzip")) : response.body;
+        return new Response(body).arrayBuffer();
+    };
+    const [epicardium, pycardium, fat] = await Promise.all([
+        fetch_buffer(build.firmware, false), fetch_buffer(build.core1, false), fetch_buffer(build.spi, build.spi.endsWith(".gz"))]);
+    const emulator = window.emulator = new V86({
+        arch: "card10",
+        wasm_path: "v86-cm.wasm",
+        bios: { buffer: epicardium },
+        core1: { buffer: pycardium },
+        spi_flash: { buffer: fat },
+        serial_console: { type: "xtermjs", container: document.getElementById("terminal") },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+    setup_console_log(emulator, build);
+    emulator.add_listener("emulator-ready", () => { status.textContent = "Starting"; });
+    // UART0 to the console and back
+    let seen = "";
+    emulator.add_listener("cortex-m-uart0", bytes =>
+    {
+        for(const b of bytes) emulator.emulator_bus.send("serial0-output-byte", b);
+        if(status.textContent !== "Running")
+        {
+            seen = (seen + String.fromCharCode(...bytes)).slice(-200);
+            if(seen.includes("Loading main.py") || seen.includes(">>> ")) status.textContent = "Running";
+        }
+    });
+    // (the console sends from the page's end of the bus: listen at the other)
+    emulator.emulator_bus.register("serial0-input", c =>
+    {
+        emulator.uart_input(0, new Uint8Array([typeof c === "string" ? c.charCodeAt(0) : c]));
+    }, null);
+    draw_watch(emulator, "card10-screen");
+    watch_buttons(emulator, ".card10 button", CARD10_KEYS);
 }
 
 // The console's output, for copying, saving or sharing (copying out of the
