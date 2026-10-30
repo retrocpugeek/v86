@@ -32,4 +32,5 @@ bench-results
 # aarch64 port (native crate)
 src/a64/target/
 src/rv64/target/
+src/cm/target/
 .wrangler/

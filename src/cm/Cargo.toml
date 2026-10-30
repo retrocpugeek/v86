@@ -1,0 +1,26 @@
+[package]
+name = "v86-cm"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+# Standalone, like src/a64 and src/rv64, so the x86 build (root Cargo.toml)
+# is untouched.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+# cdylib produces the browser build (v86-cm.wasm); rlib is used by cmrun.
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "cmrun"
+path = "src/bin/cmrun.rs"
+
+[profile.dev]
+opt-level = 2
+overflow-checks = false
+
+[profile.release]
+opt-level = 3
+debug = 1
