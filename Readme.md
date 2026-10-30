@@ -53,9 +53,8 @@ Each core's README ([AArch64](src/a64/README.md), [RISC-V](src/rv64/README.md))
 covers building and testing it.
 
 **Branches:** [`ports`](https://github.com/retrocpugeek/v86/tree/ports) is the
-fork's trunk, with both ports and all three sites;
-[`riscv-port`](https://github.com/retrocpugeek/v86/tree/riscv-port) is where
-RISC-V work happens before it's merged back; `master` mirrors upstream.
+fork's main branch, with both ports and all three sites; `master` mirrors
+upstream.
 
 The ports were written with Claude Opus 5.5 (Anthropic's model) in Claude
 Code. The original v86 and its x86 emulation are the work of the upstream
