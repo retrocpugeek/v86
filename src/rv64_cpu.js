@@ -730,6 +730,76 @@ RV64CPU.prototype.ch32_display = function(last_frame)
 };
 
 /**
+ * CH32V: put an ST7735 colour LCD on SPI1 (dev/st7735.rs), its chip select,
+ * data/command and reset on these pins (port * 16 + pin; port 0 is GPIOA).
+ * It stays across resets.
+ * @param {number} cs
+ * @param {number} dc
+ * @param {number} rst
+ */
+RV64CPU.prototype.ch32_attach_lcd = function(cs, dc, rst)
+{
+    if(this.ch32) this.wasm["rv64_ch32_attach_lcd"](cs, dc, rst);
+};
+
+/**
+ * CH32V: the LCD: its frame counter, which changes when what it shows may
+ * have, and its pixels, RGBA row by row (a view into wasm memory, valid
+ * until the next call).
+ * @param {number} last_frame the frame counter of the pixels the caller has
+ * @return {?{frame: number, width: number, height: number, pixels: ?Uint8ClampedArray}}
+ * pixels is null if the frame counter is still last_frame
+ */
+RV64CPU.prototype.ch32_lcd = function(last_frame)
+{
+    if(!this.ch32) return null;
+    const frame = this.wasm["rv64_ch32_lcd_frame"]();
+    if(!frame) return null;
+    const width = 160, height = 80;
+    let pixels = null;
+    if(frame !== last_frame)
+    {
+        // (rendering first: memory may grow meanwhile, replacing its buffer)
+        const ptr = this.wasm["rv64_ch32_lcd_render"]() >>> 0;
+        pixels = new Uint8ClampedArray(this.wasm_memory.buffer, ptr, width * height * 4);
+    }
+    return { frame, width, height, pixels };
+};
+
+/**
+ * CH32V: the tone TIM2 plays (e.g. on a buzzer) and when it changed since
+ * the last call (virtual ms; 0 Hz is silence), and the virtual time now.
+ * @return {{now: number, tones: !Array<{time: number, hz: number}>}}
+ */
+RV64CPU.prototype.ch32_take_tones = function()
+{
+    const tones = [];
+    if(this.ch32)
+    {
+        const n = this.wasm["rv64_ch32_take_tones"]();
+        const a = new Float64Array(this.wasm_memory.buffer, this.wasm["rv64_ch32_tones_ptr"]() >>> 0, n * 2);
+        for(let i = 0; i < n; i++)
+        {
+            tones.push({ time: a[2 * i], hz: a[2 * i + 1] });
+        }
+    }
+    return { now: this.ch32 ? this.wasm["rv64_now_ms"]() : 0, tones };
+};
+
+/**
+ * CH32V: the flash's contents, a view into wasm memory (valid until the
+ * next call), which the firmware may have written (e.g. saved scores); or
+ * null.
+ * @return {?Uint8Array}
+ */
+RV64CPU.prototype.ch32_flash = function()
+{
+    if(!this.ch32) return null;
+    const ptr = this.wasm["rv64_ch32_flash_ptr"]() >>> 0;
+    return ptr ? new Uint8Array(this.wasm_memory.buffer, ptr, this.wasm["rv64_ch32_flash_len"]()) : null;
+};
+
+/**
  * CH32V: record changes of output pins (e.g. a buzzer's), taken with
  * ch32_take_gpio_edges.
  * @param {number} port

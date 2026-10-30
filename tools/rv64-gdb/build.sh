@@ -15,8 +15,9 @@
 #
 # The microcontroller firmware the site's pages debug with it (?debug) goes
 # in /root/mcu/<name>/: each one's ELF and sources, where their debug info
-# names them. Built first: tools/ch32v003/build.sh (Tetris) and
-# tools/ch32v003-gameconsole/build.sh (the game console's games).
+# names them. Built first: tools/ch32v003/build.sh (Tetris),
+# tools/ch32v003-gameconsole/build.sh (the game console's games) and
+# tools/ch32v003-minigameconsole/build.sh (the mini game console's firmware).
 #
 # Output: build/rv64-gdb/rootfs.squashfs, for
 #   tools/rv64-site/add-image.sh with WEB=/gdb-wui/ (see that script).
@@ -64,6 +65,15 @@ for dir in build/ch32v003-gameconsole/src/software/*/; do
     if [ -f "$dir/COPYING.txt" ]; then cp "$dir/COPYING.txt" "$MCU/$game/"; fi
 done
 [ -f "$MCU/tiny_tris/tiny_tris.elf" ] || { echo "no game console ELFs: run tools/ch32v003-gameconsole/build.sh" >&2; exit 1; }
+# The mini game console's project (its sources as the ELF names them), and
+# its licence (Apache-2.0)
+MINI=build/ch32v003-minigameconsole
+[ -f "$MINI/minigameconsole.elf" ] || { echo "no mini game console ELF: run tools/ch32v003-minigameconsole/build.sh" >&2; exit 1; }
+mkdir -p "$MCU/minigameconsole"
+cp -r "$MINI/src/Software/TinyGameConsole/Core" "$MINI/src/Software/TinyGameConsole/Debug" \
+    "$MINI/src/Software/TinyGameConsole/Peripheral" "$MINI/src/Software/TinyGameConsole/Startup" \
+    "$MINI/src/Software/TinyGameConsole/User" "$MINI/src/Software/TinyGameConsole/Ld" \
+    "$MINI/minigameconsole.elf" "$MINI/src/LICENSE" "$MCU/minigameconsole/"
 if grep -rlI /home/ "$MCU" || grep -rl --binary-files=binary "$HOME" "$MCU"; then
     echo "the firmware names this machine's paths (above)" >&2
     exit 1

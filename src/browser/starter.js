@@ -1594,6 +1594,48 @@ V86.prototype.set_adc_input = function(channel, value)
 };
 
 /**
+ * Microcontrollers: put an ST7735 colour LCD on SPI1, with its chip select,
+ * data/command and reset on these pins (port * 16 + pin; port 0 is GPIOA).
+ * @param {number} cs
+ * @param {number} dc
+ * @param {number} rst
+ */
+V86.prototype.attach_lcd = function(cs, dc, rst)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_attach_lcd) cpu.ch32_attach_lcd(cs, dc, rst);
+};
+
+/**
+ * Microcontrollers: the LCD's state; see RV64CPU.ch32_lcd.
+ * @param {number} last_frame
+ */
+V86.prototype.get_lcd_display = function(last_frame)
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_lcd ? cpu.ch32_lcd(last_frame) : null;
+};
+
+/**
+ * Microcontrollers: TIM2's tone changes; see RV64CPU.ch32_take_tones.
+ */
+V86.prototype.take_tones = function()
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_take_tones ? cpu.ch32_take_tones() : { now: 0, tones: [] };
+};
+
+/**
+ * Microcontrollers: the flash's contents (a view, valid until the next
+ * call), or null; see RV64CPU.ch32_flash.
+ */
+V86.prototype.get_flash = function()
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_flash ? cpu.ch32_flash() : null;
+};
+
+/**
  * Microcontrollers: the OLED display's state; see RV64CPU.ch32_display.
  * @param {number} last_frame
  */

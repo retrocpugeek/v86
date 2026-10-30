@@ -14,13 +14,19 @@
 #   BOARD=gameconsole CONTROLS=none MHZ=12 DEBUG=tiny_tris \
 #     tools/rv64-site/add-mcu.sh gameconsole-tris "Game console: Tiny Tris" build/ch32v003-gameconsole/tiny_tris.bin
 #
+#   tools/ch32v003-minigameconsole/build.sh
+#   BOARD=minigameconsole CONTROLS=none MHZ=48 DEBUG=minigameconsole LEDS=PWR:3:0 \
+#     tools/rv64-site/add-mcu.sh minigameconsole "Mini game console: Snake, Pong, Jump Bird, Dino Run" \
+#     build/ch32v003-minigameconsole/minigameconsole.bin
+#
 # ARCH: ch32v003 (default) or ch32v307. CONTROLS: tetris (the default) for
 # on-screen game controls, shell for shell keys and the COMMANDS buttons, or
 # none. COLS x ROWS: the terminal (default 46 x 25). LEDS: label:port:pin,...
 # (port 0 is GPIOA) shown from the GPIO outputs. If <flash>.json (from the
 # build scripts) exists, its sizes go into the manifest, for the page's
 # resource table. BOARD=gameconsole: the CH32V003 game console (an OLED
-# display, buttons and a buzzer instead of a terminal); MHZ: the clock the
+# display, buttons and a buzzer instead of a terminal); minigameconsole: the
+# mini game console (a colour LCD, buttons and a buzzer); MHZ: the clock the
 # firmware sets, for the page. DEBUG: the firmware's project in the gdb-wui
 # image (/root/mcu/<DEBUG>, tools/rv64-gdb/build.sh), e.g. tetris or
 # tiny_tris: the page offers to debug it (?debug) with that image.

@@ -465,6 +465,36 @@ const MCUS = {
             `<a href="https://github.com/tscha70/TinyLanderV1.0">tscha70's</a>, all converted by Stefan Wagner (GPL-3.0); ` +
             "Conway's Life is his own (CC BY-SA 3.0).",
     },
+    minigameconsole: {
+        name: "CH32V003 Mini Game Console",
+        mhz: 48,
+        hw: [
+            ["Board", `Maksym Curul's <a href="https://github.com/max7d3/CH32V003-MiniGameConsole">CH32V003 Mini Game Console</a>`],
+            ["Microcontroller", "WCH CH32V003F4P6 (20 pins)"],
+            ["CPU", "QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter, an instruction per clock cycle)"],
+            ["Clock", "@MHZ MHz (24 MHz internal oscillator, doubled by the PLL)"],
+            ["Flash", "16 KB (16,384 bytes) at 0x0800 0000, also at 0; its last 64 bytes keep the high scores"],
+            ["SRAM", "2 KB (2,048 bytes) at 0x2000 0000"],
+            ["Display", "ST7735 80 x 160 IPS colour LCD on SPI1 (PC5, PC6; select PC2, data/command PC4, reset PC3) at 24 MHz, " +
+                "drawn in 8 x 8 blocks sent by DMA"],
+            ["Buttons", "Up PD2, down PC1, left PC7, right PD3, action PD4: pulled up, low when pressed"],
+            ["Buzzer", "TIM2's PWM (channel 3, PC0): its tone played with Web Audio"],
+            ["Peripherals", "SysTick, PFIC, RCC clocks, GPIO, SPI1 (master transmitter), DMA1 channel 3 to SPI1, " +
+                "TIM2 (PWM), the flash interface (fast page erase and programming)"],
+        ],
+        timing: "SysTick interrupts every millisecond (1 kHz) for the frame timing and the sound; DMA1 channel 3's " +
+            "interrupt ends each block sent to the LCD",
+        about: "Maksym Curul's CH32V003 Mini Game Console: a 10-cent RISC-V microcontroller with a colour LCD, " +
+            "emulated by v86's RISC-V core with its display, buttons and buzzer. Its firmware, with Snake, Pong, " +
+            "Jump Bird and Dino Run at 30 frames a second, is " +
+            `<a href="https://github.com/max7d3/CH32V003-MiniGameConsole/tree/edf7314/Software/TinyGameConsole">built from its source</a> ` +
+            `(Apache-2.0; <a href="${SRC}ch32v003-minigameconsole">build script</a>). High scores are saved in its flash, ` +
+            "which this browser keeps.",
+        // The LCD (pins: port * 16 + pin), the buttons and the flash page to keep
+        lcd: { cs: 2 * 16 + 2, dc: 2 * 16 + 4, rst: 2 * 16 + 3 },
+        buttons: { n: [3, 2], s: [2, 1], w: [2, 7], e: [3, 3], fire: [3, 4] },
+        keep_flash: [0x3fc0, 64],
+    },
     ch32v307: {
         name: "CH32V307",
         mhz: 144,
@@ -494,9 +524,10 @@ const MCUS = {
 function start_mcu(build, base, status, gdb_build, manifest)
 {
     const mcu = MCUS[build.board || build.arch];
-    if(build.board === "gameconsole")
+    if(build.board === "gameconsole" || build.board === "minigameconsole")
     {
-        start_game_console(build, base, status, mcu, gdb_build, manifest);
+        start_game_console(build, base, status, mcu, gdb_build, manifest)
+            .catch(e => { status.textContent = "Failed to start: " + e.message; });
         return;
     }
     const cols = build.cols || 46, rows = build.rows || 25;
@@ -539,9 +570,12 @@ function start_mcu(build, base, status, gdb_build, manifest)
     show_mcu_info(emulator, mcu, build);
 }
 
-// The CH32V003 game console (tools/ch32v003-gameconsole): the OLED display
-// (src/rv64/src/dev/ssd1306.rs) on a canvas, the buttons and the buzzer.
-function start_game_console(build, base, status, mcu, gdb_build, manifest)
+// The CH32V003 game consoles: Stefan Wagner's (tools/ch32v003-gameconsole),
+// its OLED display (src/rv64/src/dev/ssd1306.rs) on a canvas, its buttons
+// and buzzer; and Maksym Curul's (tools/ch32v003-minigameconsole, board
+// "minigameconsole"), its colour LCD (src/rv64/src/dev/st7735.rs), buttons
+// and TIM2's tone, with its flash's high scores kept in this browser.
+async function start_game_console(build, base, status, mcu, gdb_build, manifest)
 {
     const about = document.getElementById("mcu-about");
     about.innerHTML = mcu.about;
@@ -550,10 +584,27 @@ function start_game_console(build, base, status, mcu, gdb_build, manifest)
     document.getElementById("console").hidden = false;
     document.querySelector("h1").textContent = "v86 " + mcu.name;
     document.title = "v86 " + mcu.name + ": " + build.label.replace(/^.*: /, "");
+    const lcd = !!mcu.lcd;
+    let bios = { url: base + build.bios }, kept = null;
+    if(mcu.keep_flash)
+    {
+        // The flash as this browser last kept it
+        const image = new Uint8Array(await (await fetch(base + build.bios)).arrayBuffer());
+        const flash = new Uint8Array(16384).fill(0xff);
+        flash.set(image);
+        kept = restore_flash(build, mcu.keep_flash, flash);
+        bios = { buffer: flash.buffer };
+    }
+    if(lcd)
+    {
+        document.getElementById("oled").setAttribute("aria-label", "The LCD");
+        document.getElementById("fire").textContent = "A";
+        document.getElementById("console-note").textContent = "Keyboard: arrows or WASD, space, Z or Enter for A.";
+    }
     const emulator = window.emulator = new V86({
         arch: build.arch,
         wasm_path: "v86-rv64.wasm",
-        bios: { url: base + build.bios },
+        bios,
         // held at reset for the debugger
         autostart: !gdb_build,
         disable_keyboard: true,
@@ -564,11 +615,137 @@ function start_game_console(build, base, status, mcu, gdb_build, manifest)
     emulator.add_listener("emulator-ready", () =>
     {
         if(!gdb_build) status.textContent = "Running";
-        draw_oled(emulator);
-        setup_console_buttons(emulator);
-        setup_buzzer(emulator);
+        if(lcd)
+        {
+            emulator.attach_lcd(mcu.lcd.cs, mcu.lcd.dc, mcu.lcd.rst);
+            draw_lcd(emulator);
+            setup_console_buttons(emulator, mcu.buttons);
+            setup_tone(emulator);
+            keep_flash(emulator, build, mcu.keep_flash, kept);
+        }
+        else
+        {
+            draw_oled(emulator);
+            setup_console_buttons(emulator);
+            setup_buzzer(emulator);
+        }
     });
     show_mcu_info(emulator, mcu, build);
+}
+
+// What the firmware saves in its flash (offset, length), kept in this
+// browser's local storage per build: put back into the flash image before
+// the machine starts, and saved when it changes.
+function flash_key(build) { return "v86-riscv-flash:" + build.id; }
+
+const flash_hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+
+// Returns what the flash page holds now, in hex.
+function restore_flash(build, [offset, length], flash)
+{
+    try
+    {
+        const saved = localStorage.getItem(flash_key(build));
+        if(saved && saved.length === 2 * length)
+        {
+            for(let i = 0; i < length; i++) flash[offset + i] = parseInt(saved.substr(2 * i, 2), 16);
+        }
+    }
+    catch(e) {}
+    return flash_hex(flash.subarray(offset, offset + length));
+}
+
+function keep_flash(emulator, build, [offset, length], last)
+{
+    setInterval(() =>
+    {
+        const flash = emulator.get_flash();
+        if(!flash) return;
+        const hex = flash_hex(flash.subarray(offset, offset + length));
+        if(hex !== last)
+        {
+            try { localStorage.setItem(flash_key(build), hex); } catch(e) {}
+            last = hex;
+        }
+    }, 1000);
+}
+
+// The colour LCD, redrawn when it changes.
+function draw_lcd(emulator)
+{
+    const canvas = document.getElementById("oled");
+    let frame = 0, ctx = null, image = null;
+    const draw = () =>
+    {
+        const d = emulator.get_lcd_display(frame);
+        if(d && d.pixels)
+        {
+            frame = d.frame;
+            if(!ctx)
+            {
+                canvas.width = d.width;
+                canvas.height = d.height;
+                ctx = canvas.getContext("2d");
+                image = ctx.createImageData(d.width, d.height);
+            }
+            image.data.set(d.pixels);
+            ctx.putImageData(image, 0, 0);
+        }
+        requestAnimationFrame(draw);
+    };
+    draw();
+}
+
+// The buzzer, on a timer's PWM output: the tone it plays, as the machine's
+// time says, a little later (the latency) than it happened.
+function setup_tone(emulator)
+{
+    const button = document.getElementById("sound");
+    let on = true, audio = null, gain = null, osc = null, offset = null;
+    const start_audio = () =>
+    {
+        if(audio || !on) return;
+        const Ctx = window.AudioContext || window["webkitAudioContext"];
+        if(!Ctx) return;
+        audio = new Ctx();
+        gain = audio.createGain();
+        gain.gain.value = 0;
+        gain.connect(audio.destination);
+        osc = audio.createOscillator();
+        osc.type = "square";
+        osc.connect(gain);
+        osc.start();
+    };
+    for(const ev of ["pointerdown", "keydown"])
+    {
+        document.addEventListener(ev, () => { start_audio(); if(audio && audio.state === "suspended") audio.resume(); }, true);
+    }
+    button.addEventListener("click", () =>
+    {
+        on = !on;
+        button.textContent = "Sound: " + (on ? "on" : "off");
+        if(!on && gain)
+        {
+            gain.gain.cancelScheduledValues(0);
+            gain.gain.setValueAtTime(0, audio.currentTime);
+        }
+    });
+    setInterval(() =>
+    {
+        const { now, tones } = emulator.take_tones();
+        if(!audio || !on || audio.state !== "running")
+        {
+            offset = null;
+            return;
+        }
+        if(offset === null || Math.abs(now / 1000 - audio.currentTime - offset) > 0.25) offset = now / 1000 - audio.currentTime;
+        for(const t of tones)
+        {
+            const at = Math.max(t.time / 1000 - offset + BUZZER_LATENCY, audio.currentTime);
+            if(t.hz) osc.frequency.setValueAtTime(Math.min(t.hz, 12000), at);
+            gain.gain.setValueAtTime(t.hz ? 0.08 : 0, at);
+        }
+    }, 25);
 }
 
 // Debugging the firmware with gdb-wui (?debug, for builds with "debug": the
@@ -671,7 +848,9 @@ const PAD_ADC = { n: 197, ne: 259, e: 90, se: 388, s: 346, sw: 616, w: 511, nw: 
 // Fire: PA2, pulled up, low when pressed
 const FIRE_PORT = 0, FIRE_PIN = 2;
 
-function setup_console_buttons(emulator)
+// pins: buttons on GPIO pins instead, pulled up and low when pressed:
+// { n: [port, pin], s, w, e, fire }
+function setup_console_buttons(emulator, pins)
 {
     const dpad = document.getElementById("dpad");
     const fire = document.getElementById("fire");
@@ -681,14 +860,25 @@ function setup_console_buttons(emulator)
     {
         const held = new Set([...touch, ...keys]);
         const v = (held.has("n") ? "n" : held.has("s") ? "s" : "") + (held.has("e") ? "e" : held.has("w") ? "w" : "");
-        emulator.set_adc_input(2, PAD_ADC[v] || 0);
         for(const d of ["n", "s", "e", "w"])
         {
             dpad.querySelector("." + d).classList.toggle("down", v.includes(d));
         }
         const firing = touch_fire || key_fire;
-        emulator.set_gpio_in(FIRE_PORT, firing ? 1 << FIRE_PIN : 0, 0);
         fire.classList.toggle("down", firing);
+        if(pins)
+        {
+            // Each port's pressed buttons driven low
+            const low = [0, 0, 0, 0, 0];
+            for(const [b, [port, pin]] of Object.entries(pins))
+            {
+                if(b === "fire" ? firing : v.includes(b)) low[port] |= 1 << pin;
+            }
+            low.forEach((mask, port) => emulator.set_gpio_in(port, mask, 0));
+            return;
+        }
+        emulator.set_adc_input(2, PAD_ADC[v] || 0);
+        emulator.set_gpio_in(FIRE_PORT, firing ? 1 << FIRE_PIN : 0, 0);
     };
     // The D-pad: the direction from its centre (8 ways), while touched
     const aim = e =>

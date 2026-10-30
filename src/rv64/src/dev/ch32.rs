@@ -15,15 +15,21 @@
 //! the RTC (seconds counter, from the host's time) and backup registers;
 //! I2C1 as a bus master transmitter, at the bus's speed, with an SSD1306 OLED
 //! display on it (dev/ssd1306.rs), fed by the CPU or by DMA1 channel 6
-//! (with its transfer complete interrupt on the V003); ADC1's software-started conversions, of
-//! values the host sets (e.g. for buttons on a resistor ladder); GPIO inputs
-//! the host drives, and edges on output pins it watches (e.g. a buzzer).
-//! Other peripheral registers (AFIO, flash interface, ...) hold what's
-//! written.
+//! (with its transfer complete interrupt on the V003); SPI1 as a master
+//! transmitter, at its clock's speed, to an ST7735 colour LCD (dev/st7735.rs)
+//! on the pins the host names (chip select, data/command, reset), fed by the
+//! CPU or by DMA1 channel 3 (with its interrupt, on the V003); ADC1's
+//! software-started conversions, of values the host sets (e.g. for buttons
+//! on a resistor ladder); GPIO inputs the host drives, and edges on output
+//! pins it watches (e.g. a buzzer); TIM2's PWM output as the tone it plays
+//! (e.g. on a buzzer), for the host; the flash interface's fast (64-byte)
+//! page erase and programming, and 1 KB page erase (for saving data). Other
+//! peripheral registers (AFIO, PWR, ...) hold what's written.
 //!
 //! Not modelled: interrupt nesting and preemption by priority, the RV32E
-//! register limit, timers, I2C reception and interrupts, SPI, other DMA
-//! channels, USB, Ethernet, flash programming.
+//! register limit, timer counters and interrupts, I2C reception and
+//! interrupts, SPI reception, other DMA channels, USB, Ethernet, flash
+//! locking and standard (16-bit) programming.
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -32,6 +38,7 @@ use std::sync::{Arc, Mutex};
 use crate::bus::Bus;
 use crate::cpu::{Cpu, PRV_M};
 use crate::dev::ssd1306::{self, Ssd1306};
+use crate::dev::st7735::St7735;
 
 pub const FLASH_BASE: u64 = 0x0800_0000;
 pub const SRAM_BASE: u64 = 0x2000_0000;
@@ -71,6 +78,14 @@ impl Chip {
             Chip::V307 => u32::MAX,
         }
     }
+
+    /// DMA1 channel 3's interrupt (modelled for the V003 only)
+    fn dma1_ch3_irq(self) -> u32 {
+        match self {
+            Chip::V003 => 24,
+            Chip::V307 => u32::MAX,
+        }
+    }
 }
 const PFIC_BASE: u64 = 0xe000_e000;
 const SYSTICK_BASE: u64 = 0xe000_f000;
@@ -91,6 +106,9 @@ const RCC_BASE: u64 = 0x4002_1000;
 const I2C1_BASE: u64 = 0x4000_5400;
 const ADC1_BASE: u64 = 0x4001_2400;
 const DMA1_BASE: u64 = 0x4002_0000;
+const SPI1_BASE: u64 = 0x4001_3000;
+const TIM2_BASE: u64 = 0x4000_0000;
+const FLASH_R_BASE: u64 = 0x4002_2000;
 /// DMA1 channel 6's registers (CFGR, CNTR, PADDR, MADDR), I2C1's transmit
 /// channel
 const DMA_CH6: u64 = 0x6c;
@@ -101,6 +119,27 @@ const DMA_DIR: u32 = 1 << 4;
 const DMA_GIF6: u32 = 1 << 20;
 const DMA_TCIF6: u32 = 1 << 21;
 const I2C_DMAEN: u32 = 1 << 11;
+/// DMA1 channel 3's registers, SPI1's transmit channel, and its INTFR flags
+const DMA_CH3: u64 = 0x30;
+const DMA_GIF3: u32 = 1 << 8;
+const DMA_TCIF3: u32 = 1 << 9;
+// SPI CTLR1, CTLR2 and STATR bits
+const SPI_SPE: u32 = 1 << 6;
+const SPI_DFF: u32 = 1 << 11;
+const SPI_TXDMAEN: u32 = 1 << 1;
+const SPI_TXE: u32 = 1 << 1;
+const SPI_BSY: u32 = 1 << 7;
+// Flash interface CTLR bits, and its fast programming page
+const FLASH_PER: u32 = 1 << 1;
+const FLASH_STRT: u32 = 1 << 6;
+const FLASH_PAGE_PG: u32 = 1 << 16;
+const FLASH_PAGE_ER: u32 = 1 << 17;
+const FLASH_BUF_LOAD: u32 = 1 << 18;
+const FLASH_BUF_RST: u32 = 1 << 19;
+const FLASH_PAGE: usize = 64;
+/// Tone changes kept for the host (Ch32::take_tones) before the oldest are
+/// dropped
+const MAX_TONES: usize = 4096;
 
 pub const IRQ_SYSTICK: u32 = 12;
 /// SysTick's software interrupt (CTLR.SWIE)
@@ -176,6 +215,24 @@ struct I2c {
     dma_queue: VecDeque<u8>,
 }
 
+/// SPI1 as a master transmitter, to the LCD.
+#[derive(Default)]
+struct Spi {
+    ctlr1: u32,
+    ctlr2: u32,
+    /// The words written are sent by then (ns)
+    busy_until: u64,
+    /// A DMA transfer (channel 3) completes then (ns)
+    dma_done_at: Option<u64>,
+}
+
+/// A change to what the flash holds, for the bus to make: the bytes at an
+/// offset into it
+pub enum FlashOp {
+    Erase(usize, usize),
+    Program(usize, [u8; FLASH_PAGE]),
+}
+
 /// ADC1, converting on software start (SWSTART).
 #[derive(Default)]
 struct Adc {
@@ -234,9 +291,22 @@ pub struct Ch32 {
     /// DMA1's registers by offset / 4 (INTFR is dma_intfr)
     dma: [u32; 40],
     dma_intfr: u32,
-    /// A transfer DMA1 channel 6 is to start: its memory address and length;
-    /// the bus reads the bytes and hands them over (dma_supply)
-    dma_request: Option<(u32, u32)>,
+    /// A transfer DMA1 channel 6 or 3 is to start: the channel, its memory
+    /// address and length in bytes; the bus reads the bytes and hands them
+    /// over (dma_supply)
+    dma_request: Option<(u8, u32, u32)>,
+    dma_supply_ch: u8,
+    spi: Spi,
+    /// The LCD on SPI1, and its pins (port, pin): chip select (low to
+    /// select), data/command (high for data) and reset (low to reset)
+    pub lcd: Option<St7735>,
+    pub lcd_pins: [(usize, u32); 3],
+    /// TIM2's tone (Hz, 0 for none), and its changes (time in ns, Hz)
+    tone: u32,
+    tones: VecDeque<(u64, u32)>,
+    /// The flash interface's page buffer, and a change for the bus to make
+    flash_buf: [u8; FLASH_PAGE],
+    flash_op: Option<FlashOp>,
 }
 
 impl Ch32 {
@@ -282,7 +352,22 @@ impl Ch32 {
             dma: [0; 40],
             dma_intfr: 0,
             dma_request: None,
+            dma_supply_ch: 0,
+            spi: Spi::default(),
+            lcd: None,
+            lcd_pins: [(0, 0); 3],
+            tone: 0,
+            tones: VecDeque::new(),
+            flash_buf: [0xff; FLASH_PAGE],
+            flash_op: None,
         }
+    }
+
+    /// Put an ST7735 LCD on SPI1, its chip select, data/command and reset
+    /// on these pins (port, pin; port 0 is GPIOA).
+    pub fn attach_lcd(&mut self, cs: (usize, u32), dc: (usize, u32), rst: (usize, u32)) {
+        self.lcd = Some(St7735::default());
+        self.lcd_pins = [cs, dc, rst];
     }
 
     /// Does pa belong to a peripheral modelled here?
@@ -360,6 +445,7 @@ impl Ch32 {
     /// the count from 0 with STRE).
     pub fn update(&mut self, now: u64) {
         self.i2c_update(now);
+        self.spi_update(now);
         while now >= self.stk_next {
             self.invalidate();
             self.stk_sr |= 1;
@@ -375,7 +461,7 @@ impl Ch32 {
     }
 
     /// When update() next has something to do (ns), or u64::MAX: SysTick,
-    /// and while DMA feeds I2C1, its bytes.
+    /// while DMA feeds I2C1, its bytes, and the end of a DMA transfer to SPI1.
     pub fn next_event_ns(&self) -> u64 {
         let i2c = &self.i2c;
         let dma = if i2c.dma_queue.is_empty() && i2c.dr.is_none() {
@@ -387,7 +473,7 @@ impl Ch32 {
         } else {
             u64::MAX
         };
-        self.stk_next.min(dma)
+        self.stk_next.min(dma).min(self.spi.dma_done_at.unwrap_or(u64::MAX))
     }
 
     /// USART1's status register.
@@ -407,6 +493,9 @@ impl Ch32 {
             _ if n == self.chip.usart1_irq() => self.usart_statr() & self.usart_ctlr1 & (USART_RXNE | USART_TC | USART_TXE) != 0,
             _ if n == self.chip.dma1_ch6_irq() => {
                 self.dma_intfr & DMA_TCIF6 != 0 && self.dma[(DMA_CH6 / 4) as usize] & DMA_TCIE != 0
+            }
+            _ if n == self.chip.dma1_ch3_irq() => {
+                self.dma_intfr & DMA_TCIF3 != 0 && self.dma[(DMA_CH3 / 4) as usize] & DMA_TCIE != 0
             }
             _ => false,
         }
@@ -431,7 +520,8 @@ impl Ch32 {
 
     fn compute_pending_irq(&self) -> Option<u32> {
         let enabled = |n: u32| (n as usize) < NUM_IRQS && self.ienr[(n / 32) as usize] >> (n % 32) & 1 != 0;
-        let candidates = [IRQ_SYSTICK, IRQ_SOFTWARE, self.chip.usart1_irq(), self.chip.dma1_ch6_irq()];
+        let candidates =
+            [IRQ_SYSTICK, IRQ_SOFTWARE, self.chip.usart1_irq(), self.chip.dma1_ch6_irq(), self.chip.dma1_ch3_irq()];
         let any_software = self.ipsr.iter().any(|&w| w != 0);
         let software = (0..if any_software { NUM_IRQS as u32 } else { 0 }).filter(|&n| self.ipsr[(n / 32) as usize] >> (n % 32) & 1 != 0);
         candidates
@@ -546,8 +636,25 @@ impl Ch32 {
         if a.wrapping_sub(I2C1_BASE) < 0x400 {
             return self.i2c_read(a - I2C1_BASE, now);
         }
+        if a.wrapping_sub(SPI1_BASE) < 0x400 {
+            self.spi_update(now);
+            let word_ns = self.spi_word_ns();
+            let spi = &self.spi;
+            return match a - SPI1_BASE {
+                0x00 => spi.ctlr1,
+                0x04 => spi.ctlr2,
+                // STATR: room for a word once the one before the last is
+                // sent; busy until the last is
+                0x08 => {
+                    let txe = now + word_ns >= spi.busy_until;
+                    txe as u32 * SPI_TXE | (now < spi.busy_until) as u32 * SPI_BSY
+                }
+                _ => 0,
+            };
+        }
         if a.wrapping_sub(DMA1_BASE) < 0xa0 {
             self.i2c_update(now);
+            self.spi_update(now);
             return match a - DMA1_BASE {
                 0x00 => self.dma_intfr,
                 0x04 => 0,
@@ -738,16 +845,25 @@ impl Ch32 {
     fn dma_check(&mut self) {
         let count = self.dma[(DMA_CH6 / 4 + 1) as usize] & 0xffff;
         if self.dma_ch6_on() && count != 0 && self.i2c.dma_queue.is_empty() && self.dma_request.is_none() {
-            self.dma_request = Some((self.dma[(DMA_CH6 / 4 + 3) as usize], count));
+            self.dma_request = Some((6, self.dma[(DMA_CH6 / 4 + 3) as usize], count));
         }
     }
 
-    /// The transfer the bus is to read for DMA, if one is starting.
-    pub fn take_dma_request(&mut self) -> Option<(u32, u32)> { self.dma_request.take() }
+    /// The transfer the bus is to read for DMA, if one is starting: its
+    /// memory address and length in bytes.
+    pub fn take_dma_request(&mut self) -> Option<(u32, u32)> {
+        let (ch, addr, len) = self.dma_request.take()?;
+        self.dma_supply_ch = ch;
+        Some((addr, len))
+    }
 
     /// The bytes of the transfer requested (read at its start: the CPU
     /// doesn't usually change them while they're being sent).
     pub fn dma_supply(&mut self, bytes: Vec<u8>, now: u64) {
+        if self.dma_supply_ch == 3 {
+            self.spi_dma_supply(bytes, now);
+            return;
+        }
         self.i2c.dma_queue = bytes.into();
         self.dma_feed(now);
         if self.i2c.shifting.is_none() {
@@ -801,10 +917,163 @@ impl Ch32 {
         }
     }
 
+    // ---- SPI1 and DMA1 channel 3 (SPI1 transmit), to the LCD ----
+
+    /// A word's time on the bus (ns): 8 or 16 SCK periods of HCLK (the
+    /// V003's PCLK2) / 2^(BR + 1).
+    fn spi_word_ns(&self) -> u64 {
+        let bits = if self.spi.ctlr1 & SPI_DFF != 0 { 16 } else { 8 };
+        let div = 2u64 << (self.spi.ctlr1 >> 3 & 7);
+        (bits * div * 1_000_000_000 / self.hclk().max(1)).max(1)
+    }
+
+    fn gpio_level(&self, (port, pin): (usize, u32)) -> bool {
+        self.regs.get(&(GPIO_BASE + 0x400 * port as u64 + 0x0c)).copied().unwrap_or(0) >> pin & 1 != 0
+    }
+
+    /// A word to the LCD (most significant byte first), if it's selected.
+    fn spi_send(&mut self, w: u32) {
+        let [cs, dc, _] = self.lcd_pins;
+        if self.lcd.is_none() || self.gpio_level(cs) {
+            return;
+        }
+        let data = self.gpio_level(dc);
+        let lcd = self.lcd.as_mut().unwrap();
+        if self.spi.ctlr1 & SPI_DFF != 0 {
+            lcd.byte((w >> 8) as u8, data);
+        }
+        lcd.byte(w as u8, data);
+    }
+
+    fn spi_write(&mut self, off: u64, v: u32, now: u64) {
+        self.spi_update(now);
+        match off {
+            0x00 => self.spi.ctlr1 = v,
+            0x04 => {
+                self.spi.ctlr2 = v;
+                self.spi_dma_check(now);
+            }
+            0x0c => {
+                if self.spi.ctlr1 & SPI_SPE != 0 {
+                    // Taken at once (the LCD only listens); the bus is busy
+                    // while it's shifted out
+                    self.spi_send(if self.spi.ctlr1 & SPI_DFF != 0 { v & 0xffff } else { v & 0xff });
+                    self.spi.busy_until = self.spi.busy_until.max(now) + self.spi_word_ns();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A DMA transfer to SPI1 has ended: CNTR 0, and its flags.
+    fn spi_update(&mut self, now: u64) {
+        if self.spi.dma_done_at.is_some_and(|t| now >= t) {
+            self.spi.dma_done_at = None;
+            self.dma[(DMA_CH3 / 4 + 1) as usize] = 0;
+            self.dma_intfr |= DMA_GIF3 | DMA_TCIF3;
+            self.invalidate();
+        }
+    }
+
+    /// Channel 3, from memory to SPI1's DATAR, and SPI1's DMA requests, were
+    /// enabled: ask the bus for the transfer's bytes.
+    fn spi_dma_check(&mut self, _now: u64) {
+        let ch = (DMA_CH3 / 4) as usize;
+        let (cfgr, count, paddr) = (self.dma[ch], self.dma[ch + 1] & 0xffff, self.dma[ch + 2]);
+        let on = cfgr & DMA_EN != 0 && cfgr & DMA_DIR != 0 && self.spi.ctlr2 & SPI_TXDMAEN != 0;
+        if on && count != 0 && paddr as u64 == SPI1_BASE + 0x0c && self.spi.dma_done_at.is_none() && self.dma_request.is_none() {
+            let msize = 1 << (cfgr >> 10 & 3);
+            self.dma_request = Some((3, self.dma[ch + 3], count * msize));
+        }
+    }
+
+    /// The transfer's bytes go to the LCD now; it ends when SPI1 would have
+    /// sent them.
+    fn spi_dma_supply(&mut self, bytes: Vec<u8>, now: u64) {
+        let cfgr = self.dma[(DMA_CH3 / 4) as usize];
+        let msize = 1 << (cfgr >> 10 & 3);
+        let words = bytes.len() / msize;
+        for w in bytes.chunks(msize) {
+            let v = w.iter().rev().fold(0u32, |v, &b| v << 8 | b as u32);
+            self.spi_send(if self.spi.ctlr1 & SPI_DFF != 0 { v & 0xffff } else { v & 0xff });
+        }
+        self.spi.busy_until = self.spi.busy_until.max(now) + words as u64 * self.spi_word_ns();
+        self.spi.dma_done_at = Some(self.spi.busy_until);
+    }
+
+    // ---- TIM2's tone ----
+
+    /// The tone TIM2 plays: HCLK / (PSC + 1) / (ATRLR + 1) while it counts
+    /// and a channel's output (CCxE) is on with a duty cycle; recorded when
+    /// it changes.
+    fn tim2_tone(&mut self, now: u64) {
+        let r = |off: u64| self.regs.get(&(TIM2_BASE + off)).copied().unwrap_or(0);
+        let (ctlr1, ccer, psc, arr) = (r(0x00), r(0x20), r(0x28) & 0xffff, r(0x2c) & 0xffff);
+        let duty = (0..4).any(|c| ccer >> (4 * c) & 1 != 0 && r(0x34 + 4 * c as u64) != 0);
+        let hz = if ctlr1 & 1 != 0 && duty && arr != 0 {
+            (self.hclk() / (psc as u64 + 1) / (arr as u64 + 1)) as u32
+        } else {
+            0
+        };
+        if hz != self.tone {
+            self.tone = hz;
+            if self.tones.len() >= MAX_TONES {
+                self.tones.pop_front();
+            }
+            self.tones.push_back((now, hz));
+        }
+    }
+
+    /// Hand over TIM2's tone changes: time (ns), Hz (0: silence).
+    pub fn take_tones(&mut self) -> Vec<(u64, u32)> { self.tones.drain(..).collect() }
+
+    // ---- The flash interface ----
+
+    fn flash_write_reg(&mut self, a: u64, mut v: u32) {
+        if a - FLASH_R_BASE == 0x10 {
+            if v & FLASH_BUF_RST != 0 {
+                self.flash_buf = [0xff; FLASH_PAGE];
+            }
+            if v & FLASH_STRT != 0 {
+                let addr = self.regs.get(&(FLASH_R_BASE + 0x14)).copied().unwrap_or(0) as usize & 0xff_ffff;
+                if v & FLASH_PAGE_ER != 0 {
+                    self.flash_op = Some(FlashOp::Erase(addr & !(FLASH_PAGE - 1), FLASH_PAGE));
+                } else if v & FLASH_PAGE_PG != 0 {
+                    self.flash_op = Some(FlashOp::Program(addr & !(FLASH_PAGE - 1), self.flash_buf));
+                } else if v & FLASH_PER != 0 {
+                    self.flash_op = Some(FlashOp::Erase(addr & !1023, 1024));
+                }
+            }
+            // (each finishes at once: STATR never shows BSY)
+            v &= !(FLASH_STRT | FLASH_BUF_LOAD | FLASH_BUF_RST);
+        }
+        self.regs.insert(a, v);
+    }
+
+    /// A write to the flash (offset into it): in fast programming mode, it
+    /// goes into the page buffer (and BUF_LOAD keeps it there).
+    pub fn flash_store(&mut self, off: usize, size: u32, value: u64) {
+        let ctlr = self.regs.get(&(FLASH_R_BASE + 0x10)).copied().unwrap_or(0);
+        if ctlr & FLASH_PAGE_PG != 0 {
+            for i in 0..size as usize {
+                self.flash_buf[(off + i) % FLASH_PAGE] = (value >> (8 * i)) as u8;
+            }
+        }
+    }
+
+    /// The erase or programming the bus is to do to the flash, if one started.
+    pub fn take_flash_op(&mut self) -> Option<FlashOp> { self.flash_op.take() }
+
     // ---- GPIO edges ----
 
     /// Record port's OUTDR changing from old to new, if it's watched there.
     fn gpio_changed(&mut self, port: usize, old: u32, new: u32, now: u64) {
+        let (rst_port, rst_pin) = self.lcd_pins[2];
+        if port == rst_port && old >> rst_pin & 1 != 0 && new >> rst_pin & 1 == 0 {
+            if let Some(lcd) = self.lcd.as_mut() {
+                lcd.reset();
+            }
+        }
         if (old ^ new) & self.gpio_watch[port] != 0 {
             if self.edges.len() >= MAX_EDGES {
                 self.edges.pop_front();
@@ -944,8 +1213,22 @@ impl Ch32 {
             self.adc_write(a - ADC1_BASE, v);
             return;
         }
+        if a.wrapping_sub(SPI1_BASE) < 0x400 {
+            self.spi_write(a - SPI1_BASE, v, now);
+            return;
+        }
+        if a.wrapping_sub(TIM2_BASE) < 0x400 {
+            self.regs.insert(a, v);
+            self.tim2_tone(now);
+            return;
+        }
+        if a.wrapping_sub(FLASH_R_BASE) < 0x400 {
+            self.flash_write_reg(a, v);
+            return;
+        }
         if a.wrapping_sub(DMA1_BASE) < 0xa0 {
             self.i2c_update(now);
+            self.spi_update(now);
             match a - DMA1_BASE {
                 0x00 => {}
                 // INTFCR: clearing a channel's GIF clears all its flags
@@ -964,7 +1247,11 @@ impl Ch32 {
                         // Disabling the channel ends its transfer
                         self.i2c.dma_queue.clear();
                     }
+                    if off == DMA_CH3 && v & DMA_EN == 0 {
+                        self.spi.dma_done_at = None;
+                    }
                     self.dma_check();
+                    self.spi_dma_check(now);
                 }
             }
             return;

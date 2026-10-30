@@ -5,6 +5,7 @@
 pub mod ch32;
 pub mod rtc;
 pub mod ssd1306;
+pub mod st7735;
 pub mod uart;
 pub mod virtio;
 pub mod virtio_blk;

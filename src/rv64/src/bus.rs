@@ -400,7 +400,11 @@ impl Bus {
     }
 
     fn write_mmio(&mut self, pa: u64, size: u32, value: u64) {
-        if self.has_rom(pa) {
+        if let Some(off) = self.rom_offset(pa) {
+            // The CH32V's flash takes writes only into its programming buffer
+            if let Some(c) = self.ch32.as_mut() {
+                c.flash_store(off, size, value);
+            }
             return;
         }
         if let Some(c) = self.ch32.as_mut() {
@@ -409,6 +413,20 @@ impl Bus {
                 if let Some((addr, len)) = c.take_dma_request() {
                     let bytes = (0..len as u64).map(|i| self.peek(addr as u64 + i)).collect();
                     self.ch32.as_mut().unwrap().dma_supply(bytes, self.now_ns);
+                }
+                // The flash erased or programmed
+                match self.ch32.as_mut().unwrap().take_flash_op() {
+                    Some(crate::dev::ch32::FlashOp::Erase(off, len)) => {
+                        if let Some(b) = self.rom.get_mut(off..off + len) {
+                            b.fill(0xff);
+                        }
+                    }
+                    Some(crate::dev::ch32::FlashOp::Program(off, data)) => {
+                        if let Some(b) = self.rom.get_mut(off..off + data.len()) {
+                            b.copy_from_slice(&data);
+                        }
+                    }
+                    None => {}
                 }
                 return;
             }

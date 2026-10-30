@@ -132,6 +132,10 @@ pub extern "C" fn rv64_init_ch32(chip: u32, ptr: u32, len: u32, epoch_secs: f64)
         *addr_of_mut!(CPU) = None;
         *addr_of_mut!(IRQ_LINES) = [0; NUM_IRQ_LINES + 1];
     }
+    // (and, as a reset does, the flash's contents: what the firmware saved
+    // there, e.g. high scores, stays)
+    #[allow(static_mut_refs)]
+    let old_flash = unsafe { CPU.as_deref_mut() }.filter(|c| c.bus.ch32.is_some()).map(|c| std::mem::take(&mut c.bus.rom));
     let fw = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let out = Box::new(|b: u8| unsafe { rv64_serial_out(b as u32) });
     let chip = if chip == 1 { crate::dev::ch32::Chip::V307 } else { crate::dev::ch32::Chip::V003 };
@@ -139,6 +143,13 @@ pub extern "C" fn rv64_init_ch32(chip: u32, ptr: u32, len: u32, epoch_secs: f64)
     cpu.bus.log_unmapped = false;
     cpu.realtime = true;
     unsafe { *addr_of_mut!(UART_RX) = Some(cpu.bus.ch32.as_ref().unwrap().rx.clone()) };
+    if let Some(flash) = old_flash.filter(|f| f.len() == cpu.bus.rom.len()) {
+        cpu.bus.rom = flash;
+    }
+    #[allow(static_mut_refs)]
+    if let Some([cs, dc, rst]) = unsafe { LCD_PINS } {
+        cpu.bus.ch32.as_mut().unwrap().attach_lcd(cs, dc, rst);
+    }
     if let Some(g) = gdb() {
         g.reattach(&mut cpu, breakpoints);
     }
@@ -219,6 +230,13 @@ fn ch32() -> Option<&'static mut crate::dev::ch32::Ch32> {
 static mut OLED_PIXELS: [u8; crate::dev::ssd1306::WIDTH * crate::dev::ssd1306::HEIGHT] =
     [0; crate::dev::ssd1306::WIDTH * crate::dev::ssd1306::HEIGHT];
 static mut EDGES: Vec<f64> = Vec::new();
+static mut TONES: Vec<f64> = Vec::new();
+/// The ST7735 LCD's pins (port, pin), kept for machines made later (resets)
+static mut LCD_PINS: Option<[(usize, u32); 3]> = None;
+static mut LCD_RGB: [u32; crate::dev::st7735::VIEW_WIDTH * crate::dev::st7735::VIEW_HEIGHT] =
+    [0; crate::dev::st7735::VIEW_WIDTH * crate::dev::st7735::VIEW_HEIGHT];
+static mut LCD_PIXELS: [u8; crate::dev::st7735::VIEW_WIDTH * crate::dev::st7735::VIEW_HEIGHT * 4] =
+    [0; crate::dev::st7735::VIEW_WIDTH * crate::dev::st7735::VIEW_HEIGHT * 4];
 
 /// CH32V: the OLED display's frame counter (changes when what it shows may
 /// have), or 0 if there's no machine.
@@ -240,6 +258,72 @@ pub extern "C" fn rv64_ch32_oled_render() -> u32 {
 /// CH32V: the OLED display's contrast setting (0 to 255).
 #[no_mangle]
 pub extern "C" fn rv64_ch32_oled_contrast() -> u32 { ch32().map_or(0, |c| c.display.contrast as u32) }
+
+/// CH32V: put an ST7735 LCD on SPI1, with its chip select, data/command and
+/// reset on these pins (port * 16 + pin; port 0 is GPIOA).
+#[no_mangle]
+pub extern "C" fn rv64_ch32_attach_lcd(cs: u32, dc: u32, rst: u32) {
+    let pin = |p: u32| ((p / 16) as usize, p % 16);
+    let pins = [pin(cs), pin(dc), pin(rst)];
+    unsafe { *addr_of_mut!(LCD_PINS) = Some(pins) };
+    if let Some(c) = ch32() {
+        c.attach_lcd(pins[0], pins[1], pins[2]);
+    }
+}
+
+/// CH32V: the LCD's frame counter (changes when what it shows may have), or
+/// 0 if there's none.
+#[no_mangle]
+pub extern "C" fn rv64_ch32_lcd_frame() -> u32 { ch32().and_then(|c| c.lcd.as_ref()).map_or(0, |l| l.frame | 1) }
+
+/// CH32V: render the LCD; returns where its pixels are (RGBA, row by row,
+/// st7735::VIEW_WIDTH x VIEW_HEIGHT).
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_lcd_render() -> u32 {
+    let px = unsafe { &mut *addr_of_mut!(LCD_PIXELS) };
+    let rgb = unsafe { &mut *addr_of_mut!(LCD_RGB) };
+    if let Some(lcd) = ch32().and_then(|c| c.lcd.as_ref()) {
+        lcd.render(rgb);
+        for (o, &v) in px.chunks_mut(4).zip(rgb.iter()) {
+            o.copy_from_slice(&[(v >> 16) as u8, (v >> 8) as u8, v as u8, 255]);
+        }
+    }
+    px.as_ptr() as u32
+}
+
+/// CH32V: hand over TIM2's tone changes; returns how many, and
+/// rv64_ch32_tones_ptr() where they are: (virtual time in ms, Hz) as f64s.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_take_tones() -> u32 {
+    let tones = unsafe { &mut *addr_of_mut!(TONES) };
+    tones.clear();
+    if let Some(c) = ch32() {
+        for (t, hz) in c.take_tones() {
+            tones.extend([t as f64 / 1e6, hz as f64]);
+        }
+    }
+    (tones.len() / 2) as u32
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_tones_ptr() -> u32 { unsafe { (*addr_of!(TONES)).as_ptr() as u32 } }
+
+/// CH32V: where the flash's contents are (for the host to keep what the
+/// firmware saves there), or 0; rv64_ch32_flash_len() bytes.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_flash_ptr() -> u32 {
+    unsafe { CPU.as_deref() }.filter(|c| c.bus.ch32.is_some()).map_or(0, |c| c.bus.rom.as_ptr() as u32)
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_flash_len() -> u32 {
+    unsafe { CPU.as_deref() }.filter(|c| c.bus.ch32.is_some()).map_or(0, |c| c.bus.rom.len() as u32)
+}
 
 /// CH32V: drive the pins of GPIO `port` in `mask` to `levels`.
 #[no_mangle]
