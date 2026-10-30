@@ -1,3 +1,68 @@
+## This fork: v86 ports (ARM64 and RISC-V)
+
+This fork of [copy/v86](https://github.com/copy/v86) adds two more machines to
+v86: a 64-bit ARM (AArch64) computer and a RISC-V computer (64- and 32-bit).
+Both boot real Linux images built with Buildroot, with a serial console, a
+virtual disk and networking, entirely client-side. The x86 emulator below is
+upstream's and unchanged.
+
+**Try them:** [landing page](https://v86-ports.turret13.workers.dev) ·
+[ARM64](https://v86-arm.turret13.workers.dev) ·
+[RISC-V](https://v86-riscv.turret13.workers.dev)
+
+**ARM64 (AArch64)**: an ARMv8-A CPU on a QEMU `virt`-like machine (GIC,
+PL011 UART, virtio disk, network and input, a framebuffer), with a JIT that
+compiles hot code to WebAssembly. It runs:
+
+- Buildroot Linux (ext4 and squashfs)
+- [OpenWrt 24.10 with the LuCI web interface](https://v86-arm.turret13.workers.dev/?build=openwrt)
+- [U-Boot booting Linux from the disk](https://v86-arm.turret13.workers.dev/?build=u-boot)
+- [An X11 desktop](https://v86-arm.turret13.workers.dev/?build=x11): openbox, xterm, an on-screen keyboard
+
+**RISC-V (RV64GC and RV32GC)**: a hart with machine, supervisor and user
+modes, Sv39 and Sv32 paging, CLINT, PLIC, a 16550 UART and virtio devices,
+started by OpenSBI. It passes the riscv-tests ISA suites, is checked
+instruction by instruction against QEMU, and has a JIT. It runs:
+
+- Buildroot Linux, riscv64 and riscv32
+- [Tetris on a WCH CH32V003 microcontroller](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris) (RV32EC, 2 KB of RAM), with touch controls on phones
+- [Stefan Wagner's CH32V003 Mini Game Console](https://v86-riscv.turret13.workers.dev/?build=gameconsole-tris) ([source](https://github.com/wagiminator/CH32V003-GameConsole)), with its OLED display, buttons and buzzer, and six games
+- [The RT-Thread shell on a WCH CH32V307](https://v86-riscv.turret13.workers.dev/?build=ch32v307-rtthread) (RV32IMAFC)
+
+**Debugging in the browser**: both sites have an image that runs
+[gdb-wui](https://github.com/retrocpugeek/gdb-wui), a web UI for GDB, inside
+the guest next to the console ([ARM64](https://v86-arm.turret13.workers.dev/?build=gdb-wui),
+[RISC-V](https://v86-riscv.turret13.workers.dev/?build=gdb-wui)). Its Decompiled
+view uses [kuna](https://github.com/Noelo-Lab/kuna), run as WebAssembly by the
+page. The RISC-V core also has a GDB stub, so adding `&debug` to a CH32V003
+page ([Tetris](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&debug))
+debugs the microcontroller's firmware in gdb-wui: breakpoints in flash,
+stepping through the C source, registers and `monitor reset halt`.
+
+**Where things are:**
+
+| Path | Contents |
+|---|---|
+| [`src/a64`](src/a64), [`src/a64_cpu.js`](src/a64_cpu.js) | The AArch64 core (Rust, built to `build/v86-a64.wasm`) and its glue |
+| [`src/rv64`](src/rv64), [`src/rv64_cpu.js`](src/rv64_cpu.js) | The RISC-V core and the CH32V microcontrollers (`build/v86-rv64.wasm`) |
+| [`tools/a64-site`](tools/a64-site), [`tools/rv64-site`](tools/rv64-site), [`tools/landing-site`](tools/landing-site) | The three websites (Cloudflare Workers) and the scripts that build their images |
+| [`tools/gdb-wui-guest`](tools/gdb-wui-guest), [`tools/kuna-web`](tools/kuna-web) | gdb-wui in the guest, and kuna for the page |
+| [`tests/a64`](tests/a64), [`tests/rv64`](tests/rv64), [`tests/guest-web`](tests/guest-web) | Boot, microcontroller and page tests |
+
+Each core's README ([AArch64](src/a64/README.md), [RISC-V](src/rv64/README.md))
+covers building and testing it.
+
+**Branches:** [`ports`](https://github.com/retrocpugeek/v86/tree/ports) is the
+fork's trunk, with both ports and all three sites;
+[`riscv-port`](https://github.com/retrocpugeek/v86/tree/riscv-port) is where
+RISC-V work happens before it's merged back; `master` mirrors upstream.
+
+The ports were written with Claude Opus 5.5 (Anthropic's model) in Claude
+Code. The original v86 and its x86 emulation are the work of the upstream
+project's authors; the rest of this README is upstream's.
+
+---
+
 [![Join the chat at https://gitter.im/copy/v86](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/copy/v86) or #v86 on [irc.libera.chat](https://libera.chat/)
 
 v86 emulates an x86-compatible CPU and hardware. Machine code is translated to
