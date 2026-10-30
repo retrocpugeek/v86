@@ -311,7 +311,7 @@ code { color: var(--fg); }
   Log in as <code>root</code>. Disk changes stay in this tab.
   Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
   isn't supported (<code>?relay=wisps://…</code> selects a full network relay).
-  <a href="https://github.com/retrocpugeek/v86/tree/riscv-port">Source</a>
+  <a href="https://github.com/retrocpugeek/v86/tree/ports">Source</a>
 </footer>
 
 <script>
@@ -423,7 +423,7 @@ function start_linux(build, kernel, container, cmdline_extra)
 
 // The emulated microcontrollers (src/rv64/src/dev/ch32.rs): specs for the
 // page, the clock CPU load is measured against, what the firmware does.
-const SRC = "https://github.com/retrocpugeek/v86/tree/riscv-port/tools/";
+const SRC = "https://github.com/retrocpugeek/v86/tree/ports/tools/";
 const MCUS = {
     ch32v003: {
         name: "CH32V003",
