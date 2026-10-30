@@ -15,7 +15,8 @@
 //! nothing models (its first access); CARD10_DUMP=1 prints both cores'
 //! state at the end; CARD10_I2C=1 logs I2C transfers; CARD10_SAMPLE=1
 //! prints core 0's pc every 10,000 instructions (where it spends its time);
-//! CARD10_PEEK=addr,... prints words of memory at the end.
+//! CARD10_PEEK=addr,... prints words of memory at the end; CARD10_TRACE=1
+//! counts the API calls and interrupts between the cores.
 
 use std::io::Write;
 
@@ -90,6 +91,9 @@ fn main() {
     });
     max32665::log_registers(&mut m, std::env::var("CARD10_REGS").is_ok());
     max32665::log_i2c(&mut m, std::env::var("CARD10_I2C").is_ok());
+    if std::env::var("CARD10_TRACE").is_ok() {
+        m.trace = Some(Default::default());
+    }
     let start = std::time::Instant::now();
     let end_ns = (seconds * 1e9) as u64;
     let mut stdout = std::io::stdout();
@@ -145,6 +149,18 @@ fn main() {
                 eprintln!("card10run: stopped ({s:?}) at {:.3} s", m.now_ns() as f64 / 1e9);
                 break;
             }
+        }
+    }
+    if let Some(t) = m.trace.as_ref() {
+        // calls and interrupts by id, and the cores' time awake
+        let mut counts = std::collections::BTreeMap::new();
+        for &(_, kind, id) in &t.events {
+            *counts.entry((kind, id)).or_insert(0) += 1;
+        }
+        let secs = m.now_ns() as f64 / 1e9;
+        eprintln!("trace: core 0 awake {:.1} s, core 1 {:.1} s of {secs:.1} s", t.awake_ns[0] as f64 / 1e9, t.awake_ns[1] as f64 / 1e9);
+        for ((kind, id), n) in counts {
+            eprintln!("trace: {} {id:#x}: {n}", ["call", "return", "interrupt"][kind as usize]);
         }
     }
     if let Ok(a) = std::env::var("CARD10_PEEK") {

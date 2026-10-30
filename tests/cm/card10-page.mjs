@@ -1,6 +1,7 @@
 // The v86-arm site's card10 badge (?build=card10) in headless Chrome: its
 // firmware must start (the page's status says Running once Pycardium loads
-// main.py), the display must show the clock, the on-screen MENU button the
+// main.py), the display must show the clock, the cores' view its API calls
+// (named), the on-screen MENU button the
 // menu, the keyboard's Esc and Enter must work, and MicroPython's REPL must
 // answer through the console (UART0, both ways); no page exceptions.
 //
@@ -103,6 +104,11 @@ async function main()
     const clock2 = await screen();
     console.log(`clock: ${clock.lit} lit of ${clock.total}, ${clock.hash !== clock2.hash ? "moving" : "still"}`);
     if(clock.lit < 100 || clock.lit > clock.total / 2) throw new Error("no clock face");
+    // The cores' view: API calls seen, by name
+    const calls = +(await ev("document.getElementById('cores-calls').textContent")) || 0;
+    const busiest = await ev("document.querySelector('#cores-top tbody td')?.innerText || ''");
+    console.log(`cores: ${calls} API calls/s, the busiest ${busiest}`);
+    if(calls < 10 || !busiest.startsWith("epic_")) throw new Error("the cores' view shows no named API calls");
     // The on-screen MENU button: the menu (a blue list)
     const r = await ev(`(() => { const b = document.querySelector('.card10 button[data-button="8"]').getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; })()`);
     await send("Input.dispatchMouseEvent", { type: "mousePressed", x: r[0], y: r[1], button: "left", clickCount: 1 });

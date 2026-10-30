@@ -107,6 +107,7 @@ fn card10_reset() {
                 c.log_unimplemented = false;
                 c.warp_ns = now;
             }
+            n.trace = m.trace.take().map(|_| Default::default());
             **m = n;
         }
     }
@@ -213,6 +214,41 @@ pub extern "C" fn cm_set_clock_scale(scale: f64) {
         }
     }
 }
+
+/// Watch the card10's cores (dev/max32665.rs, Trace), or stop.
+#[no_mangle]
+pub extern "C" fn cm_trace(on: u32) {
+    if let Some(m) = card10() {
+        m.trace = (on != 0).then(Default::default);
+    }
+}
+
+static mut TRACE_OUT: Vec<f64> = Vec::new();
+
+/// What the cores did since the last call: returns how many f64s there are
+/// at cm_trace_ptr(): the machine's time (ms), core 0's and core 1's time
+/// awake (ms), then for each event its time (ms), kind and id.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn cm_trace_take() -> u32 {
+    let out = unsafe { &mut *addr_of_mut!(TRACE_OUT) };
+    out.clear();
+    if let Some(m) = card10() {
+        let now = m.now_ns();
+        if let Some(t) = m.trace.as_mut() {
+            out.extend([now as f64 / 1e6, t.awake_ns[0] as f64 / 1e6, t.awake_ns[1] as f64 / 1e6]);
+            t.awake_ns = [0; 2];
+            for (at, kind, id) in t.events.drain(..) {
+                out.extend([at as f64 / 1e6, kind as f64, id as f64]);
+            }
+        }
+    }
+    out.len() as u32
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn cm_trace_ptr() -> u32 { unsafe { (*addr_of_mut!(TRACE_OUT)).as_ptr() as u32 } }
 
 #[no_mangle]
 pub extern "C" fn cm_instructions() -> f64 {

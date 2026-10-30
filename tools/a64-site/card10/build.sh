@@ -13,7 +13,8 @@
 # card10-build (Containerfile here: podman build -t card10-build
 # tools/a64-site/card10), with only the checkout mounted (as /firmware).
 #
-# Writes epicardium.elf, pycardium.elf, fat.img.gz and version.txt to out-dir
+# Writes epicardium.elf, pycardium.elf, fat.img.gz, api.json (api-names.py)
+# and version.txt to out-dir
 # (default build/card10), then:
 #   tools/a64-site/add-card10.sh card10 "card10 badge: Epicardium and Pycardium" build/card10
 set -eu
@@ -48,6 +49,8 @@ rm "$SRC/build-card10.cfg"
 mkdir -p "$OUT"
 cp "$SRC/build/epicardium.elf" "$SRC/build/pycardium.elf" "$SRC/build/version.txt" "$OUT/"
 gzip -9 -c "$SRC/build/fat.img" > "$OUT/fat.img.gz"
+# The API calls' and interrupts' names, for the page's view of the cores
+python3 -I "$(dirname "$0")/api-names.py" "$SRC/epicardium/epicardium.h" > "$OUT/api.json"
 # (built in the container, under /firmware: no paths of this machine)
 if grep -l --binary-files=binary "$HOME" "$OUT/epicardium.elf" "$OUT/pycardium.elf" "$SRC/build/fat.img"; then
     echo "the firmware names this machine's paths (above)" >&2

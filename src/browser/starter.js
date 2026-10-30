@@ -1663,6 +1663,24 @@ V86.prototype.get_watch_display = function(last_frame)
 };
 
 /**
+ * The card10 (arch "card10"): watch its two cores' interaction (on), and take
+ * what they did since last time; see CmCPU.trace_take.
+ * @param {boolean} on
+ */
+V86.prototype.cortex_trace = function(on)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.trace) cpu.trace(on);
+};
+
+/** @return {?Float64Array} */
+V86.prototype.cortex_trace_take = function()
+{
+    const cpu = this.v86.cpu;
+    return cpu.trace_take ? cpu.trace_take() : null;
+};
+
+/**
  * Cortex-M machines: bytes into UART n (their output comes as
  * "cortex-m-uart<n>" events).
  * @param {number} n

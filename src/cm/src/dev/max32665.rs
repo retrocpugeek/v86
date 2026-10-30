@@ -1450,9 +1450,61 @@ pub struct Card10 {
     pub slice: u64,
     /// Interrupt lines from I2C devices to GPIO pins
     pub lines: std::rc::Rc<Lines>,
+    /// Watching the cores' interaction (for the page to show), if on
+    pub trace: Option<Trace>,
 }
 
+/// Where Epicardium and Pycardium share their API call state (the
+/// firmware's struct api_call_mem): call_flag (u8) at +4, the call's id at
+/// +8, the interrupt's id at +12 (-1 when none)
+pub const API_CALL_MEM: u32 = 0x2008_0000;
+
+/// What the cores did, for the page: API calls (Pycardium to Epicardium),
+/// interrupts (Epicardium to Pycardium), and how long each core was awake.
+/// Seen between slices, from the shared call state.
+#[derive(Default)]
+pub struct Trace {
+    /// (machine time in ns, kind, id): kind 0 a call starts, 1 it returns,
+    /// 2 an interrupt is raised
+    pub events: Vec<(u64, u8, u32)>,
+    /// Each core's time awake (ns), since the host last took it
+    pub awake_ns: [u64; 2],
+    flag: u8,
+    int_id: u32,
+}
+
+pub const TRACE_CALL: u8 = 0;
+pub const TRACE_RETURN: u8 = 1;
+pub const TRACE_INTERRUPT: u8 = 2;
+
 impl Card10 {
+    /// Look at the shared call state after a slice.
+    fn watch(&mut self, now: u64) {
+        let Some(t) = self.trace.as_mut() else { return };
+        let bus = &mut self.cores[self.holder].bus;
+        let flag = bus.read(API_CALL_MEM + 4, 1) as u8;
+        let id = bus.read(API_CALL_MEM + 8, 4);
+        let int_id = bus.read(API_CALL_MEM + 12, 4);
+        if flag != t.flag {
+            if flag == 1 {
+                t.events.push((now, TRACE_CALL, id));
+            } else if t.flag == 1 {
+                t.events.push((now, TRACE_RETURN, id));
+            }
+            t.flag = flag;
+        }
+        if int_id != t.int_id {
+            if int_id != u32::MAX {
+                t.events.push((now, TRACE_INTERRUPT, int_id));
+            }
+            t.int_id = int_id;
+        }
+        // (bounded, should the host stop taking them)
+        if t.events.len() > 8192 {
+            t.events.drain(..4096);
+        }
+    }
+
     /// The bus (whichever core holds it).
     pub fn bus(&mut self) -> &mut Bus { &mut self.cores[self.holder].bus }
 
@@ -1515,8 +1567,17 @@ impl Card10 {
                     core.warp_ns += other - core.now_ns();
                 }
                 let before = core.icount;
+                let t0 = core.now_ns();
                 let stop = core.run(self.slice.min(left));
                 left = left.saturating_sub(core.icount - before);
+                if self.trace.is_some() {
+                    let core = &self.cores[c];
+                    let (t1, ran) = (core.now_ns(), core.icount > before);
+                    if ran {
+                        self.trace.as_mut().unwrap().awake_ns[c] += t1 - t0;
+                    }
+                    self.watch(t1);
+                }
                 // SEV wakes the other core's WFE
                 if std::mem::take(&mut self.cores[c].sev) && self.gcr().tx_event(c) {
                     let o = &mut self.cores[1 - c];
@@ -1728,7 +1789,7 @@ pub fn machine(epicardium: &[u8], pycardium: &[u8], ext_flash: &[u8], epoch: i64
     let mut c1 = Cpu::new(Bus::new(0, 0, CPU_HZ, CPU_HZ, false));
     c1.fpu = true;
     c1.bus.scs.ictr = 3;
-    Ok(Card10 { cores: [c0, c1], holder: 0, core1_on: false, slice: 1000, lines })
+    Ok(Card10 { cores: [c0, c1], holder: 0, core1_on: false, slice: 1000, lines, trace: None })
 }
 
 /// The catch-all register file, to log what the firmware touches.

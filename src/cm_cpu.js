@@ -161,6 +161,27 @@ CmCPU.prototype.adjust_clock = function(lag)
     }
 };
 
+/**
+ * Watch the card10's cores' interaction, or stop.
+ * @param {boolean} on
+ */
+CmCPU.prototype.trace = function(on)
+{
+    this.wasm["cm_trace"](+on);
+};
+
+/**
+ * What the card10's cores did since the last call: the machine's time (ms),
+ * core 0's and core 1's time awake (ms) since then, then (time, kind, id) for
+ * each API call (kind 0), return (1) and interrupt (2); null when not watching.
+ * @return {?Float64Array}
+ */
+CmCPU.prototype.trace_take = function()
+{
+    const n = this.wasm["cm_trace_take"]();
+    return n ? new Float64Array(this.wasm_memory.buffer, this.wasm["cm_trace_ptr"](), n).slice() : null;
+};
+
 /** The firmware's UART output, as "cortex-m-uart<n>" events (Uint8Array). */
 CmCPU.prototype.flush_uarts = function()
 {

@@ -94,7 +94,20 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
     .card10 button { width: 24px; }
     #card10-screen { max-width: calc(100vw - 32px - 96px); }
 }
-#card10-keys, 
+/* The two cores' interaction (card10): a timeline and the busiest calls */
+#cores { width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 8px; }
+#cores[hidden] { display: none; }
+#cores h2 { font-size: 15px; margin: 4px 0 0; }
+#cores-timeline { width: 100%; height: 280px; background: #08090b; border: 1px solid #2a2d33; border-radius: 6px; }
+#cores-stats { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px; color: var(--muted); }
+#cores-stats b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+#cores-top { border-collapse: collapse; font-size: 13px; width: 100%; }
+#cores-top th { text-align: left; color: var(--muted); font-weight: normal; padding: 2px 8px 2px 0; }
+#cores-top td { padding: 2px 8px 2px 0; font-variant-numeric: tabular-nums; }
+#cores-top td:first-child { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+#cores-top .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+#cores-note { color: var(--muted); font-size: 13px; margin: 0; }
+#card10-keys, #watch-keys { color: var(--muted); font-size: 13px; text-align: center; }
 #card10-about { color: var(--muted); font-size: 13px; max-width: 640px; }
 #watch-about { color: var(--muted); font-size: 13px; max-width: 560px; }
 #watch-log { box-sizing: border-box; width: 100%; height: 220px; margin: 0; overflow: auto; background: #000; color: #bbb;
@@ -169,6 +182,26 @@ code { color: var(--fg); }
       Epicardium's log, and MicroPython's REPL: Ctrl-C stops the app, and Ctrl-C again once the menu's up gives the
       <code>&gt;&gt;&gt;</code> prompt.</span>
     <p id="card10-about"></p>
+  </section>
+  <section id="cores" hidden aria-label="The badge's two cores">
+    <h2>Inside: Pycardium calling Epicardium</h2>
+    <canvas id="cores-timeline" aria-label="A timeline of the two cores: how busy each is, the API calls from core 1 to core 0 and the interrupts back"></canvas>
+    <div id="cores-stats">
+      <span>Core 1 (Pycardium) busy <b id="cores-load1">-</b></span>
+      <span>Core 0 (Epicardium) busy <b id="cores-load0">-</b></span>
+      <span>API calls <b id="cores-calls">-</b>/s</span>
+      <span>Interrupts <b id="cores-ints">-</b>/s</span>
+    </div>
+    <table id="cores-top">
+      <thead><tr><th>Busiest calls (last second)</th><th>Calls/s</th><th>Round trip</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p id="cores-note">Every API call Pycardium (MicroPython, core 1) makes, Epicardium (FreeRTOS, core 0) runs for it:
+      core 1 takes the hardware semaphore, writes the call's number and arguments into the memory both cores share,
+      sets its flag and wakes core 0 with an event (SEV), then waits (WFE). Core 0's dispatcher task runs the call,
+      writes the result, and wakes core 1 again. Between the cores, each call is a bar from when core 1 made it to
+      when it returned, a row per function (the latest calls drawn down to core 0 and back); orange arrows are
+      interrupts core 0 raises on core 1 (through timer 5): Ctrl-C, serial input, sensor data.</p>
   </section>
   <section id="display" hidden>
     <canvas id="screen" aria-label="Guest display"></canvas>
@@ -575,6 +608,192 @@ async function start_card10(build, base, status)
     }, null);
     draw_watch(emulator, "card10-screen");
     watch_buttons(emulator, ".card10 button", CARD10_KEYS);
+    // (the calls' names come when they come)
+    const names = { calls: {}, interrupts: {} };
+    if(build.api) fetch(base + build.api).then(r => r.json()).then(n => Object.assign(names, n)).catch(() => {});
+    show_cores(emulator, names);
+}
+
+// The card10's two cores, live: how busy each is, and the API calls and
+// interrupts between them (CmCPU.trace_take), on a timeline of the last
+// seconds of the machine's time
+const CORES_WINDOW = 3000;
+
+function show_cores(emulator, names)
+{
+    document.getElementById("cores").hidden = false;
+    const canvas = document.getElementById("cores-timeline");
+    const ctx = canvas.getContext("2d");
+    const call_name = id => names.calls[id] || "call 0x" + id.toString(16);
+    const int_name = id => names.interrupts[id] || "interrupt " + id;
+    const hue = id => (id * 137.508) % 360;
+    // samples: [time, load 0, load 1]; calls: {id, start, end}; ints: [time, id]
+    let samples = [], calls = [], ints = [], open = null, last_t = null;
+    let stats_at = 0;
+    const take = () =>
+    {
+        const d = emulator.cortex_trace_take();
+        if(!d) return null;
+        const now = d[0];
+        if(last_t !== null && now > last_t)
+        {
+            const span = now - last_t;
+            samples.push([now, Math.min(1, d[1] / span), Math.min(1, d[2] / span)]);
+        }
+        last_t = now;
+        for(let i = 3; i + 2 < d.length; i += 3)
+        {
+            const t = d[i], kind = d[i + 1], id = d[i + 2];
+            if(kind === 0) { open = { id, start: t, end: null }; calls.push(open); }
+            else if(kind === 1) { if(open && open.id === id) open.end = t; open = null; }
+            else ints.push([t, id]);
+        }
+        const from = now - CORES_WINDOW;
+        while(samples.length && samples[0][0] < from) samples.shift();
+        while(calls.length && (calls[0].end ?? now) < from) calls.shift();
+        while(ints.length && ints[0][0] < from) ints.shift();
+        return now;
+    };
+    const draw = now =>
+    {
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        if(canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr))
+        {
+            canvas.width = Math.round(w * dpr);
+            canvas.height = Math.round(h * dpr);
+        }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        const x = t => w - (now - t) / CORES_WINDOW * w;
+        // lanes: core 1 above, core 0 below, the shared memory between
+        const lane = { 1: [8, 64], 0: [h - 64, h - 8] };
+        const mid = [lane[1][1], lane[0][0]];
+        ctx.fillStyle = "#101318";
+        ctx.fillRect(0, mid[0], w, mid[1] - mid[0]);
+        ctx.font = "11px system-ui, sans-serif";
+        ctx.textBaseline = "top";
+        for(const c of [1, 0])
+        {
+            const [top, bottom] = lane[c];
+            ctx.fillStyle = "#14171c";
+            ctx.fillRect(0, top, w, bottom - top);
+            ctx.fillStyle = c ? "#2bb3a3" : "#8f6fe0";
+            let px = x(now - CORES_WINDOW);
+            ctx.globalAlpha = 0.85;
+            for(const s of samples)
+            {
+                const sx = x(s[0]);
+                const v = s[c + 1];
+                ctx.fillRect(px, bottom - v * (bottom - top - 16), Math.max(1, sx - px), v * (bottom - top - 16));
+                px = sx;
+            }
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = "#cfd3da";
+            ctx.fillText(c ? "Core 1 · Pycardium (MicroPython)" : "Core 0 · Epicardium (FreeRTOS)", 8, top + 2);
+        }
+        // the calls: a row per function (the busiest; the rest together),
+        // each call a bar from when core 1 made it to when it returned
+        const count = new Map();
+        for(const k of calls) count.set(k.id, (count.get(k.id) || 0) + 1);
+        const top = [...count].sort((p, q) => q[1] - p[1]).slice(0, 5).map(e => e[0]);
+        const rows = top.length + (count.size > top.length ? 1 : 0);
+        const band = mid[1] - mid[0] - 8;
+        const rh = rows ? Math.min(22, band / rows) : 0;
+        const row_y = id => { const r = top.indexOf(id); return mid[0] + 4 + (r < 0 ? top.length : r) * rh; };
+        for(let r = 0; r < rows; r++)
+        {
+            ctx.fillStyle = r % 2 ? "#0d1014" : "#111419";
+            ctx.fillRect(0, mid[0] + 4 + r * rh, w, rh);
+        }
+        for(const k of calls)
+        {
+            const xs = x(k.start), xe = x(k.end ?? now);
+            ctx.fillStyle = top.includes(k.id) ? `hsl(${hue(k.id)} 70% 62%)` : "#7d8590";
+            ctx.fillRect(xs, row_y(k.id) + 2, Math.max(1.5, xe - xs), rh - 4);
+        }
+        // the latest calls, from core 1 down to core 0 and back
+        ctx.lineWidth = 1.5;
+        for(const k of calls.slice(-3))
+        {
+            const xs = x(k.start), xe = x(k.end ?? now), y = row_y(k.id) + rh / 2;
+            ctx.strokeStyle = `hsl(${hue(k.id)} 80% 70%)`;
+            ctx.beginPath();
+            ctx.moveTo(xs, lane[1][1]); ctx.lineTo(xs, y); ctx.lineTo(xs, lane[0][0]);
+            if(k.end !== null) { ctx.moveTo(xe, lane[0][0]); ctx.lineTo(xe, lane[1][1]); }
+            ctx.stroke();
+        }
+        // the rows' names, over a shade on the left
+        for(let r = 0; r < rows; r++)
+        {
+            const label = r < top.length ? call_name(top[r]) : "other calls";
+            const y = mid[0] + 4 + r * rh;
+            ctx.fillStyle = "rgba(8, 9, 11, 0.8)";
+            ctx.fillRect(0, y, ctx.measureText(label).width + 14, rh);
+            ctx.fillStyle = r < top.length ? `hsl(${hue(top[r])} 70% 70%)` : "#9aa1ab";
+            ctx.fillText(label, 6, y + (rh - 11) / 2);
+        }
+        if(!rows)
+        {
+            ctx.fillStyle = "#5c6370";
+            ctx.fillText("shared memory · semaphore · SEV/WFE: no calls just now", 8, (mid[0] + mid[1]) / 2 - 6);
+        }
+        // interrupts: orange arrows up
+        ctx.strokeStyle = ctx.fillStyle = "#ff9d3a";
+        ctx.lineWidth = 2;
+        for(const [t, id] of ints)
+        {
+            const xi = x(t);
+            ctx.beginPath();
+            ctx.moveTo(xi, lane[0][0] + 10); ctx.lineTo(xi, lane[1][1] - 2);
+            ctx.moveTo(xi - 4, lane[1][1] + 5); ctx.lineTo(xi, lane[1][1] - 2); ctx.lineTo(xi + 4, lane[1][1] + 5);
+            ctx.stroke();
+            ctx.fillText(int_name(id), xi + 5, mid[1] - 16);
+        }
+    };
+    const stats = now =>
+    {
+        const from = now - 1000;
+        const recent = samples.filter(s => s[0] >= from);
+        const load = c => recent.length ? Math.round(recent.reduce((a, s) => a + s[c + 1], 0) / recent.length * 100) + "%" : "-";
+        document.getElementById("cores-load0").textContent = load(0);
+        document.getElementById("cores-load1").textContent = load(1);
+        const done = calls.filter(k => k.start >= from);
+        document.getElementById("cores-calls").textContent = done.length;
+        document.getElementById("cores-ints").textContent = ints.filter(i => i[0] >= from).length;
+        const by = new Map();
+        for(const k of done)
+        {
+            const e = by.get(k.id) || { n: 0, time: 0, timed: 0 };
+            e.n++;
+            if(k.end !== null) { e.time += k.end - k.start; e.timed++; }
+            by.set(k.id, e);
+        }
+        const rows = [...by].sort((a, b) => b[1].n - a[1].n).slice(0, 6);
+        document.querySelector("#cores-top tbody").innerHTML = rows.map(([id, e]) =>
+            `<tr><td><span class="swatch" style="background: hsl(${hue(id)} 70% 62%)"></span>${call_name(id)}</td>` +
+            `<td>${e.n}</td><td>${e.timed ? (e.time / e.timed * 1000).toFixed(0) + " µs" : "-"}</td></tr>`).join("") ||
+            "<tr><td colspan=3>(none)</td></tr>";
+    };
+    const frame = () =>
+    {
+        const now = take();
+        if(now !== null)
+        {
+            draw(now);
+            if(performance.now() - stats_at > 500)
+            {
+                stats_at = performance.now();
+                stats(now);
+            }
+        }
+        requestAnimationFrame(frame);
+    };
+    emulator.add_listener("emulator-ready", () =>
+    {
+        emulator.cortex_trace(true);
+        requestAnimationFrame(frame);
+    });
 }
 
 // The console's output, for copying, saving or sharing (copying out of the

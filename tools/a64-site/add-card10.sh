@@ -3,7 +3,7 @@
 # it in images/manifest.json: its firmware (card10/build.sh), run by v86's
 # Cortex-M core (src/cm/src/dev/max32665.rs) in the page's badge.
 #
-#   tools/a64-site/add-card10.sh <id> <label> <dir with epicardium.elf, pycardium.elf, fat.img.gz>
+#   tools/a64-site/add-card10.sh <id> <label> <dir with epicardium.elf, pycardium.elf, fat.img.gz, api.json>
 set -eu
 [ $# -eq 3 ] || { echo "usage: $0 <id> <label> <dir>" >&2; exit 1; }
 ID=$1 LABEL=$2 SRC=$3
@@ -12,14 +12,14 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 DIR=$ROOT/build/a64-site/images/$ID
 rm -rf "${DIR:?}"
 mkdir -p "$DIR"
-cp "$SRC/epicardium.elf" "$SRC/pycardium.elf" "$SRC/fat.img.gz" "$DIR/"
+cp "$SRC/epicardium.elf" "$SRC/pycardium.elf" "$SRC/fat.img.gz" "$SRC/api.json" "$DIR/"
 VERSION=$(cat "$SRC/version.txt" 2>/dev/null || echo "")
 node - "$ROOT/build/a64-site/images/manifest.json" "$ID" "$LABEL" "$VERSION" <<'JS'
 const fs = require("fs");
 const [file, id, label, version] = process.argv.slice(2);
 const m = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { builds: [] };
 const entry = {
-    id, label, card10: true, firmware: "epicardium.elf", core1: "pycardium.elf", spi: "fat.img.gz",
+    id, label, card10: true, firmware: "epicardium.elf", core1: "pycardium.elf", spi: "fat.img.gz", api: "api.json",
     about: `The <a href="https://card10.badge.events.ccc.de/">card10</a> badge from the Chaos Communication Camp 2019, ` +
         `running its <a href="https://git.flow3r.garden/card10/firmware">firmware</a> (MIT, unless a file says otherwise)` +
         (version ? ` ${version.replace(/[<&]/g, "")}` : "") +
