@@ -11,8 +11,8 @@
 #     tools/rv64-site/add-mcu.sh ch32v307-rtthread "CH32V307: RT-Thread shell" build/ch32v307/rtthread.bin
 #
 #   tools/ch32v003-gameconsole/build.sh
-#   BOARD=gameconsole CONTROLS=none MHZ=12 DEBUG=tiny_tris \
-#     tools/rv64-site/add-mcu.sh gameconsole-tris "Game console: Tiny Tris" build/ch32v003-gameconsole/tiny_tris.bin
+#   BOARD=gameconsole CONTROLS=none MHZ=12 DEBUG=tiny_tris GROUP="CH32V003 game console" \
+#     tools/rv64-site/add-mcu.sh gameconsole-tris "CH32V003 game console: Tiny Tris" build/ch32v003-gameconsole/tiny_tris.bin
 #
 #   tools/ch32v003-minigameconsole/build.sh
 #   BOARD=minigameconsole CONTROLS=none MHZ=48 DEBUG=minigameconsole LEDS=PWR:3:0 \
@@ -29,7 +29,9 @@
 # mini game console (a colour LCD, buttons and a buzzer); MHZ: the clock the
 # firmware sets, for the page. DEBUG: the firmware's project in the gdb-wui
 # image (/root/mcu/<DEBUG>, tools/rv64-gdb/build.sh), e.g. tetris or
-# tiny_tris: the page offers to debug it (?debug) with that image.
+# tiny_tris: the page offers to debug it (?debug) with that image. GROUP:
+# builds with the same GROUP are one entry in the page's image list, and a
+# second list picks among them (by their labels, less "<GROUP>: ").
 set -eu
 [ $# -eq 3 ] || { echo "usage: $0 <id> <label> <flash.bin>" >&2; exit 1; }
 ID=$1 LABEL=$2 FLASH=$3
@@ -42,9 +44,9 @@ cp -L "$FLASH" "$DIR/flash.bin"
 STATS=${FLASH%.bin}.json
 [ -f "$STATS" ] || STATS=
 node - "$ROOT/build/rv64-site/images/manifest.json" "$ID" "$LABEL" "${CONTROLS-tetris}" "$STATS" \
-  "${ARCH:-ch32v003}" "${COLS:-}" "${ROWS:-}" "${LEDS:-}" "${COMMANDS:-}" "${BOARD:-}" "${MHZ:-}" "${DEBUG:-}" <<'JS'
+  "${ARCH:-ch32v003}" "${COLS:-}" "${ROWS:-}" "${LEDS:-}" "${COMMANDS:-}" "${BOARD:-}" "${MHZ:-}" "${DEBUG:-}" "${GROUP:-}" <<'JS'
 const fs = require("fs");
-const [file, id, label, controls, stats, arch, cols, rows, leds, commands, board, mhz, debug] = process.argv.slice(2);
+const [file, id, label, controls, stats, arch, cols, rows, leds, commands, board, mhz, debug, group] = process.argv.slice(2);
 const m = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { builds: [] };
 const entry = { id, label, arch, bios: "flash.bin" };
 if(controls && controls !== "none") entry.controls = controls;
@@ -55,6 +57,7 @@ if(commands) entry.commands = commands.split(",");
 if(board) entry.board = board;
 if(mhz) entry.mhz = +mhz;
 if(debug) entry.debug = debug;
+if(group) entry.group = group;
 if(stats) entry.stats = JSON.parse(fs.readFileSync(stats));
 const i = m.builds.findIndex(b => b.id === id);
 if(i >= 0) m.builds[i] = entry; else m.builds.push(entry);

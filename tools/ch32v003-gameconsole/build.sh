@@ -10,14 +10,15 @@
 #
 # Writes <game>.bin and <game>.json (sizes, for add-mcu.sh) to out-dir
 # (default build/ch32v003-gameconsole), then e.g.
-#   ARCH=ch32v003 BOARD=gameconsole CONTROLS=gameconsole \
-#     tools/rv64-site/add-mcu.sh gameconsole-tris "..." build/ch32v003-gameconsole/tiny_tris.bin
+#   BOARD=gameconsole CONTROLS=none MHZ=12 DEBUG=tiny_tris GROUP="CH32V003 game console" \
+#     tools/rv64-site/add-mcu.sh gameconsole-tris "CH32V003 game console: Tiny Tris" build/ch32v003-gameconsole/tiny_tris.bin
+# (MHZ=48 for tiny_conway)
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=$(realpath -m "${1:-$HERE/../../build/ch32v003-gameconsole}")
 REPO=https://github.com/wagiminator/CH32V003-GameConsole
-COMMIT=ad10df94a7571768d658b03238379f99f0a3f061
-GAMES="tiny_tris tiny_invaders tiny_arkanoid tiny_pacman tiny_lander tiny_conway"
+COMMIT=a5891a0a3d3c7f5f212f1dc5b970998bae681eeb
+GAMES="tiny_tris tiny_invaders tiny_arkanoid tiny_pacman tiny_lander tiny_conway tiny_doom tiny_boulder tiny_bubble tiny_karate tiny_run tiny_shooter"
 INCLUDE=/usr/lib/picolibc/riscv64-unknown-elf/include
 CROSS=riscv64-unknown-elf-
 

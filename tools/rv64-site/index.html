@@ -127,6 +127,7 @@ code { color: var(--fg); }
 <header>
   <h1>v86 RISC-V Linux</h1>
   <label>Image <select id="build"></select></label>
+  <label id="game-pick" hidden>Game <select id="game"></select></label>
   <span id="status">Loading …</span>
   <div class="log-tools">
     <span>Console log:</span>
@@ -339,15 +340,47 @@ code { color: var(--fg); }
     const manifest = await (await fetch("images/manifest.json", { cache: "no-cache" })).json();
     const build = manifest.builds.find(b => b.id === params.get("build")) || manifest.builds[0];
 
-    for(const b of manifest.builds)
+    // The image list: the Linux machines, then the microcontrollers. Builds
+    // with a "group" (the game console's games) are one entry in it, the one
+    // shown or the group's first, and a second list picks among them.
+    const go = id =>
     {
-        select.add(new Option(b.label, b.id, false, b === build));
-    }
-    select.onchange = () =>
-    {
-        params.set("build", select.value);
+        params.set("build", id);
         location.search = params.toString();
     };
+    const lists = { linux: document.createElement("optgroup"), mcu: document.createElement("optgroup") };
+    lists.linux.label = "Linux";
+    lists.mcu.label = "Microcontrollers";
+    const groups = new Set();
+    for(const b of manifest.builds)
+    {
+        let option;
+        if(b.group)
+        {
+            if(groups.has(b.group)) continue;
+            groups.add(b.group);
+            const shown = build.group === b.group ? build : b;
+            const n = manifest.builds.filter(g => g.group === b.group).length;
+            option = new Option(`${b.group}: ${n} games`, shown.id, false, shown === build);
+        }
+        else
+        {
+            option = new Option(b.label, b.id, false, b === build);
+        }
+        lists[MCUS[b.arch] ? "mcu" : "linux"].append(option);
+    }
+    select.append(lists.linux, lists.mcu);
+    select.onchange = () => go(select.value);
+    if(build.group)
+    {
+        const game = document.getElementById("game");
+        for(const b of manifest.builds.filter(g => g.group === build.group))
+        {
+            game.add(new Option(b.label.replace(build.group + ": ", ""), b.id, false, b === build));
+        }
+        game.onchange = () => go(game.value);
+        document.getElementById("game-pick").hidden = false;
+    }
 
     const base = image_base(build);
 
@@ -465,11 +498,12 @@ const MCUS = {
         timing: "No interrupts (Conway's Life: DMA complete): the game polls SysTick for its delays and the I2C bus as it draws",
         about: "Games for Stefan Wagner's CH32V003 Mini Game Console, a 10-cent RISC-V microcontroller with an OLED display, " +
             "emulated by v86's RISC-V core with its display, buttons and buzzer. The games are " +
-            `<a href="https://github.com/wagiminator/CH32V003-GameConsole/tree/ad10df9/software">built from their source</a> ` +
-            `(<a href="${SRC}ch32v003-gameconsole">build script</a>): Tiny Tris, Tiny Invaders, Tiny Arkanoid and Tiny Pacman ` +
-            `are Daniel Champagne's <a href="https://www.tinyjoypad.com/">TinyJoypad</a> games for the ATtiny85, Tiny Lander is ` +
-            `<a href="https://github.com/tscha70/TinyLanderV1.0">tscha70's</a>, all converted by Stefan Wagner (GPL-3.0); ` +
-            "Conway's Life is his own (CC BY-SA 3.0).",
+            `<a href="https://github.com/wagiminator/CH32V003-GameConsole/tree/a5891a0/software">built from their source</a> ` +
+            `(<a href="${SRC}ch32v003-gameconsole">build script</a>), and picked in the Game list: Tiny Tris, Tiny Invaders, ` +
+            `Tiny Arkanoid and Tiny Pacman are Daniel Champagne's <a href="https://www.tinyjoypad.com/">TinyJoypad</a> games ` +
+            `for the ATtiny85, Tiny Lander is <a href="https://github.com/tscha70/TinyLanderV1.0">tscha70's</a>, all converted ` +
+            "by Stefan Wagner (GPL-3.0); Conway's Life, Tiny Doom, Tiny Boulder, Tiny Bubble, Tiny Karate, Tiny Run and " +
+            "Tiny Shooter are Stefan Wagner's own (CC BY-SA 3.0).",
     },
     minigameconsole: {
         name: "CH32V003 Mini Game Console",

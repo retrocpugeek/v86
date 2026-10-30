@@ -5,7 +5,7 @@
 //
 //   SITE=http://localhost:8788 node tests/rv64/gameconsole.mjs [games] [screenshot-prefix]
 //
-// games: comma-separated build ids without "gameconsole-" (default: all six).
+// games: comma-separated build ids without "gameconsole-" (default: all twelve).
 // Needs google-chrome and the site (npx wrangler dev --config
 // tools/rv64-site/wrangler.jsonc --port 8788).
 import { spawn } from "node:child_process";
@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const SITE = process.env.SITE || "http://localhost:8788";
-const GAMES = (process.argv[2] || "tris,invaders,arkanoid,pacman,lander,conway").split(",");
+const GAMES = (process.argv[2] || "tris,invaders,arkanoid,pacman,lander,conway,doom,boulder,bubble,karate,run,shooter").split(",");
 const OUT = process.argv[3];
 const PORT = +(process.env.PORT || 9349);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
