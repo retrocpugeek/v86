@@ -1,0 +1,123 @@
+// Device tree for the native runner (rv64run): QEMU's riscv64 virt machine
+// with one hart (RV64IMAFDC, Sv39), 256 MB of RAM and the disk on the first
+// virtio-mmio transport.
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "riscv-virtio";
+	model = "riscv-virtio,qemu";
+
+	chosen {
+		bootargs = "rootwait root=/dev/vda ro rootfstype=squashfs console=ttyS0";
+		stdout-path = "/soc/serial@10000000";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x10000000>;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <10000000>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			status = "okay";
+			compatible = "riscv";
+			riscv,isa = "rv64imafdc_zicsr_zifencei";
+			riscv,isa-base = "rv64i";
+			riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+			mmu-type = "riscv,sv39";
+
+			cpu0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+
+		cpu-map {
+			cluster0 {
+				core0 {
+					cpu = <&cpu0>;
+				};
+			};
+		};
+	};
+
+	poweroff {
+		compatible = "syscon-poweroff";
+		regmap = <&test>;
+		offset = <0x0>;
+		value = <0x5555>;
+	};
+
+	reboot {
+		compatible = "syscon-reboot";
+		regmap = <&test>;
+		offset = <0x0>;
+		value = <0x7777>;
+	};
+
+	soc {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "simple-bus";
+		ranges;
+
+		test: test@100000 {
+			compatible = "sifive,test1", "sifive,test0", "syscon";
+			reg = <0x0 0x100000 0x0 0x1000>;
+		};
+
+		rtc@101000 {
+			compatible = "google,goldfish-rtc";
+			reg = <0x0 0x101000 0x0 0x1000>;
+			interrupts = <11>;
+			interrupt-parent = <&plic>;
+		};
+
+		clint@2000000 {
+			compatible = "sifive,clint0", "riscv,clint0";
+			reg = <0x0 0x2000000 0x0 0x10000>;
+			interrupts-extended = <&cpu0_intc 3>, <&cpu0_intc 7>;
+		};
+
+		plic: plic@c000000 {
+			compatible = "sifive,plic-1.0.0", "riscv,plic0";
+			reg = <0x0 0xc000000 0x0 0x600000>;
+			#address-cells = <0>;
+			#interrupt-cells = <1>;
+			interrupt-controller;
+			riscv,ndev = <0x5f>;
+			interrupts-extended = <&cpu0_intc 11>, <&cpu0_intc 9>;
+		};
+
+		serial@10000000 {
+			compatible = "ns16550a";
+			reg = <0x0 0x10000000 0x0 0x100>;
+			interrupts = <10>;
+			interrupt-parent = <&plic>;
+			clock-frequency = <0x384000>;
+		};
+
+		virtio_mmio@10001000 {
+			compatible = "virtio,mmio";
+			reg = <0x0 0x10001000 0x0 0x1000>;
+			interrupts = <1>;
+			interrupt-parent = <&plic>;
+		};
+
+		virtio_mmio@10002000 {
+			compatible = "virtio,mmio";
+			reg = <0x0 0x10002000 0x0 0x1000>;
+			interrupts = <2>;
+			interrupt-parent = <&plic>;
+		};
+	};
+};

@@ -1,0 +1,1121 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v86 RISC-V Linux</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="libv86.js"></script>
+<script src="guest-web.js"></script>
+<style>
+:root { color-scheme: dark; --bg: #111; --fg: #ddd; --muted: #888; --accent: #6cf; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 12px; }
+h1 { font-size: 18px; margin: 0; }
+#status { color: var(--muted); }
+select { background: #222; color: var(--fg); border: 1px solid #444; padding: 2px 4px; }
+main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
+#terminal { padding: 4px; background: #000; max-width: 100%; overflow-x: auto; align-self: flex-start; }
+#web { flex: 1 1 480px; min-width: min(480px, 100%); display: flex; flex-direction: column; gap: 4px; }
+#web[hidden] { display: none; }
+/* a whole debugger (gdb-wui) wants the full width, under the console */
+#web.wide { flex-basis: 100%; }
+#web .bar { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+#web-status { color: var(--muted); }
+/* gdb-wui's: it is a desktop application (guest-web.js) */
+#web-note { margin: 0 0 12px; padding: 6px 12px; border: 1px solid #665; background: #2a2a1c; }
+#web-note[hidden] { display: none; }
+#guest-web { flex: 1; min-height: 480px; width: 100%; border: 1px solid #444; background: #fff; }
+#guest-web:not([src]) { visibility: hidden; }
+/* ?debug: gdb-wui's machine, next to the microcontroller */
+#debug-console { flex-basis: 100%; }
+#debug-console[hidden] { display: none; }
+#debug-console summary { color: var(--muted); cursor: pointer; }
+#debug-terminal { padding: 4px; background: #000; margin-top: 6px; overflow-x: auto; }
+#mcu-debug { margin: 0 0 12px; }
+#debug-arch { flex-basis: 100%; max-width: 900px; }
+#debug-arch[hidden] { display: none; }
+#debug-arch summary { color: var(--muted); cursor: pointer; }
+#debug-arch svg { display: block; width: 100%; height: auto; margin-top: 8px; font: 13px system-ui, sans-serif; }
+#debug-arch text { fill: var(--fg); }
+#debug-arch text.h { font-weight: 600; }
+#debug-arch text.m { fill: var(--muted); font-size: 12px; }
+#debug-arch text.l { fill: var(--accent); font-size: 12px; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+#debug-arch .tab { fill: none; stroke: #444; stroke-dasharray: 6 4; }
+#debug-arch .box { stroke-width: 1.5; }
+#debug-arch .ui { fill: #1d2430; stroke: #5a6f8f; }
+#debug-arch .vm { fill: #1e2a22; stroke: #5d8a68; }
+#debug-arch .mcu { fill: #2a2420; stroke: #9a7a52; }
+#debug-arch .js { fill: #1f1f28; stroke: #6a6a8a; }
+#debug-arch .inner { fill: #00000040; stroke: #555; }
+#debug-arch .inner.stub { stroke: var(--accent); }
+#debug-arch .link { stroke: var(--accent); stroke-width: 1.6; }
+#debug-arch marker path { fill: var(--accent); }
+#mcu-debug[hidden] { display: none; }
+button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1px 8px; }
+.log-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.log-tools button { padding: 4px 10px; }
+#log-note { color: var(--muted); }
+#crash { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 12px; padding: 8px 12px;
+    border: 1px solid #a33; background: #311; }
+#crash[hidden], #log-share[hidden] { display: none; }
+#log-dialog { width: min(900px, 100% - 32px); max-width: none; padding: 12px; background: var(--bg); color: var(--fg); border: 1px solid #444; }
+#log-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+#log-text { box-sizing: border-box; width: 100%; height: 60vh; background: #000; color: var(--fg); font: 12px/1.3 monospace; white-space: pre; }
+#log-dialog .log-tools { margin-top: 8px; }
+/* Touch controls (builds with "controls": "tetris") */
+#pad { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 440px; align-self: flex-start;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#pad[hidden] { display: none; }
+#pad .row { display: flex; gap: 10px; }
+#pad button { flex: 1; height: 64px; font-size: 22px; border-radius: 14px; background: #233041; border: 1px solid #3c4d66;
+    color: var(--fg); touch-action: none; padding: 0; }
+#pad .small button { height: 46px; font-size: 15px; }
+#pad button.down { background: #3d6290; border-color: #6c9bd2; }
+#pad-note { color: var(--muted); font-size: 13px; }
+/* The CH32V003 game console (builds with "board": "gameconsole") */
+#console { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 560px; align-self: flex-start;
+    padding: 16px; box-sizing: border-box; border-radius: 22px; background: #1b2230; border: 1px solid #33405a;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+#console[hidden] { display: none; }
+#oled { width: 100%; aspect-ratio: 2 / 1; image-rendering: pixelated; background: #05070a; border-radius: 6px;
+    border: 10px solid #000; box-sizing: border-box; }
+#console .controls { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+#dpad { position: relative; width: 168px; height: 168px; flex: none; border-radius: 50%; background: #233041;
+    border: 1px solid #3c4d66; touch-action: none; }
+#dpad span { position: absolute; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center;
+    font-size: 22px; color: var(--muted); border-radius: 12px; }
+#dpad span.down { background: #3d6290; color: var(--fg); }
+#dpad .n { left: 56px; top: 0; } #dpad .s { left: 56px; bottom: 0; }
+#dpad .w { left: 0; top: 56px; } #dpad .e { right: 0; top: 56px; }
+#fire { width: 104px; height: 104px; border-radius: 50%; font-size: 18px; background: #6b2a33; border: 1px solid #a54452;
+    color: var(--fg); touch-action: none; padding: 0; flex: none; }
+#fire.down { background: #a54452; }
+#console .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+#console-note { color: var(--muted); font-size: 13px; }
+/* CH32V003 hardware and resources */
+#mcu-info { flex: 1 1 320px; max-width: 560px; font-size: 14px; }
+#mcu-info[hidden] { display: none; }
+#mcu-info h2 { font-size: 15px; margin: 0 0 6px; }
+#mcu-info table { border-collapse: collapse; width: 100%; margin-bottom: 14px; }
+#mcu-info th, #mcu-info td { text-align: left; vertical-align: top; padding: 4px 8px 4px 0; border-bottom: 1px solid #2a2f38; }
+#mcu-info th { color: var(--muted); font-weight: normal; white-space: nowrap; width: 9em; }
+#mcu-info .bar { display: block; height: 6px; margin-top: 4px; background: #2a2f38; border-radius: 3px; overflow: hidden; }
+#mcu-info .bar i { display: block; height: 100%; background: var(--accent); }
+#mcu-info .live { color: var(--accent); font-size: 12px; }
+#leds { display: flex; gap: 14px; align-items: center; font-size: 13px; color: var(--muted); }
+#leds[hidden] { display: none; }
+#leds .led { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: #1d2633; border: 1px solid #3c4d66;
+    vertical-align: -2px; margin-right: 6px; }
+#leds .led.on { background: #4da3ff; border-color: #a9d1ff; box-shadow: 0 0 10px #4da3ff; }
+/* Shell keys and commands (builds with "controls": "shell") */
+#shell-pad { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 560px; align-self: flex-start; }
+#shell-pad[hidden] { display: none; }
+#shell-pad .row { display: flex; flex-wrap: wrap; gap: 8px; }
+#shell-pad button { min-width: 56px; height: 42px; padding: 0 12px; border-radius: 10px; background: #233041; border: 1px solid #3c4d66;
+    color: var(--fg); font-size: 15px; touch-action: manipulation; }
+#shell-pad .cmd button { font-family: ui-monospace, monospace; font-size: 14px; }
+footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
+a { color: var(--accent); }
+code { color: var(--fg); }
+</style>
+
+<header>
+  <h1>v86 RISC-V Linux</h1>
+  <label>Image <select id="build"></select></label>
+  <span id="status">Loading …</span>
+  <div class="log-tools">
+    <span>Console log:</span>
+    <button type="button" data-log="copy">Copy</button>
+    <button type="button" data-log="save">Save</button>
+    <button type="button" data-log="share" id="log-share" hidden>Share</button>
+    <button type="button" data-log="view">View</button>
+    <span id="log-note" role="status"></span>
+  </div>
+</header>
+<div id="crash" role="alert" hidden>
+  <strong>The guest kernel reported an error.</strong>
+  <span>To report it, send the console log:</span>
+  <div class="log-tools">
+    <button type="button" data-log="copy">Copy</button>
+    <button type="button" data-log="save">Save</button>
+    <button type="button" data-log="share" hidden>Share</button>
+  </div>
+</div>
+<dialog id="log-dialog">
+  <textarea id="log-text" readonly spellcheck="false" aria-label="Console log"></textarea>
+  <div class="log-tools">
+    <button type="button" data-log="select">Select all</button>
+    <button type="button" data-log="copy">Copy</button>
+    <button type="button" data-log="close">Close</button>
+  </div>
+</dialog>
+<p id="web-note" role="note" hidden></p>
+<main>
+  <div id="terminal"></div>
+  <section id="pad" hidden aria-label="Game controls">
+    <div class="row"><button data-key="rotate" aria-label="Rotate">&#x27f3; Rotate</button></div>
+    <div class="row">
+      <button data-key="left" data-repeat aria-label="Left">&#x25c0;</button>
+      <button data-key="down" data-repeat aria-label="Down">&#x25bc;</button>
+      <button data-key="right" data-repeat aria-label="Right">&#x25b6;</button>
+    </div>
+    <div class="row"><button data-key="drop" aria-label="Hard drop">&#x2913; Drop</button></div>
+    <div class="row small">
+      <button data-key="rotate_back" aria-label="Rotate the other way">&#x27f2;</button>
+      <button data-key="pause">Pause</button>
+      <button data-key="new">New game</button>
+    </div>
+    <span id="pad-note">Keyboard: arrows, space (drop), z, p, r.</span>
+  </section>
+  <section id="console" hidden aria-label="Game console">
+    <canvas id="oled" width="128" height="64" aria-label="The OLED display"></canvas>
+    <div class="controls">
+      <div id="dpad" role="group" aria-label="Direction buttons">
+        <span class="n">&#x25b2;</span><span class="w">&#x25c0;</span><span class="e">&#x25b6;</span><span class="s">&#x25bc;</span>
+      </div>
+      <button id="fire" type="button">Fire</button>
+    </div>
+    <div class="row">
+      <button id="sound" type="button">Sound: on</button>
+      <span id="console-note">Keyboard: arrows or WASD, space or Z to fire.</span>
+    </div>
+  </section>
+  <section id="shell-pad" hidden aria-label="Shell keys">
+    <div class="row">
+      <button data-send="\t">Tab</button>
+      <button data-send="\x1b[A" aria-label="Up">&#x25b2;</button>
+      <button data-send="\x1b[B" aria-label="Down">&#x25bc;</button>
+      <button data-send="\x1b[D" aria-label="Left">&#x25c0;</button>
+      <button data-send="\x1b[C" aria-label="Right">&#x25b6;</button>
+      <button data-send="\x03">Ctrl-C</button>
+      <button data-send="\x04">Ctrl-D</button>
+      <button data-send="\r">Enter</button>
+    </div>
+    <div class="row cmd" id="shell-cmds"></div>
+    <span id="shell-note" class="live"></span>
+  </section>
+  <section id="mcu-info" hidden>
+    <p id="mcu-debug" hidden></p>
+    <div id="leds" hidden></div>
+    <h2>Emulated hardware</h2>
+    <table id="mcu-hw"></table>
+    <h2>Firmware and its resources</h2>
+    <table>
+      <tr id="mcu-flash-row"><th>Image</th><td id="mcu-flash"></td></tr>
+      <tr id="mcu-ram-row"><th>RAM, static</th><td id="mcu-ram"></td></tr>
+      <tr id="mcu-stack-row"><th>Stack, peak</th><td id="mcu-stack">…</td></tr>
+      <tr><th>CPU load</th><td id="mcu-cpu">…</td></tr>
+      <tr id="mcu-timing-row"><th>Timing</th><td id="mcu-timing"></td></tr>
+    </table>
+    <span class="live" id="mcu-live"></span>
+  </section>
+  <section id="web" hidden>
+    <div class="bar">
+      <strong id="web-title">Web interface</strong>
+      <span id="web-status"></span>
+      <button id="web-reload" type="button">Reload</button>
+      <a id="web-open" target="_blank">Open in new tab</a>
+    </div>
+    <iframe id="guest-web" title="Guest web interface"></iframe>
+  </section>
+  <details id="debug-arch" hidden>
+    <summary>How the debugging works</summary>
+    <svg viewBox="0 0 900 490" role="img" aria-labelledby="debug-arch-title">
+      <title id="debug-arch-title">Two emulators in this page: gdb and gdb-wui in a riscv64 Linux machine, connected through the page's JavaScript to the GDB stub in the emulated CH32V003, and gdb-wui's frontend in an iframe</title>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+      </defs>
+      <rect class="tab" x="4" y="4" width="892" height="482" rx="10"/>
+      <text class="h" x="20" y="28">Your browser: this tab</text>
+
+      <rect class="box ui" x="20" y="44" width="230" height="232" rx="8"/>
+      <text class="h" x="34" y="70">gdb-wui's frontend</text>
+      <text x="34" y="92">in an iframe: source,</text>
+      <text x="34" y="110">disassembly, registers,</text>
+      <text x="34" y="128">memory, breakpoints,</text>
+      <text x="34" y="146">Decompiled view</text>
+      <text class="m" x="34" y="176">served by the guest:</text>
+      <text class="m" x="34" y="194">pages through sw.js,</text>
+      <text class="m" x="34" y="212">live state over a</text>
+      <text class="m" x="34" y="230">WebSocket</text>
+
+      <rect class="box vm" x="276" y="44" width="310" height="232" rx="8"/>
+      <text class="h" x="290" y="70">Emulator 2: v86 riscv64</text>
+      <text class="m" x="290" y="88">Buildroot Linux, the gdb-wui image; virtio-net</text>
+      <rect class="inner" x="290" y="104" width="112" height="122" rx="6"/>
+      <text class="h" x="302" y="128">gdb-wui</text>
+      <text x="302" y="148">server (Go),</text>
+      <text x="302" y="166">port 80</text>
+      <text class="m" x="302" y="190">project:</text>
+      <text class="m" x="302" y="208">/root/mcu/…</text>
+      <rect class="inner" x="462" y="104" width="112" height="122" rx="6"/>
+      <text class="h" x="474" y="128">gdb</text>
+      <text x="474" y="148">firmware ELF</text>
+      <text x="474" y="166">and sources</text>
+      <text class="m" x="474" y="190">riscv:rv32,</text>
+      <text class="m" x="474" y="208">DWARF</text>
+      <text class="l" x="432" y="152" text-anchor="middle">GDB/MI</text>
+      <line class="link" x1="404" y1="166" x2="460" y2="166" marker-start="url(#arr)" marker-end="url(#arr)"/>
+
+      <rect class="box mcu" x="612" y="44" width="270" height="232" rx="8"/>
+      <text class="h" x="626" y="70">Emulator 1: v86 CH32V003</text>
+      <text class="m" x="626" y="88">RV32EC: this page's microcontroller</text>
+      <rect class="inner" x="626" y="104" width="242" height="52" rx="6"/>
+      <text class="h" x="638" y="128">Hart, flash, SRAM</text>
+      <text x="638" y="148">the firmware; serial or OLED</text>
+      <rect class="inner stub" x="626" y="186" width="242" height="76" rx="6"/>
+      <text class="h" x="638" y="210">GDB stub (gdb.rs)</text>
+      <text x="638" y="230">registers, memory, breakpoints,</text>
+      <text x="638" y="250">step, halt; ebreak stops</text>
+      <line class="link" x1="747" y1="158" x2="747" y2="184" marker-start="url(#arr)" marker-end="url(#arr)"/>
+
+      <rect class="box js" x="20" y="340" width="862" height="134" rx="8"/>
+      <rect class="inner" x="34" y="354" width="250" height="80" rx="6"/>
+      <text class="h" x="46" y="378">sw.js + WebSocket relay</text>
+      <text x="46" y="398">the frontend's requests</text>
+      <text x="46" y="416">to the guest's port 80</text>
+      <rect class="inner" x="308" y="354" width="250" height="80" rx="6"/>
+      <text class="h" x="320" y="378">kuna, port 5717</text>
+      <text x="320" y="398">a decompiler, as</text>
+      <text x="320" y="416">WebAssembly in a worker</text>
+      <rect class="inner stub" x="582" y="354" width="286" height="80" rx="6"/>
+      <text class="h" x="594" y="378">The probe, port 3333</text>
+      <text x="594" y="398">TCP from gdb ⇄ the stub:</text>
+      <text x="594" y="416">V86.gdb_input / gdb_attach</text>
+      <text class="h" x="34" y="460">The page's JavaScript: the guests' gateway, 192.168.86.1, on v86's virtual network</text>
+
+      <line class="link" x1="100" y1="278" x2="100" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="108" y="306">fetch,</text>
+      <text class="l" x="108" y="322">WebSocket</text>
+      <line class="link" x1="320" y1="228" x2="230" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="216" y="300">TCP :80</text>
+      <line class="link" x1="380" y1="228" x2="420" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="408" y="300">TCP :5717</text>
+      <line class="link stub-link" x1="530" y1="228" x2="640" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="594" y="294">TCP :3333, the GDB</text>
+      <text class="l" x="594" y="310">remote protocol</text>
+      <line class="link stub-link" x1="830" y1="264" x2="830" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="822" y="300" text-anchor="end">packets in,</text>
+      <text class="l" x="822" y="316" text-anchor="end">replies out</text>
+    </svg>
+  </details>
+  <details id="debug-console" hidden>
+    <summary>gdb-wui's Linux machine: its console</summary>
+    <div id="debug-terminal"></div>
+  </details>
+</main>
+<footer>
+  <p id="mcu-about" hidden></p>
+  Buildroot Linux running on v86's RISC-V core (RV64GC or RV32GC, OpenSBI, QEMU <code>virt</code>-like machine), entirely in your browser.
+  Log in as <code>root</code>. Disk changes stay in this tab.
+  Networking: plain HTTP (<code>wget http://…</code>), proxied through this site; HTTPS from the guest
+  isn't supported (<code>?relay=wisps://…</code> selects a full network relay).
+  <a href="https://github.com/retrocpugeek/v86/tree/riscv-port">Source</a>
+</footer>
+
+<script>
+"use strict";
+
+(async function()
+{
+    if(window.frameElement && window.frameElement.id === "guest-web")
+    {
+        // The guest's page navigated outside /cgi-bin/ (where sw.js serves it)
+        document.body.textContent = "This page isn't served by the guest's web server.";
+        return;
+    }
+
+    const params = new URLSearchParams(location.search);
+    const status = document.getElementById("status");
+    const select = document.getElementById("build");
+
+    const manifest = await (await fetch("images/manifest.json", { cache: "no-cache" })).json();
+    const build = manifest.builds.find(b => b.id === params.get("build")) || manifest.builds[0];
+
+    for(const b of manifest.builds)
+    {
+        select.add(new Option(b.label, b.id, false, b === build));
+    }
+    select.onchange = () =>
+    {
+        params.set("build", select.value);
+        location.search = params.toString();
+    };
+
+    const base = image_base(build);
+
+    if(MCUS[build.arch])
+    {
+        // ?debug: and gdb-wui debugging its firmware (builds with "debug")
+        const gdb_build = params.has("debug") && build.debug && manifest.builds.find(b => b.web_app === "gdb-wui");
+        start_mcu(build, base, status, gdb_build || null, manifest);
+        return;
+    }
+
+    status.textContent = "Downloading kernel";
+    const kernel = await fetch_kernel(base + build.kernel, status);
+    const emulator = window.emulator = start_linux(build, kernel, document.getElementById("terminal"), "");
+
+    setup_console_log(emulator, build);
+
+    emulator.add_listener("emulator-ready", () =>
+    {
+        status.textContent = "Booting";
+    });
+
+    if(build.web)
+    {
+        start_guest_web(emulator, build).catch(e =>
+        {
+            document.getElementById("web-status").textContent = "Unavailable: " + e.message;
+        });
+    }
+})().catch(e =>
+{
+    document.getElementById("status").textContent = "Error: " + e.message;
+    throw e;
+});
+
+// Each version of an image has its own directory (tools/version-images.py),
+// so cached parts of an earlier one are never mixed in
+function image_base(build)
+{
+    return "images/" + build.id + "/" + (build.dir ? build.dir + "/" : "");
+}
+
+// A Linux machine (riscv64, or riscv32) for build, with its console in
+// `container`, and cmdline_extra after the image's command line.
+function start_linux(build, kernel, container, cmdline_extra)
+{
+    const params = new URLSearchParams(location.search);
+    const base = image_base(build);
+    // By default the guest's HTTP goes through this site's /proxy (worker.js);
+    // ?relay=fetch fetches directly from the page (CORS and mixed content apply).
+    const relay = params.get("relay") || "fetch";
+    const cors_proxy = params.has("relay") ? undefined : location.origin + "/proxy?url=";
+    return new V86({
+        // riscv64, or riscv32 for an RV32 image (add-image.sh ARCH=riscv32)
+        arch: build.arch || "riscv64",
+        wasm_path: "v86-rv64.wasm",
+        // ?jit=0 turns off the JIT (compiled blocks; src/rv64/src/jit.rs)
+        rv64_jit: params.get("jit") !== "0",
+        // OpenSBI (fw_dynamic), which starts the kernel in S mode
+        bios: { url: base + build.bios },
+        memory_size: (build.memory_mb || 256) * 1024 * 1024,
+        kernel: { buffer: kernel },
+        hda: {
+            url: base + "rootfs/" + build.rootfs.ext,
+            size: build.rootfs.size,
+            fixed_chunk_size: build.rootfs.chunk_size,
+            use_parts: true,
+            async: true,
+        },
+        cmdline: [build.cmdline, cmdline_extra].filter(Boolean).join(" "),
+        net_device: { type: "virtio", relay_url: relay, cors_proxy },
+        serial_console: { type: "xtermjs", container },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+}
+
+// The emulated microcontrollers (src/rv64/src/dev/ch32.rs): specs for the
+// page, the clock CPU load is measured against, what the firmware does.
+const SRC = "https://github.com/retrocpugeek/v86/tree/riscv-port/tools/";
+const MCUS = {
+    ch32v003: {
+        name: "CH32V003",
+        mhz: 24,
+        hw: [
+            ["Microcontroller", "WCH CH32V003"],
+            ["CPU", "QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter)"],
+            ["Clock", "24 MHz internal oscillator, as the firmware sets it (the chip runs up to 48 MHz)"],
+            ["Flash", "16 KB (16,384 bytes) at 0x0800 0000, also at 0"],
+            ["SRAM", "2 KB (2,048 bytes) at 0x2000 0000"],
+            ["Peripherals", "SysTick timer, PFIC interrupt controller, USART1 as the serial console (115200 baud), RCC clocks; other registers just hold values"],
+        ],
+        timing: "SysTick interrupt every 10 ms; the CPU sleeps (<code>wfi</code>) in between",
+        about: "A WCH CH32V003 microcontroller (RISC-V RV32EC, 48 MHz class, 2 KB of RAM, 16 KB of flash) emulated by " +
+            "v86's RISC-V core, running a bare-metal Tetris that draws over its serial port " +
+            `(<a href="${SRC}ch32v003">firmware source</a>).`,
+    },
+    gameconsole: {
+        name: "CH32V003 Game Console",
+        mhz: 12,
+        hw: [
+            ["Board", `Stefan Wagner's <a href="https://github.com/wagiminator/CH32V003-GameConsole">CH32V003 RISC-V Mini Game Console</a>`],
+            ["Microcontroller", "WCH CH32V003J4M6 (8 pins)"],
+            ["CPU", "QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter, an instruction per clock cycle)"],
+            ["Clock", "@MHZ MHz, as the game sets it up (24 MHz internal oscillator; 48 MHz with the PLL)"],
+            ["Flash", "16 KB (16,384 bytes) at 0x0800 0000, also at 0"],
+            ["SRAM", "2 KB (2,048 bytes) at 0x2000 0000"],
+            ["Display", "SSD1306 128 x 64 OLED on I2C1 (PC1, PC2) at 400 kHz, at the bus's speed: a full screen takes about 23 ms"],
+            ["Buttons", "Up, down, left and right on a resistor ladder into the ADC (PC4); fire on PA2"],
+            ["Buzzer", "PA1, toggled by the game: played with Web Audio"],
+            ["Peripherals", "SysTick, PFIC, RCC clocks, GPIO, ADC1, I2C1 (master transmitter), DMA1 channel 6 to I2C1"],
+        ],
+        timing: "No interrupts (Conway's Life: DMA complete): the game polls SysTick for its delays and the I2C bus as it draws",
+        about: "Games for Stefan Wagner's CH32V003 Mini Game Console, a 10-cent RISC-V microcontroller with an OLED display, " +
+            "emulated by v86's RISC-V core with its display, buttons and buzzer. The games are " +
+            `<a href="https://github.com/wagiminator/CH32V003-GameConsole/tree/ad10df9/software">built from their source</a> ` +
+            `(<a href="${SRC}ch32v003-gameconsole">build script</a>): Tiny Tris, Tiny Invaders, Tiny Arkanoid and Tiny Pacman ` +
+            `are Daniel Champagne's <a href="https://www.tinyjoypad.com/">TinyJoypad</a> games for the ATtiny85, Tiny Lander is ` +
+            `<a href="https://github.com/tscha70/TinyLanderV1.0">tscha70's</a>, all converted by Stefan Wagner (GPL-3.0); ` +
+            "Conway's Life is his own (CC BY-SA 3.0).",
+    },
+    ch32v307: {
+        name: "CH32V307",
+        mhz: 144,
+        hw: [
+            ["Microcontroller", "WCH CH32V307 (as on the CH32V307V-R1 board)"],
+            ["CPU", "QingKe V4F: RISC-V RV32IMAFC, machine mode (run by v86's interpreter), with QingKe's hardware register stacking (HPE) and vector table"],
+            ["Clock", "144 MHz from the 8 MHz crystal and PLL, as the firmware sets it"],
+            ["Flash", "256 KB at 0x0800 0000, also at 0 (the chip's 256 KB flash / 64 KB SRAM split)"],
+            ["SRAM", "64 KB at 0x2000 0000 (up to 128 KB with other splits)"],
+            ["Peripherals", "SysTick timer (with its software interrupt), PFIC interrupt controller, USART1 as the serial console (115200 baud, interrupt driven), RCC clocks and PLL, RTC (set from your clock, shown in UTC), GPIO output; other registers just hold values"],
+        ],
+        timing: "SysTick interrupt every 1 ms (RT-Thread's tick); thread switches by software interrupt; the idle thread sleeps (<code>wfi</code>)",
+        about: "A WCH CH32V307 microcontroller (RISC-V RV32IMAFC, 144 MHz) emulated by v86's RISC-V core, running " +
+            `<a href="https://github.com/RT-Thread/rt-thread">RT-Thread</a> with its <code>msh</code> shell on the serial port ` +
+            `(<a href="${SRC}ch32v307">build script</a>). Demos: <code>snake</code> (w/a/s/d or arrows, q quits; ` +
+            `<a href="https://github.com/mysterywolf/snake">source</a>, GPL-2.0), <code>aclock</code> (any key quits; ` +
+            `<a href="https://github.com/mysterywolf/aclock">source</a>), <code>core_mark</code> (takes about 15 s; ` +
+            `the score measures the emulator on your device, not a real chip; ` +
+            `<a href="https://github.com/wuhanstudio/coremark">source</a>) and <code>lua</code> (Lua 5.1, Ctrl-D quits; ` +
+            `<a href="https://github.com/liu2guang/Lua2RTT">source</a>).`,
+    },
+};
+
+// A microcontroller with build.bios as its flash: no kernel or disk. The
+// terminal is sized to build.cols x build.rows, with the font scaled to fit
+// the page's width.
+function start_mcu(build, base, status, gdb_build, manifest)
+{
+    const mcu = MCUS[build.board || build.arch];
+    if(build.board === "gameconsole")
+    {
+        start_game_console(build, base, status, mcu, gdb_build, manifest);
+        return;
+    }
+    const cols = build.cols || 46, rows = build.rows || 25;
+    const width = Math.min(document.documentElement.clientWidth - 32 - 8, 760);
+    const font_size = Math.max(8, Math.min(18, Math.floor(width / (cols * 0.6))));
+    const SizedTerminal = class extends window["Terminal"]
+    {
+        constructor(options)
+        {
+            super(Object.assign({}, options, { cols, rows, fontSize: font_size }));
+        }
+    };
+    const about = document.getElementById("mcu-about");
+    about.innerHTML = mcu.about;
+    about.hidden = false;
+    document.querySelector("h1").textContent = "v86 " + mcu.name;
+    document.title = "v86 " + mcu.name + ": " + build.label.replace(/^.*: /, "");
+    const emulator = window.emulator = new V86({
+        arch: build.arch,
+        wasm_path: "v86-rv64.wasm",
+        bios: { url: base + build.bios },
+        serial_console: { type: "xtermjs", container: document.getElementById("terminal"), xterm_lib: SizedTerminal },
+        // held at reset for the debugger
+        autostart: !gdb_build,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+    setup_console_log(emulator, build);
+    emulator.add_listener("emulator-ready", () => { if(!gdb_build) status.textContent = "Running"; });
+    setup_debugging(emulator, build, status, gdb_build, manifest);
+    if(build.controls === "tetris")
+    {
+        setup_pad(emulator);
+    }
+    else if(build.controls === "shell")
+    {
+        setup_shell_pad(emulator, build.commands || []);
+    }
+    show_mcu_info(emulator, mcu, build);
+}
+
+// The CH32V003 game console (tools/ch32v003-gameconsole): the OLED display
+// (src/rv64/src/dev/ssd1306.rs) on a canvas, the buttons and the buzzer.
+function start_game_console(build, base, status, mcu, gdb_build, manifest)
+{
+    const about = document.getElementById("mcu-about");
+    about.innerHTML = mcu.about;
+    about.hidden = false;
+    document.getElementById("terminal").hidden = true;
+    document.getElementById("console").hidden = false;
+    document.querySelector("h1").textContent = "v86 " + mcu.name;
+    document.title = "v86 " + mcu.name + ": " + build.label.replace(/^.*: /, "");
+    const emulator = window.emulator = new V86({
+        arch: build.arch,
+        wasm_path: "v86-rv64.wasm",
+        bios: { url: base + build.bios },
+        // held at reset for the debugger
+        autostart: !gdb_build,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+    setup_debugging(emulator, build, status, gdb_build, manifest);
+    emulator.add_listener("emulator-ready", () =>
+    {
+        if(!gdb_build) status.textContent = "Running";
+        draw_oled(emulator);
+        setup_console_buttons(emulator);
+        setup_buzzer(emulator);
+    });
+    show_mcu_info(emulator, mcu, build);
+}
+
+// Debugging the firmware with gdb-wui (?debug, for builds with "debug": the
+// name of its project in the gdb-wui image, /root/mcu/<debug>, with its ELF
+// and sources; tools/rv64-gdb/build.sh). gdb-wui's Linux machine, the gdb-wui
+// image, runs next to the microcontroller, and its gdb connects to the
+// microcontroller's GDB stub (src/rv64/src/gdb.rs) through this page as
+// through a debug probe: S95gdb-wui, told the project on the kernel command
+// line, runs target remote to its gateway's port 3333 (serve_gdb_stub in
+// guest-web.js). The microcontroller is held at reset until gdb connects.
+const GDB_STUB_PORT = 3333;
+
+function setup_debugging(emulator, build, status, gdb_build, manifest)
+{
+    const offer = document.getElementById("mcu-debug");
+    const can_debug = build.debug && manifest.builds.some(b => b.web_app === "gdb-wui");
+    if(!can_debug) return;
+    if(!gdb_build)
+    {
+        offer.innerHTML = `<a href="?build=${encodeURIComponent(build.id)}&amp;debug">Debug this firmware with gdb</a>: ` +
+            "source-level debugging in gdb-wui, in a Linux machine next to this one, as through a debug probe " +
+            "(a desktop browser, and a minute to boot).";
+        offer.hidden = false;
+        document.getElementById("debug-arch").hidden = false;
+        return;
+    }
+    const arch = document.getElementById("debug-arch");
+    arch.hidden = false;
+    arch.open = true;
+    offer.innerHTML = `Debugging with gdb-wui, below. <a href="?build=${encodeURIComponent(build.id)}">Without the debugger</a>`;
+    offer.hidden = false;
+    status.textContent = "Held at reset until gdb-wui connects: its machine is starting";
+    let started = false;
+    document.getElementById("debug-console").hidden = false;
+    const web_status = document.getElementById("web-status");
+    (async () =>
+    {
+        // (the web section, shown by start_guest_web, says how far it is)
+        document.getElementById("web").hidden = false;
+        document.getElementById("web-title").textContent = "gdb-wui";
+        web_status.textContent = "Downloading kernel";
+        const kernel = await fetch_kernel(image_base(gdb_build) + gdb_build.kernel, web_status);
+        const vm = window.debugger_emulator =
+            start_linux(gdb_build, kernel, document.getElementById("debug-terminal"), "gdb_wui.mcu=" + build.debug);
+        await start_guest_web(vm, gdb_build, {
+            gdb_stub: {
+                port: GDB_STUB_PORT,
+                target: emulator,
+                on_change: attached =>
+                {
+                    if(attached && !started)
+                    {
+                        started = true;
+                        emulator.run();
+                    }
+                    status.textContent = attached ? "gdb-wui is attached" : "Running (gdb-wui detached)";
+                },
+            },
+        });
+    })().catch(e =>
+    {
+        web_status.textContent = "Unavailable: " + e.message;
+    });
+}
+
+// The display, redrawn when it changes: lit pixels in an OLED's blue-white,
+// brighter with the contrast setting.
+function draw_oled(emulator)
+{
+    const canvas = document.getElementById("oled");
+    const ctx = canvas.getContext("2d");
+    const image = ctx.createImageData(128, 64);
+    let frame = 0;
+    const draw = () =>
+    {
+        const d = emulator.get_oled_display(frame);
+        if(d && d.pixels)
+        {
+            frame = d.frame;
+            const level = 0.45 + 0.55 * d.contrast / 255;
+            const on = [Math.round(170 * level), Math.round(225 * level), Math.round(255 * level)];
+            for(let i = 0; i < 128 * 64; i++)
+            {
+                const lit = d.pixels[i];
+                image.data[4 * i] = lit ? on[0] : 5;
+                image.data[4 * i + 1] = lit ? on[1] : 7;
+                image.data[4 * i + 2] = lit ? on[2] : 10;
+                image.data[4 * i + 3] = 255;
+            }
+            ctx.putImageData(image, 0, 0);
+        }
+        requestAnimationFrame(draw);
+    };
+    draw();
+}
+
+// The direction buttons are on a resistor ladder into ADC channel 2 (PC4):
+// the values the games expect (their driver.h) for each button and pair.
+const PAD_ADC = { n: 197, ne: 259, e: 90, se: 388, s: 346, sw: 616, w: 511, nw: 567 };
+// Fire: PA2, pulled up, low when pressed
+const FIRE_PORT = 0, FIRE_PIN = 2;
+
+function setup_console_buttons(emulator)
+{
+    const dpad = document.getElementById("dpad");
+    const fire = document.getElementById("fire");
+    const touch = new Set(), keys = new Set();
+    let touch_fire = false, key_fire = false;
+    const update = () =>
+    {
+        const held = new Set([...touch, ...keys]);
+        const v = (held.has("n") ? "n" : held.has("s") ? "s" : "") + (held.has("e") ? "e" : held.has("w") ? "w" : "");
+        emulator.set_adc_input(2, PAD_ADC[v] || 0);
+        for(const d of ["n", "s", "e", "w"])
+        {
+            dpad.querySelector("." + d).classList.toggle("down", v.includes(d));
+        }
+        const firing = touch_fire || key_fire;
+        emulator.set_gpio_in(FIRE_PORT, firing ? 1 << FIRE_PIN : 0, 0);
+        fire.classList.toggle("down", firing);
+    };
+    // The D-pad: the direction from its centre (8 ways), while touched
+    const aim = e =>
+    {
+        const r = dpad.getBoundingClientRect();
+        const x = e.clientX - (r.left + r.width / 2), y = e.clientY - (r.top + r.height / 2);
+        touch.clear();
+        if(Math.hypot(x, y) > r.width * 0.12)
+        {
+            const a = Math.atan2(-y, x) * 180 / Math.PI;
+            const sector = Math.round(((a + 360) % 360) / 45) % 8;
+            ["e", "ne", "n", "nw", "w", "sw", "s", "se"][sector].split("").forEach(d => touch.add(d));
+        }
+        update();
+    };
+    dpad.addEventListener("pointerdown", e =>
+    {
+        e.preventDefault();
+        dpad.setPointerCapture(e.pointerId);
+        if(navigator.vibrate) navigator.vibrate(8);
+        aim(e);
+    });
+    dpad.addEventListener("pointermove", e => { if(dpad.hasPointerCapture(e.pointerId)) aim(e); });
+    const release = () => { touch.clear(); update(); };
+    dpad.addEventListener("pointerup", release);
+    dpad.addEventListener("pointercancel", release);
+    fire.addEventListener("pointerdown", e =>
+    {
+        e.preventDefault();
+        fire.setPointerCapture(e.pointerId);
+        if(navigator.vibrate) navigator.vibrate(8);
+        touch_fire = true;
+        update();
+    });
+    const fire_up = () => { touch_fire = false; update(); };
+    fire.addEventListener("pointerup", fire_up);
+    fire.addEventListener("pointercancel", fire_up);
+    for(const el of [dpad, fire]) el.addEventListener("contextmenu", e => e.preventDefault());
+    const KEYS = {
+        ArrowUp: "n", ArrowDown: "s", ArrowLeft: "w", ArrowRight: "e", w: "n", s: "s", a: "w", d: "e",
+        " ": "fire", z: "fire", Enter: "fire",
+    };
+    const key = (e, down) =>
+    {
+        const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+        if(!k || e.ctrlKey || e.metaKey || e.altKey) return;
+        e.preventDefault();
+        if(k === "fire") key_fire = down;
+        else if(down) keys.add(k);
+        else keys.delete(k);
+        update();
+    };
+    document.addEventListener("keydown", e => key(e, true));
+    document.addEventListener("keyup", e => key(e, false));
+    window.addEventListener("blur", () => { keys.clear(); key_fire = false; update(); });
+}
+
+// The buzzer (PA1): the game toggles it in timed loops. Its edges come with
+// the machine's time; each burst of them is played as a square wave at
+// their rate, a little later (the latency) than they happened.
+const BUZZER_PORT = 0, BUZZER_PIN = 1, BUZZER_LATENCY = 0.08;
+
+function setup_buzzer(emulator)
+{
+    const button = document.getElementById("sound");
+    let on = true, audio = null, gain = null, osc = null;
+    // (the machine's time - the audio clock's), set at the first edges
+    let offset = null;
+    let pending = [];
+    emulator.watch_gpio(BUZZER_PORT, 1 << BUZZER_PIN);
+    const start_audio = () =>
+    {
+        if(audio || !on) return;
+        const Ctx = window.AudioContext || window["webkitAudioContext"];
+        if(!Ctx) return;
+        audio = new Ctx();
+        gain = audio.createGain();
+        gain.gain.value = 0;
+        gain.connect(audio.destination);
+        osc = audio.createOscillator();
+        osc.type = "square";
+        osc.connect(gain);
+        osc.start();
+    };
+    // Audio may only start after a tap or key press
+    for(const ev of ["pointerdown", "keydown"])
+    {
+        document.addEventListener(ev, () => { start_audio(); if(audio && audio.state === "suspended") audio.resume(); }, true);
+    }
+    button.addEventListener("click", () =>
+    {
+        on = !on;
+        button.textContent = "Sound: " + (on ? "on" : "off");
+        if(!on && gain)
+        {
+            gain.gain.cancelScheduledValues(0);
+            gain.gain.setValueAtTime(0, audio.currentTime);
+        }
+    });
+    setInterval(() =>
+    {
+        const { now, edges } = emulator.take_gpio_edges();
+        if(!audio || !on || audio.state !== "running")
+        {
+            offset = null;
+            return;
+        }
+        const t_audio = audio.currentTime;
+        if(offset === null || Math.abs(now / 1000 - t_audio - offset) > 0.25) offset = now / 1000 - t_audio;
+        pending = pending.concat(edges.map(e => e.time / 1000));
+        // Bursts: edges less than 4 ms apart; play the finished ones
+        while(pending.length)
+        {
+            let end = 0;
+            while(end + 1 < pending.length && pending[end + 1] - pending[end] < 0.004) end++;
+            if(end + 1 === pending.length && now / 1000 - pending[end] < 0.004) break;
+            const burst = pending.splice(0, end + 1);
+            if(burst.length < 3) continue;
+            const t0 = burst[0] - offset + BUZZER_LATENCY, t1 = burst[burst.length - 1] - offset + BUZZER_LATENCY;
+            if(t1 <= audio.currentTime) continue;
+            const freq = (burst.length - 1) / 2 / (burst[burst.length - 1] - burst[0]);
+            const at = Math.max(t0, audio.currentTime);
+            osc.frequency.setValueAtTime(Math.min(freq, 12000), at);
+            gain.gain.setValueAtTime(0.08, at);
+            gain.gain.setValueAtTime(0, t1);
+        }
+    }, 25);
+}
+
+// Keys a phone's keyboard lacks, and one-tap commands, for a serial shell.
+function setup_shell_pad(emulator, commands)
+{
+    const pad = document.getElementById("shell-pad");
+    pad.hidden = false;
+    const unescape = s => s.replace(/\\(x[0-9a-f]{2}|[trn])/g, (_, e) =>
+        e[0] === "x" ? String.fromCharCode(parseInt(e.slice(1), 16)) : { t: "\t", r: "\r", n: "\n" }[e]);
+    for(const button of pad.querySelectorAll("button[data-send]"))
+    {
+        const text = unescape(button.dataset.send);
+        button.addEventListener("click", () => emulator.serial0_send(text));
+    }
+    const cmds = document.getElementById("shell-cmds");
+    for(const c of commands)
+    {
+        const button = document.createElement("button");
+        button.textContent = c;
+        button.addEventListener("click", () => emulator.serial0_send(c + "\r"));
+        cmds.append(button);
+    }
+    document.getElementById("shell-note").textContent = "Tap the terminal to type; these send keys and commands.";
+}
+
+// The microcontroller's specs and the firmware's use of them: sizes from the
+// build, peak stack (if the firmware fills its free RAM with a pattern at
+// reset: the lowest changed word), CPU load as instructions per second
+// against the clock (about one per cycle), and LEDs from GPIO outputs.
+function show_mcu_info(emulator, mcu, build)
+{
+    const stats = build.stats;
+    document.getElementById("mcu-info").hidden = false;
+    document.getElementById("mcu-hw").innerHTML = mcu.hw.map(([k, v]) =>
+        `<tr><th>${k}</th><td>${v.replace("@MHZ", build.mhz || mcu.mhz)}</td></tr>`).join("");
+    document.getElementById("mcu-timing").innerHTML = mcu.timing;
+    const n = v => v.toLocaleString("en");
+    const pct = (part, whole) => (100 * part / whole).toFixed(part / whole < 0.1 ? 1 : 0) + "%";
+    const bar = (part, whole) => `<span class="bar"><i style="width: ${Math.min(100, 100 * part / whole).toFixed(1)}%"></i></span>`;
+    const has_stack = stats && stats.stack_bottom !== undefined;
+    document.getElementById("mcu-stack-row").hidden = !has_stack;
+    document.getElementById("mcu-live").textContent = (has_stack ? "Stack and CPU load are" : "CPU load is") +
+        " measured live in the emulator, every second.";
+    if(stats)
+    {
+        document.getElementById("mcu-flash").innerHTML =
+            `${n(stats.flash)} bytes: ${pct(stats.flash, stats.flash_size)} of flash (code and constants ${n(stats.text)}, initial data ${n(stats.data)})` +
+            bar(stats.flash, stats.flash_size);
+        const ram = stats.data + stats.bss;
+        document.getElementById("mcu-ram").innerHTML =
+            `${n(ram)} bytes: ${pct(ram, stats.ram_size)} of SRAM (data ${n(stats.data)}, bss ${n(stats.bss)}); ` +
+            (has_stack ? `${n(stats.stack_top - stats.stack_bottom)} bytes left for the stack` : `the rest is the heap and thread stacks`) +
+            bar(ram, stats.ram_size);
+    }
+    else
+    {
+        document.getElementById("mcu-flash-row").hidden = true;
+        document.getElementById("mcu-ram-row").hidden = true;
+    }
+    const leds = build.leds || [];
+    if(leds.length)
+    {
+        const box = document.getElementById("leds");
+        box.hidden = false;
+        box.innerHTML = leds.map(l => `<span><span class="led"></span>${l.label} (P${"ABCDE"[l.port]}${l.pin})</span>`).join("");
+        const dots = box.querySelectorAll(".led");
+        emulator.add_listener("emulator-ready", () => setInterval(() =>
+        {
+            leds.forEach((l, i) => dots[i].classList.toggle("on", !!(emulator.get_gpio_out(l.port) >> l.pin & 1)));
+        }, 50));
+    }
+    const MHZ = build.mhz || mcu.mhz;
+    let last_count = emulator.get_instruction_counter(), last_time = performance.now();
+    setInterval(() =>
+    {
+        const count = emulator.get_instruction_counter(), time = performance.now();
+        const ips = (count - last_count) / ((time - last_time) / 1000);
+        last_count = count;
+        last_time = time;
+        document.getElementById("mcu-cpu").innerHTML =
+            `${pct(ips, MHZ * 1e6)} busy: ${(ips / 1e6).toFixed(2)} million instructions per second of ${MHZ} MHz` + bar(ips, MHZ * 1e6);
+        if(has_stack)
+        {
+            const size = stats.stack_top - stats.stack_bottom;
+            const ram = emulator.read_memory(stats.stack_bottom, size);
+            let k = 0;
+            while(k < size && ram[k] === (stats.stack_fill & 0xff)) k++;
+            const used = size - (k & ~3);
+            document.getElementById("mcu-stack").innerHTML =
+                `${n(used)} bytes of ${n(size)} (${pct(used, size)}); peak SRAM use ${n(stats.data + stats.bss + used)} of ${n(stats.ram_size)} bytes` +
+                bar(used, size);
+        }
+    }, 1000);
+}
+
+// On-screen controls for the Tetris firmware (tools/ch32v003/tetris.c): each
+// button sends the key the game reads from its serial port; left, right
+// and down repeat while held. Without the terminal focused, the keyboard's
+// keys are sent too.
+const PAD_KEYS = {
+    rotate: "\x1b[A", left: "\x1b[D", right: "\x1b[C", down: "\x1b[B",
+    drop: " ", rotate_back: "z", pause: "p", new: "r",
+};
+
+function setup_pad(emulator)
+{
+    const pad = document.getElementById("pad");
+    pad.hidden = false;
+    for(const button of pad.querySelectorAll("button"))
+    {
+        const key = PAD_KEYS[button.dataset.key];
+        let timer = 0;
+        const stop = () =>
+        {
+            clearTimeout(timer);
+            clearInterval(timer);
+            timer = 0;
+            button.classList.remove("down");
+        };
+        button.addEventListener("pointerdown", e =>
+        {
+            e.preventDefault();
+            button.setPointerCapture(e.pointerId);
+            button.classList.add("down");
+            emulator.serial0_send(key);
+            if(navigator.vibrate) navigator.vibrate(8);
+            if(button.hasAttribute("data-repeat"))
+            {
+                timer = setTimeout(() => { timer = setInterval(() => emulator.serial0_send(key), 75); }, 220);
+            }
+        });
+        button.addEventListener("pointerup", stop);
+        button.addEventListener("pointercancel", stop);
+        button.addEventListener("lostpointercapture", stop);
+        button.addEventListener("contextmenu", e => e.preventDefault());
+    }
+    const keyboard = {
+        ArrowUp: PAD_KEYS.rotate, ArrowLeft: PAD_KEYS.left, ArrowRight: PAD_KEYS.right, ArrowDown: PAD_KEYS.down,
+        " ": " ", z: "z", x: "x", p: "p", r: "r", a: "a", d: "d", w: "w", s: "s",
+    };
+    document.addEventListener("keydown", e =>
+    {
+        if(document.getElementById("terminal").contains(document.activeElement)) return;
+        const k = keyboard[e.key];
+        if(k && !e.ctrlKey && !e.metaKey && !e.altKey)
+        {
+            e.preventDefault();
+            emulator.serial0_send(k);
+        }
+    });
+}
+
+// The kernel, decompressed if it's gzipped (Image.gz: Cloudflare's static
+// assets allow at most 25 MiB per file)
+async function fetch_kernel(url, status)
+{
+    const response = await fetch(url);
+    if(!response.ok) throw new Error(url + ": " + response.status);
+    const total = +response.headers.get("content-length") || 0;
+    let loaded = 0;
+    const progress = new TransformStream({
+        transform(chunk, controller)
+        {
+            loaded += chunk.length;
+            if(total) status.textContent = "Downloading kernel: " + Math.round(loaded / total * 100) + "%";
+            controller.enqueue(chunk);
+        },
+    });
+    let body = response.body.pipeThrough(progress);
+    if(url.endsWith(".gz")) body = body.pipeThrough(new DecompressionStream("gzip"));
+    return new Response(body).arrayBuffer();
+}
+
+// The console's output, for copying, saving or sharing (copying out of the
+// terminal is hard on phones). A banner offers it when the kernel reports an
+// error.
+
+const LOG_MAX = 4 << 20;
+const CRASH_PATTERN = /Kernel panic|Unable to handle kernel|Oops[: -]|BUG: |Call Trace:|sbi_trap_error/;
+
+function setup_console_log(emulator, build)
+{
+    let log = "";
+    let line = "";
+    let crashed = false;
+    const started = new Date();
+    const note = document.getElementById("log-note");
+    const dialog = document.getElementById("log-dialog");
+    const text = document.getElementById("log-text");
+
+    emulator.add_listener("serial0-output-byte", byte =>
+    {
+        const c = String.fromCharCode(byte);
+        log += c;
+        if(log.length > LOG_MAX) log = log.slice(-LOG_MAX / 2);
+        if(c !== "\n")
+        {
+            if(line.length < 400) line += c;
+            return;
+        }
+        if(!crashed && CRASH_PATTERN.test(line))
+        {
+            crashed = true;
+            document.getElementById("crash").hidden = false;
+        }
+        line = "";
+    });
+
+    function log_text()
+    {
+        const clean = log
+            .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "")  // terminal control sequences
+            .replace(/\x1b[()][0-9A-Za-z]|\x1b[=>78]/g, "")
+            .replace(/\r+\n/g, "\n")
+            .replace(/[^\n]*\r/g, "");  // overwritten parts of lines
+        return [
+            "v86 " + (build.arch || "riscv64") + " console log",
+            "image: " + build.id + " (" + build.label + ")",
+            "page: " + location.href,
+            "browser: " + navigator.userAgent,
+            "started: " + started.toISOString() + ", saved: " + new Date().toISOString(),
+            "",
+            clean,
+        ].join("\n");
+    }
+    function file_name()
+    {
+        return "v86-" + build.id + "-" + new Date().toISOString().replace(/[:.]/g, "-") + ".txt";
+    }
+    function show_note(message)
+    {
+        note.textContent = message;
+        setTimeout(() => { if(note.textContent === message) note.textContent = ""; }, 4000);
+    }
+    function view()
+    {
+        text.value = log_text();
+        dialog.showModal();
+        text.scrollTop = text.scrollHeight;
+    }
+
+    const actions = {
+        async copy()
+        {
+            try
+            {
+                await navigator.clipboard.writeText(log_text());
+                show_note("Copied");
+            }
+            catch(e)
+            {
+                // No clipboard access: show it for copying by hand
+                view();
+                text.focus();
+                text.select();
+            }
+        },
+        save()
+        {
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(new Blob([log_text()], { type: "text/plain" }));
+            a.download = file_name();
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        },
+        async share()
+        {
+            const file = new File([log_text()], file_name(), { type: "text/plain" });
+            try
+            {
+                if(navigator.canShare && navigator.canShare({ files: [file] }))
+                {
+                    await navigator.share({ title: "v86 console log", files: [file] });
+                }
+                else
+                {
+                    await navigator.share({ title: "v86 console log", text: log_text() });
+                }
+            }
+            catch(e)
+            {
+                if(e.name !== "AbortError") show_note("Sharing failed: " + e.message);
+            }
+        },
+        view,
+        select()
+        {
+            text.focus();
+            text.select();
+        },
+        close()
+        {
+            dialog.close();
+        },
+    };
+
+    for(const button of document.querySelectorAll("[data-log]"))
+    {
+        if(button.dataset.log === "share") button.hidden = !navigator.share;
+        button.onclick = () => actions[button.dataset.log]();
+    }
+}
+</script>

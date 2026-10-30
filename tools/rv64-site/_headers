@@ -1,0 +1,10 @@
+/images/*
+  Cache-Control: public, max-age=86400
+/images/manifest.json
+  Cache-Control: no-cache
+/*.wasm
+  Cache-Control: public, max-age=3600
+/*.js
+  Cache-Control: public, max-age=3600
+/kuna/manifest.json
+  Cache-Control: no-cache

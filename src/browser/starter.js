@@ -53,7 +53,7 @@ export function V86(options)
     this.cpu_is_running = false;
     this.cpu_exception_hook = function(n) {};
 
-    /** "x86" (default) or "aarch64" */
+    /** "x86" (default), "aarch64", "riscv64", "riscv32", "ch32v003" or "ch32v307" */
     const arch = options.arch || "x86";
 
     const bus = Bus.create();
@@ -115,6 +115,11 @@ export function V86(options)
         "a64_mmio_read": function(addr, size) { return cpu.mmio_read(addr, size); },
         "a64_mmio_write": function(addr, size, value) { cpu.mmio_write(addr, size, value); },
         "a64_jit_compile": function(ptr, len, index, cookie) { return cpu.jit_compile(ptr, len, index, cookie); },
+        // riscv64 (v86-rv64.wasm): virtio-mmio is in JS, the UART talks to serial0
+        "rv64_mmio_read": function(addr, size) { return cpu.mmio_read(addr, size); },
+        "rv64_mmio_write": function(addr, size, value) { cpu.mmio_write(addr, size, value); },
+        "rv64_serial_out": function(byte) { cpu.serial_out(byte); },
+        "rv64_jit_compile": function(ptr, len, index, cookie) { return cpu.jit_compile(ptr, len, index, cookie); },
     };
 
     let wasm_fn = options.wasm_fn;
@@ -126,7 +131,7 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin = arch === "aarch64" ? "v86-a64.wasm" : arch === "riscv64" || arch === "riscv32" || arch.startsWith("ch32v") ? "v86-rv64.wasm" : DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
                 if(options.wasm_path)
@@ -185,7 +190,7 @@ export function V86(options)
     wasm_fn({ "env": wasm_shared_funcs })
         .then((exports) => {
             wasm_memory = exports.memory;
-            if(arch !== "aarch64")
+            if(arch === "x86")
             {
                 exports["rust_init"]();
             }
@@ -254,6 +259,7 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.parallel1 = options.parallel1;
     settings.cmdline = options.cmdline;
     settings.a64_jit = options.a64_jit;
+    settings.rv64_jit = options.rv64_jit;
     settings.a64_firmware = options.a64_firmware;
     settings.a64_display = options.a64_display;
     settings.preserve_mac_from_state_image = options.preserve_mac_from_state_image;
@@ -947,7 +953,9 @@ V86.prototype.get_instruction_counter = function()
 {
     if(this.v86)
     {
-        return this.v86.cpu.instruction_counter[0] >>> 0;
+        const cpu = this.v86.cpu;
+        // The aarch64 and riscv machines count in wasm
+        return cpu.instruction_counter ? cpu.instruction_counter[0] >>> 0 : cpu.get_instruction_counter();
     }
     else
     {
@@ -1546,6 +1554,106 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
 
     this.remove_listener("screen-put-char", screen_put_char);
     return succeeded;
+};
+
+/**
+ * A microcontroller's GPIO port output register (port 0: A, 1: B, ...), for
+ * showing LEDs; 0 for other machines.
+ *
+ * @param {number} port
+ * @return {number}
+ */
+V86.prototype.get_gpio_out = function(port)
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_gpio_out ? cpu.ch32_gpio_out(port) : 0;
+};
+
+/**
+ * Microcontrollers (arch "ch32v003"): drive input pins of a GPIO port, e.g.
+ * a button's (port 0: A, 1: B, ...; levels for the pins in mask).
+ * @param {number} port
+ * @param {number} mask
+ * @param {number} levels
+ */
+V86.prototype.set_gpio_in = function(port, mask, levels)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_set_gpio_in) cpu.ch32_set_gpio_in(port, mask, levels);
+};
+
+/**
+ * Microcontrollers: set an ADC channel's input (0 to 1023).
+ * @param {number} channel
+ * @param {number} value
+ */
+V86.prototype.set_adc_input = function(channel, value)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_set_adc) cpu.ch32_set_adc(channel, value);
+};
+
+/**
+ * Microcontrollers: the OLED display's state; see RV64CPU.ch32_display.
+ * @param {number} last_frame
+ */
+V86.prototype.get_oled_display = function(last_frame)
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_display ? cpu.ch32_display(last_frame) : null;
+};
+
+/**
+ * Microcontrollers: record changes of output pins (e.g. a buzzer's).
+ * @param {number} port
+ * @param {number} mask
+ */
+V86.prototype.watch_gpio = function(port, mask)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_watch_gpio) cpu.ch32_watch_gpio(port, mask);
+};
+
+/**
+ * Microcontrollers: the watched pins' changes since the last call (times in
+ * ms of virtual time) and the virtual time now.
+ */
+V86.prototype.take_gpio_edges = function()
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_take_gpio_edges ? cpu.ch32_take_gpio_edges() : { now: 0, edges: [] };
+};
+
+/**
+ * Microcontrollers: a debugger connects to the GDB stub (src/rv64/src/gdb.rs),
+ * as through a debug probe. The hart stops; `output` gets the stub's bytes
+ * for gdb, and gdb_input takes gdb's. Returns false for other machines.
+ * @param {function(!Uint8Array)} output
+ * @return {boolean}
+ */
+V86.prototype.gdb_attach = function(output)
+{
+    const cpu = this.v86.cpu;
+    return cpu.gdb_attach ? cpu.gdb_attach(output) : false;
+};
+
+/**
+ * Microcontrollers: bytes from gdb for the stub (see gdb_attach).
+ * @param {!Uint8Array} data
+ */
+V86.prototype.gdb_input = function(data)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.gdb_input) cpu.gdb_input(data);
+};
+
+/**
+ * Microcontrollers: the debugger went away; the hart runs on.
+ */
+V86.prototype.gdb_detach = function()
+{
+    const cpu = this.v86.cpu;
+    if(cpu.gdb_detach) cpu.gdb_detach();
 };
 
 /**

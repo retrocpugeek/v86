@@ -1,0 +1,22 @@
+--- a/aclock.c
++++ b/aclock.c
+@@ -233,7 +233,18 @@
+         draw_text(35, 6, ".:ACLOCK:.");
+         rt_sprintf(digital_time, "[%02d:%02d:%02d]", ltime->tm_hour, ltime->tm_min, ltime->tm_sec);
+         draw_text(35, 19, digital_time);
+-        rt_thread_mdelay(1000);
++        draw_text(31, 21, "any key: exit");
++        /* v86: return to the shell on a key press */
++        for(int k = 0; k < 10; k++)
++        {
++            char c;
++            if(rt_device_read(rt_console_get_device(), -1, &c, 1) == 1)
++            {
++                rt_kprintf("\033[2J\033[H\033[?25h"); // clear, show cursor
++                return;
++            }
++            rt_thread_mdelay(100);
++        }
+     }
+ }
+ MSH_CMD_EXPORT(aclock, a terminal clock);
