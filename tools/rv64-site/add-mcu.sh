@@ -20,7 +20,7 @@
 #     build/ch32v003-minigameconsole/minigameconsole.bin
 #
 #   tools/ch32v003-osillyscope/build.sh
-#   BOARD=osillyscope CONTROLS=none MHZ=48 \
+#   BOARD=osillyscope CONTROLS=none MHZ=48 DEBUG=osillyscope \
 #     tools/rv64-site/add-mcu.sh osillyscope "osillyscope: a CH32V003 oscilloscope" \
 #     build/ch32v003-osillyscope/osillyscope.bin
 #

@@ -16,8 +16,9 @@
 # The microcontroller firmware the site's pages debug with it (?debug) goes
 # in /root/mcu/<name>/: each one's ELF and sources, where their debug info
 # names them. Built first: tools/ch32v003/build.sh (Tetris),
-# tools/ch32v003-gameconsole/build.sh (the game console's games) and
-# tools/ch32v003-minigameconsole/build.sh (the mini game console's firmware).
+# tools/ch32v003-gameconsole/build.sh (the game console's games),
+# tools/ch32v003-minigameconsole/build.sh (the mini game console's firmware)
+# and tools/ch32v003-osillyscope/build.sh (the oscilloscope's).
 #
 # Output: build/rv64-gdb/rootfs.squashfs, for
 #   tools/rv64-site/add-image.sh with WEB=/gdb-wui/ (see that script).
@@ -74,6 +75,16 @@ cp -r "$MINI/src/Software/TinyGameConsole/Core" "$MINI/src/Software/TinyGameCons
     "$MINI/src/Software/TinyGameConsole/Peripheral" "$MINI/src/Software/TinyGameConsole/Startup" \
     "$MINI/src/Software/TinyGameConsole/User" "$MINI/src/Software/TinyGameConsole/Ld" \
     "$MINI/minigameconsole.elf" "$MINI/src/LICENSE" "$MCU/minigameconsole/"
+# The oscilloscope's: its sources and ch32fun's (the CH32V003's of it), as
+# the ELF names them, and their licences (MIT)
+SCOPE=build/ch32v003-osillyscope
+[ -f "$SCOPE/osillyscope.elf" ] || { echo "no osillyscope ELF: run tools/ch32v003-osillyscope/build.sh" >&2; exit 1; }
+mkdir -p "$MCU/osillyscope/fw" "$MCU/osillyscope/ch32fun/ch32fun"
+cp "$SCOPE/osillyscope.elf" "$SCOPE/src/LICENSE" "$MCU/osillyscope/"
+cp "$SCOPE"/src/fw/*.c "$SCOPE"/src/fw/*.h "$MCU/osillyscope/fw/"
+cp "$SCOPE/src/ch32fun/LICENSE" "$MCU/osillyscope/ch32fun/"
+cp "$SCOPE"/src/ch32fun/ch32fun/ch32fun.c "$SCOPE"/src/ch32fun/ch32fun/ch32fun.h "$SCOPE"/src/ch32fun/ch32fun/ch32v003hw.h \
+    "$MCU/osillyscope/ch32fun/ch32fun/"
 if grep -rlI /home/ "$MCU" || grep -rl --binary-files=binary "$HOME" "$MCU"; then
     echo "the firmware names this machine's paths (above)" >&2
     exit 1

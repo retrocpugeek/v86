@@ -16,7 +16,7 @@
 # Writes osillyscope.bin and .json (sizes, for add-mcu.sh, and where its
 # menu's state is, for the page: read with gdb-multiarch) to out-dir
 # (default build/ch32v003-osillyscope), then
-#   BOARD=osillyscope CONTROLS=none MHZ=48 \
+#   BOARD=osillyscope CONTROLS=none MHZ=48 DEBUG=osillyscope \
 #     tools/rv64-site/add-mcu.sh osillyscope "osillyscope: a CH32V003 oscilloscope" \
 #     build/ch32v003-osillyscope/osillyscope.bin
 set -eu

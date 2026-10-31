@@ -103,8 +103,10 @@ async function main()
     if(!/Held at reset/.test(held)) throw new Error("the microcontroller isn't held for the debugger");
 
     await until("gdb-wui connected", "d.getElementById('conn')?.dataset.state === 'open'", +(process.env.CONNECT_TIMEOUT || 600));
-    // (the reset vector: Tetris's _start, the game console's jump_reset)
-    await until("attached, stopped at the reset vector", `${stopped} && /_start|jump_reset/.test(d.getElementById('stack').innerText)`, 180);
+    // (the reset vector: Tetris's _start, the game console's jump_reset,
+    // ch32fun's InterruptVector)
+    await until("attached, stopped at the reset vector",
+        `${stopped} && /_start|jump_reset|InterruptVector/.test(d.getElementById('stack').innerText)`, 180);
     console.log("  page:", await page_status(), "| program:", await frame("d.getElementById('exe-name').textContent"), "| stack:", await stack());
     if(!/attached/.test(await page_status())) throw new Error("the page doesn't say gdb-wui is attached");
     await shot("reset");

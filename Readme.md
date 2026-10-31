@@ -52,7 +52,9 @@ the guest next to the console ([ARM64](https://v86-arm.turret13.workers.dev/?bui
 view uses [kuna](https://github.com/Noelo-Lab/kuna), run as WebAssembly by the
 page. The RISC-V core also has a GDB stub, so adding `&debug` to a CH32V003
 page ([Tetris](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&debug),
-[the mini game console](https://v86-riscv.turret13.workers.dev/?build=minigameconsole&debug))
+[the mini game console](https://v86-riscv.turret13.workers.dev/?build=minigameconsole&debug),
+[the oscilloscope](https://v86-riscv.turret13.workers.dev/?build=osillyscope&debug), where a breakpoint
+in its ADC watchdog's interrupt handler stops it at the trigger)
 debugs the microcontroller's firmware in gdb-wui: breakpoints in flash,
 stepping through the C source, registers and `monitor reset halt`.
 
