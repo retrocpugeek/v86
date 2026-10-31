@@ -1078,7 +1078,9 @@ function setup_console_buttons(emulator, pins)
 // Volts at the probe become ADC codes as its front end makes them: halved,
 // inverted, around 1.62 V (the firmware's volts_from_adc undoes that).
 const SCOPE_MID = 1.62 * 1023 / 3.3, SCOPE_CODES_PER_VOLT = 1023 / 3.3 / 2;
-// The firmware looks at its buttons every 100 ms: a tap is held this long
+// The firmware looks at its buttons every 100 ms or so, acting each time
+// it sees one held: a tap is held until its menu's state changes, or this
+// long (ms) at most when nothing it shows changes
 const SCOPE_MIN_HOLD = 130;
 
 function setup_scope(emulator, scope, build)
@@ -1090,7 +1092,9 @@ function setup_scope(emulator, scope, build)
     const symbols = build.stats && build.stats.symbols;
 
     // Buttons: pulled up, low while held
-    const held = new Set(), since = {};
+    const held = new Set(), since = {}, before = {};
+    const menu_state = () => symbols ?
+        [symbols.ui_selector, symbols.tdiv_sel, symbols.vdiv_sel].map(a => emulator.read_memory(a, 1)[0]).join() : "";
     const update = () =>
     {
         const low = [0, 0, 0, 0, 0];
@@ -1102,12 +1106,16 @@ function setup_scope(emulator, scope, build)
         low.forEach((mask, port) => emulator.set_gpio_in(port, mask, 0));
         document.querySelectorAll("#scope-buttons button").forEach(el => el.classList.toggle("down", held.has(el.dataset.btn)));
     };
-    const press = b => { since[b] = performance.now(); held.add(b); update(); };
+    const press = b => { since[b] = performance.now(); before[b] = menu_state(); held.add(b); update(); };
     const release = b =>
     {
-        const left = SCOPE_MIN_HOLD - (performance.now() - (since[b] || 0));
-        const up = () => { held.delete(b); update(); };
-        if(left > 0) setTimeout(up, left); else up();
+        const up = () =>
+        {
+            if(!held.has(b)) return;
+            if(menu_state() === before[b] && performance.now() - since[b] < SCOPE_MIN_HOLD) setTimeout(up, 5);
+            else { held.delete(b); update(); }
+        };
+        up();
     };
     for(const el of document.querySelectorAll("#scope-buttons button"))
     {

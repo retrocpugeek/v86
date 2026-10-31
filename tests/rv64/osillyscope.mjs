@@ -131,9 +131,11 @@ async function main()
     console.log(`nothing: rows ${flat?.top} to ${flat?.bottom}`);
     if(!flat || flat.span > 1) throw new Error("no flat line for no input");
 
-    // Select (space) moves the menu's selection
+    // A tap of select (space, shorter than the firmware's 100 ms between
+    // looks: the page holds it until it's seen) moves the menu's selection
+    // once
     const sel0 = await ram(symbols.ui_selector);
-    await key(" ", "Space", 32, 150);
+    await key(" ", "Space", 32, 60);
     await sleep(300);
     const sel1 = await ram(symbols.ui_selector);
     console.log(`select: menu selection ${sel0} -> ${sel1}`);
