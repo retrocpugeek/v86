@@ -16,6 +16,11 @@ export HOME=/root XDG_RUNTIME_DIR=/run/gdb-wui
 SIDECARS=
 [ -d /usr/share/gdb-wui/sidecars ] && SIDECARS="-decomp-sidecars /usr/share/gdb-wui/sidecars"
 export SIDECARS
+# gdb has 3 minutes, not gdb-wui's 30 seconds, to start: this machine is
+# emulated, and on a slow computer, just after boot, gdb takes longer than
+# that to answer its first command
+START="-gdb-start-timeout 3m"
+export START
 # And kuna, for any program, which the page this guest runs in serves on its
 # port 5717 (tools/a64-site/guest-web.js, serve_kuna): the page is the
 # guest's gateway. The Decompiled view offers both where there is a sidecar.
@@ -49,7 +54,7 @@ export CARD10
 # card10_wui PORT ELF STUB_PORT: one core's gdb-wui
 card10_wui() {
 	start-stop-daemon -S -q -b -m -p "/run/gdb-wui-$1.pid" -x /bin/sh -- -c \
-		"exec /usr/bin/gdb-wui -addr 0.0.0.0:$1 -listen-anywhere -open=false -no-config -project $CARD10 \$KUNA \
+		"exec /usr/bin/gdb-wui -addr 0.0.0.0:$1 -listen-anywhere -open=false -no-config $START -project $CARD10 \$KUNA \
 			-exe $2 -gdb-command 'set substitute-path /firmware $CARD10/firmware' \
 			-gdb-command 'set remotetimeout 30' \
 			-gdb-command 'target remote ${GATEWAY:-192.168.86.1}:$3' >/tmp/gdb-wui-$1.log 2>&1"
@@ -70,7 +75,7 @@ start)
 		exit 0
 	fi
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui.pid -x /bin/sh -- -c \
-		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config -project "$PROJECT" $SIDECARS $KUNA \
+		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config $START -project "$PROJECT" $SIDECARS $KUNA \
 			${TARGET:+-exe "$MCU.elf" -gdb-command "$TARGET"} >/tmp/gdb-wui.log 2>&1'
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui-url.pid -x /usr/bin/socat -- \
 		TCP-LISTEN:81,reuseaddr,fork SYSTEM:"/usr/bin/gdb-wui -print-url 2>/dev/null"
