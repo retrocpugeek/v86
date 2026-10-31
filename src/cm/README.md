@@ -34,6 +34,7 @@ apps, with its display, buttons and MicroPython's REPL on its serial port
 | `scs.rs` | The System Control Space: NVIC, SCB, SysTick, the MPU's registers (ARMv7-M's or ARMv8-M's layout; not enforced), DWT's cycle counter |
 | `bus.rs` | The memory map: flash, SRAM, bit-band aliases, external flash (XIP), devices with interrupt lines |
 | `elf.rs` | Loading firmware from an ELF file (its segments at their load addresses) |
+| `gdb.rs` | A GDB stub per core (gdb's remote protocol, an M-profile target description with the FPU's registers): the card10's two cores each have one, and stop and step on their own |
 | `fpu.rs` | The floating-point instructions (FPv4-SP; the extended exception frame is in `cpu.rs`) |
 | `dev/pebble.rs` | Pebble's emulator devices: UARTs, timers, RTC, buttons, system control, display (1-bit and 8-bit, round), external flash, audio, touch, the CMSDK watchdog |
 | `dev/max32665.rs` | The card10: its two cores (interleaved, each with its own SCS, sharing the bus), and the MAX32665's peripherals the firmware uses (GCR, SEMA, UART, timers and the wake-up timer, RTC, GPIO, I2C with the PMIC and port expander, SPI with the display, SPIXFC with the MX25 flash, ADC, TRNG; the rest hold what's written) |
@@ -70,8 +71,13 @@ target/release/card10run --epicardium epicardium.elf --pycardium pycardium.elf \
 ```
 
 Its serial console (UART0: Epicardium's log, Pycardium's output) goes to
-standard output; `--keys` presses its buttons (lt, lb, rt, rb), `--type`
-types into its console. In the browser: `tests/cm/card10-page.mjs`.
+standard output; `--gdb0 127.0.0.1:3333 --gdb1 127.0.0.1:3334` serve each
+core's GDB stub (`gdb-multiarch epicardium.elf -ex 'target remote :3333'`,
+with the ELFs from `build/card10/debug`); `--keys` presses its buttons (lt, lb, rt, rb), `--type`
+types into its console. In the browser: `tests/cm/card10-page.mjs`, and
+`tests/guest-web/card10-debug.mjs` for `?build=card10&debug`, where the page
+offers the stubs to a Linux machine (the gdb-wui image, booted with
+`gdb_wui.card10`) that runs a gdb and a gdb-wui per core.
 
 The browser build keeps machines to real time: one too busy for the host
 (the card10's two cores) runs with its CPU clocked lower

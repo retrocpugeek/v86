@@ -4,6 +4,10 @@
 //!   card10run --epicardium epicardium.elf [--pycardium pycardium.elf] [--flash fat.img] [--seconds S]
 //!             [--screenshot out.ppm] [--keys 'rb@5,lt@8,...']
 //!
+//! --gdb0 ADDR, --gdb1 ADDR serve core 0's and core 1's GDB stubs (gdb.rs)
+//! on TCP addresses (e.g. 127.0.0.1:3333): each core stops when its gdb
+//! connects, and runs on when it goes.
+//!
 //! --type 'S:text;...' types into the serial console (UART0) at S seconds
 //! (escapes: \\n, \\r, \\xHH).
 //!
@@ -33,6 +37,7 @@ fn main() {
     let (mut epi, mut py, mut flash, mut seconds, mut shot) = (None, None, None, 10.0f64, None::<String>);
     let mut keys: Vec<(f64, u8)> = Vec::new();
     let mut typed: Vec<(f64, Vec<u8>)> = Vec::new();
+    let mut gdb_addr: [Option<String>; 2] = [None, None];
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_else(|| usage());
         match a.as_str() {
@@ -40,6 +45,8 @@ fn main() {
             "--pycardium" => py = Some(val()),
             "--flash" => flash = Some(val()),
             "--screenshot" => shot = Some(val()),
+            "--gdb0" => gdb_addr[0] = Some(val()),
+            "--gdb1" => gdb_addr[1] = Some(val()),
             "--type" => {
                 // S:text, ... (\\n, \\r and \\xHH escapes)
                 for t in val().split(';') {
@@ -97,6 +104,20 @@ fn main() {
     let start = std::time::Instant::now();
     let end_ns = (seconds * 1e9) as u64;
     let mut stdout = std::io::stdout();
+    // The GDB stubs' listeners, and their connections
+    let listeners: Vec<Option<std::net::TcpListener>> = gdb_addr
+        .iter()
+        .map(|a| {
+            a.as_ref().map(|a| {
+                let l = std::net::TcpListener::bind(a).expect("binding the GDB stub's address");
+                l.set_nonblocking(true).unwrap();
+                eprintln!("card10run: GDB stub on {a}");
+                l
+            })
+        })
+        .collect();
+    let mut conns: [Option<std::net::TcpStream>; 2] = [None, None];
+    let debugging = listeners.iter().any(|l| l.is_some());
     let mut release: Option<f64> = None;
     while m.now_ns() < end_ns {
         let now_s = m.now_ns() as f64 / 1e9;
@@ -118,7 +139,47 @@ fn main() {
                 m.input_changed();
             }
         }
-        let stop = if std::env::var("CARD10_SAMPLE").is_ok() {
+        if debugging {
+            use std::io::Read;
+            for c in 0..2 {
+                if let Some(l) = &listeners[c] {
+                    if conns[c].is_none() {
+                        if let Ok((s, _)) = l.accept() {
+                            s.set_nonblocking(true).unwrap();
+                            s.set_nodelay(true).ok();
+                            m.gdb_attach(c);
+                            conns[c] = Some(s);
+                        }
+                    }
+                }
+                let mut gone = false;
+                if let Some(s) = conns[c].as_mut() {
+                    let mut buf = [0u8; 4096];
+                    match s.read(&mut buf) {
+                        Ok(0) => gone = true,
+                        Ok(n) => m.gdb_input(c, &buf[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => gone = true,
+                    }
+                    let out = m.gdb_take(c);
+                    if !out.is_empty() && s.write_all(&out).is_err() {
+                        gone = true;
+                    }
+                }
+                if gone {
+                    conns[c] = None;
+                    m.gdb_detach(c);
+                }
+            }
+        }
+        let stop = if debugging {
+            // (short runs, to answer the debuggers promptly)
+            let st = m.run(20_000);
+            if st == Stop::Idle && (0..2).all(|c| m.halted(c) || (c == 1 && !m.core1_on)) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            st
+        } else if std::env::var("CARD10_SAMPLE").is_ok() {
             let mut st = Stop::Budget;
             for _ in 0..100 {
                 st = m.run(10_000);
@@ -140,9 +201,12 @@ fn main() {
         match stop {
             Stop::Budget => {}
             Stop::Idle => {
-                // nothing scheduled at all: skip ahead
-                for c in m.cores.iter_mut() {
-                    c.warp_ns += 1_000_000;
+                // on to the next event (both cores wait); if nothing's
+                // scheduled at all, or a debugger has the cores, a ms on
+                if (0..2).any(|c| m.halted(c)) || !m.skip_idle() {
+                    for c in m.cores.iter_mut() {
+                        c.warp_ns += 1_000_000;
+                    }
                 }
             }
             s => {

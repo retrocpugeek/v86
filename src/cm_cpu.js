@@ -40,6 +40,9 @@ export function CmCPU(bus, wasm, stop_idling)
         looked at */
     this.clock_scale = 1;
     this.scale_checked = 0;
+    /** The card10's debuggers: for each core, a function that takes the
+        GDB stub's bytes, while one is attached */
+    this.gdb_outputs = [null, null];
 }
 
 CmCPU.prototype.init = function(settings, device_bus)
@@ -98,6 +101,7 @@ CmCPU.prototype.main_loop = function()
         }
         const exit = this.wasm["cm_run"](STEPS_PER_RUN);
         this.flush_uarts();
+        this.gdb_flush();
         if(exit === 3)
         {
             // reset: a new machine, at its own clock
@@ -180,6 +184,67 @@ CmCPU.prototype.trace_take = function()
 {
     const n = this.wasm["cm_trace_take"]();
     return n ? new Float64Array(this.wasm_memory.buffer, this.wasm["cm_trace_ptr"](), n).slice() : null;
+};
+
+// ---- the card10's debuggers (src/cm/src/gdb.rs, a GDB stub per core) ----
+
+/**
+ * A debugger connects to core `core` of the card10, which stops; `output`
+ * takes the stub's bytes for gdb. Returns false for other machines.
+ * @param {function(!Uint8Array)} output
+ * @param {number=} core
+ * @return {boolean}
+ */
+CmCPU.prototype.gdb_attach = function(output, core = 0)
+{
+    if(this.board !== BOARDS["card10"] || this.wasm["cm_gdb_attach"](core) !== 0) return false;
+    this.gdb_outputs[core] = output;
+    this.gdb_flush();
+    return true;
+};
+
+/**
+ * Bytes from gdb for core `core`'s stub.
+ * @param {!Uint8Array} data
+ * @param {number=} core
+ */
+CmCPU.prototype.gdb_input = function(data, core = 0)
+{
+    if(!this.gdb_outputs[core]) return;
+    const p = this.wasm["cm_alloc"](data.length);
+    new Uint8Array(this.wasm_memory.buffer, p, data.length).set(data);
+    this.wasm["cm_gdb_input"](core, p, data.length);
+    this.wasm["cm_free"](p, data.length);
+    this.gdb_flush();
+    // (a continue: the machine runs again)
+    this.stop_idling();
+};
+
+/** @param {number=} core */
+CmCPU.prototype.gdb_detach = function(core = 0)
+{
+    if(!this.gdb_outputs[core]) return;
+    this.wasm["cm_gdb_detach"](core);
+    this.gdb_outputs[core] = null;
+    this.stop_idling();
+};
+
+/** @param {number} core @return {boolean} */
+CmCPU.prototype.gdb_halted = function(core)
+{
+    return !!this.gdb_outputs[core] && !!this.wasm["cm_gdb_halted"](core);
+};
+
+/** What the stubs have for their debuggers. */
+CmCPU.prototype.gdb_flush = function()
+{
+    for(let core = 0; core < 2; core++)
+    {
+        const output = this.gdb_outputs[core];
+        if(!output) continue;
+        const len = this.wasm["cm_gdb_take"](core);
+        if(len) output(new Uint8Array(this.wasm_memory.buffer, this.wasm["cm_out_ptr"](), len).slice());
+    }
 };
 
 /** The firmware's UART output, as "cortex-m-uart<n>" events (Uint8Array). */

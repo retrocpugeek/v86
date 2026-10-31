@@ -7,6 +7,7 @@ pub mod cpu;
 pub mod dev;
 pub mod elf;
 pub mod fpu;
+pub mod gdb;
 pub mod scs;
 pub mod thumb;
 #[cfg(target_arch = "wasm32")]

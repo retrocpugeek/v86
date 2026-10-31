@@ -1743,35 +1743,51 @@ V86.prototype.take_gpio_edges = function()
 };
 
 /**
- * Microcontrollers: a debugger connects to the GDB stub (src/rv64/src/gdb.rs),
- * as through a debug probe. The hart stops; `output` gets the stub's bytes
- * for gdb, and gdb_input takes gdb's. Returns false for other machines.
+ * Microcontrollers: a debugger connects to the GDB stub (src/rv64/src/gdb.rs,
+ * src/cm/src/gdb.rs), as through a debug probe. The hart stops; `output` gets
+ * the stub's bytes for gdb, and gdb_input takes gdb's. On the card10 each of
+ * its two cores has a stub: `core` says which. Returns false for other
+ * machines.
  * @param {function(!Uint8Array)} output
+ * @param {number=} core
  * @return {boolean}
  */
-V86.prototype.gdb_attach = function(output)
+V86.prototype.gdb_attach = function(output, core)
 {
     const cpu = this.v86.cpu;
-    return cpu.gdb_attach ? cpu.gdb_attach(output) : false;
+    return cpu.gdb_attach ? cpu.gdb_attach(output, core) : false;
 };
 
 /**
  * Microcontrollers: bytes from gdb for the stub (see gdb_attach).
  * @param {!Uint8Array} data
+ * @param {number=} core
  */
-V86.prototype.gdb_input = function(data)
+V86.prototype.gdb_input = function(data, core)
 {
     const cpu = this.v86.cpu;
-    if(cpu.gdb_input) cpu.gdb_input(data);
+    if(cpu.gdb_input) cpu.gdb_input(data, core);
 };
 
 /**
  * Microcontrollers: the debugger went away; the hart runs on.
+ * @param {number=} core
  */
-V86.prototype.gdb_detach = function()
+V86.prototype.gdb_detach = function(core)
 {
     const cpu = this.v86.cpu;
-    if(cpu.gdb_detach) cpu.gdb_detach();
+    if(cpu.gdb_detach) cpu.gdb_detach(core);
+};
+
+/**
+ * The card10: whether a debugger has core `core` stopped.
+ * @param {number} core
+ * @return {boolean}
+ */
+V86.prototype.gdb_halted = function(core)
+{
+    const cpu = this.v86.cpu;
+    return cpu.gdb_halted ? cpu.gdb_halted(core) : false;
 };
 
 /**

@@ -107,6 +107,31 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #cores-top td:first-child { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 #cores-top .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
 #cores-note { color: var(--muted); font-size: 13px; margin: 0; }
+/* Debugging the card10's two cores (?build=card10&debug): the tooling, live,
+   and a gdb-wui per core */
+#card10-debug { width: 100%; display: flex; flex-direction: column; gap: 10px; }
+#card10-debug[hidden] { display: none; }
+#card10-debug h2 { font-size: 15px; margin: 4px 0 0; }
+#debug-arch-svg { width: 100%; max-width: 1100px; height: auto; background: #08090b; border: 1px solid #2a2d33; border-radius: 6px; }
+#debug-arch-svg text { font: 12px system-ui, sans-serif; fill: #cfd3da; }
+#debug-arch-svg .small { font-size: 10.5px; fill: #8b93a0; }
+#debug-arch-svg .title { font-weight: 600; font-size: 12.5px; }
+#debug-arch-svg .box { fill: #12151a; stroke: #3a3f48; rx: 8; }
+#debug-arch-svg .zone { fill: none; stroke: #2a2e36; stroke-dasharray: 4 3; rx: 10; }
+#debug-arch-svg .link { stroke: #3d4450; stroke-width: 2; fill: none; transition: stroke 0.2s; }
+#debug-arch-svg .link.busy { stroke: #6cf; }
+#debug-arch-svg .count { fill: #9ad0ff; font-variant-numeric: tabular-nums; }
+#debug-arch-svg .state.running { fill: #3fb950; }
+#debug-arch-svg .state.halted { fill: #f0883e; }
+#debug-arch-svg .state.off { fill: #555; }
+.debuggers { display: flex; flex-wrap: wrap; gap: 12px; }
+.debugger { flex: 1 1 560px; min-width: min(560px, 100%); display: flex; flex-direction: column; gap: 4px; }
+.debugger .bar { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.debugger .bar span { color: var(--muted); }
+.debugger iframe { width: 100%; height: 760px; border: 1px solid #333; background: #fff; }
+#card10-debug-offer { font-size: 13px; }
+#card10-debug-offer[hidden] { display: none; }
+#debug-vm { font-size: 13px; }
 #card10-keys, #watch-keys { color: var(--muted); font-size: 13px; text-align: center; }
 #card10-about { color: var(--muted); font-size: 13px; max-width: 640px; }
 #watch-about { color: var(--muted); font-size: 13px; max-width: 560px; }
@@ -182,6 +207,25 @@ code { color: var(--fg); }
       Epicardium's log, and MicroPython's REPL: Ctrl-C stops the app, and Ctrl-C again once the menu's up gives the
       <code>&gt;&gt;&gt;</code> prompt.</span>
     <p id="card10-about"></p>
+    <p id="card10-debug-offer" hidden><a id="card10-debug-link" href="?build=card10&amp;debug">Debug both cores with gdb</a>:
+      a debugger per core, each in gdb-wui, in a Linux machine next to this one (a desktop browser, and a minute or two to boot).</p>
+  </section>
+  <section id="card10-debug" hidden aria-label="Debugging the two cores">
+    <h2>Debugging the two cores</h2>
+    <svg id="debug-arch-svg" viewBox="0 0 1100 360" role="img" aria-label="How the debuggers reach the card10's cores: a GDB stub per core, through this page's virtual network, to gdb and gdb-wui in a Linux machine, and back to this page"></svg>
+    <div class="debuggers">
+      <div class="debugger">
+        <div class="bar"><strong>Core 0 · Epicardium (FreeRTOS)</strong><span id="debug-status-0"></span>
+          <button type="button" id="debug-reload-0">Reload</button><a id="debug-open-0" target="_blank">Open in new tab</a></div>
+        <iframe id="guest-web-core0" title="gdb-wui for core 0 (Epicardium)"></iframe>
+      </div>
+      <div class="debugger">
+        <div class="bar"><strong>Core 1 · Pycardium (MicroPython)</strong><span id="debug-status-1"></span>
+          <button type="button" id="debug-reload-1">Reload</button><a id="debug-open-1" target="_blank">Open in new tab</a></div>
+        <iframe id="guest-web-core1" title="gdb-wui for core 1 (Pycardium)"></iframe>
+      </div>
+    </div>
+    <details id="debug-vm"><summary>The debuggers' Linux machine (its console)</summary><div id="debug-terminal"></div></details>
   </section>
   <section id="cores" hidden aria-label="The badge's two cores">
     <h2>Inside: Pycardium calling Epicardium</h2>
@@ -233,7 +277,7 @@ code { color: var(--fg); }
 
 (async function()
 {
-    if(window.frameElement && window.frameElement.id === "guest-web")
+    if(window.frameElement && window.frameElement.id.startsWith("guest-web"))
     {
         // The guest's page navigated outside /cgi-bin/ (where sw.js serves it)
         document.body.textContent = "This page isn't served by the guest's web server.";
@@ -271,7 +315,7 @@ code { color: var(--fg); }
     }
     if(build.card10)
     {
-        await start_card10(build, base, status);
+        await start_card10(build, base, status, manifest, params);
         return;
     }
     // By default the guest's HTTP goes through this site's /proxy (worker.js);
@@ -559,7 +603,7 @@ function watch_buttons(emulator, selector = ".pebble button", KEYS = PEBBLE_KEYS
 // buttons, and its serial port (UART0) in the console, both ways
 const CARD10_KEYS = { Escape: 8, ArrowLeft: 1, ArrowUp: 1, ArrowRight: 2, ArrowDown: 2, Enter: 4 };
 
-async function start_card10(build, base, status)
+async function start_card10(build, base, status, manifest, params)
 {
     document.getElementById("linux-about").hidden = true;
     document.getElementById("card10").hidden = false;
@@ -608,10 +652,199 @@ async function start_card10(build, base, status)
     }, null);
     draw_watch(emulator, "card10-screen");
     watch_buttons(emulator, ".card10 button", CARD10_KEYS);
+    // ?debug: a debugger per core (gdb-wui, in a Linux machine)
+    const gdb_build = manifest.builds.find(b => b.web_app === "gdb-wui");
+    if(gdb_build && params.has("debug"))
+    {
+        start_card10_debug(emulator, gdb_build, status);
+    }
+    else if(gdb_build)
+    {
+        document.getElementById("card10-debug-offer").hidden = false;
+    }
     // (the calls' names come when they come)
     const names = { calls: {}, interrupts: {} };
     if(build.api) fetch(base + build.api).then(r => r.json()).then(n => Object.assign(names, n)).catch(() => {});
     show_cores(emulator, names);
+}
+
+// Debugging the card10 (?build=card10&debug): each core has a GDB stub
+// (src/cm/src/gdb.rs), which this page offers on its virtual network's
+// gateway, ports 3333 (core 0) and 3334 (core 1), as a debug probe would. A
+// Linux machine (the gdb-wui image, booted with gdb_wui.card10) runs a gdb
+// and a gdb-wui per core (tools/gdb-wui-guest/S95gdb-wui), on its ports 80
+// and 82; this page shows them, through sw.js and guest-web.js, below.
+const CARD10_STUB_PORTS = [3333, 3334];
+const CARD10_WUI_PORTS = [80, 82];
+
+function start_card10_debug(card10, gdb_build, status)
+{
+    document.getElementById("card10-debug").hidden = false;
+    const base = "images/" + gdb_build.id + "/" + (gdb_build.dir ? gdb_build.dir + "/" : "");
+    const vm = window.debugger_emulator = new V86({
+        arch: "aarch64",
+        wasm_path: "v86-a64.wasm",
+        a64_jit: true,
+        // (two gdbs with the firmware's debug info, and two gdb-wuis)
+        memory_size: 512 * 1024 * 1024,
+        kernel: { url: base + gdb_build.kernel },
+        hda: {
+            url: base + "rootfs/" + gdb_build.rootfs.ext,
+            size: gdb_build.rootfs.size,
+            fixed_chunk_size: gdb_build.rootfs.chunk_size,
+            use_parts: true,
+            async: true,
+        },
+        cmdline: gdb_build.cmdline + " gdb_wui.card10",
+        net_device: { type: "virtio", relay_url: "fetch" },
+        serial_console: { type: "xtermjs", container: document.getElementById("debug-terminal") },
+        autostart: true,
+        disable_keyboard: true,
+        disable_mouse: true,
+        disable_speaker: true,
+    });
+    // What the diagram shows: each stub's connection and packets, each core's
+    // state
+    const live = { connected: [false, false], packets_in: [0, 0], packets_out: [0, 0] };
+    const count = (bytes, core, dir) =>
+    {
+        for(const b of bytes) if(b === 0x24) live[dir][core]++;
+    };
+    const stubs = [0, 1].map(core => ({
+        port: CARD10_STUB_PORTS[core],
+        target: {
+            gdb_attach: output => card10.gdb_attach(bytes => { count(bytes, core, "packets_out"); output(bytes); }, core),
+            gdb_input: data => { count(data, core, "packets_in"); card10.gdb_input(data, core); },
+            gdb_detach: () => card10.gdb_detach(core),
+        },
+        on_change: up => { live.connected[core] = up; },
+    }));
+    const views = [0, 1].map(core => ({
+        prefix: core ? "/gdb-wui/core1" : "/gdb-wui",
+        port: CARD10_WUI_PORTS[core],
+        login_port: CARD10_WUI_PORTS[core] + 1,
+        // (each gdb-wui hands out links once its gdb has attached, which takes
+        // a while through two emulated machines)
+        login_attempts: 400,
+        frame: document.getElementById("guest-web-core" + core),
+        status: document.getElementById("debug-status-" + core),
+        open: document.getElementById("debug-open-" + core),
+        reload: document.getElementById("debug-reload-" + core),
+    }));
+    for(const v of views) v.status.textContent = "The debuggers' Linux machine is starting …";
+    start_guest_web(vm, gdb_build, { views, gdb_stubs: stubs }).catch(e =>
+    {
+        for(const v of views) v.status.textContent = "Unavailable: " + e.message;
+    });
+    draw_debug_arch(card10, live);
+}
+
+// The debug tooling's architecture, live: which links carry traffic (packets
+// and requests a second), whether each stub has its gdb, each core's state
+function draw_debug_arch(card10, live)
+{
+    const svg = document.getElementById("debug-arch-svg");
+    const NS = "http://www.w3.org/2000/svg";
+    const el = (tag, attrs, text) =>
+    {
+        const e = document.createElementNS(NS, tag);
+        for(const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+        if(text !== undefined) e.textContent = text;
+        svg.appendChild(e);
+        return e;
+    };
+    const box = (x, y, w, h, title, sub, cls = "box") =>
+    {
+        el("rect", { x, y, width: w, height: h, class: cls, rx: cls === "zone" ? 10 : 8 });
+        if(title) el("text", { x: x + 10, y: y + 18, class: "title" }, title);
+        if(sub) el("text", { x: x + 10, y: y + 33, class: "small" }, sub);
+    };
+    const link = (d) => el("path", { d, class: "link" });
+    const label = (x, y, text, cls = "count") => el("text", { x, y, class: cls, "text-anchor": "middle" }, text);
+
+    // zones
+    box(10, 10, 300, 340, "card10 · v86-cm.wasm", "two Cortex-M4F cores, a GDB stub each", "zone");
+    box(380, 10, 330, 340, "This page · JavaScript", "the virtual network's gateway, 192.168.86.1", "zone");
+    box(780, 10, 310, 340, "Linux · aarch64 · v86-a64.wasm", "the gdb-wui image, 512 MB, gdb_wui.card10", "zone");
+    // the cores
+    const cores = [{ y: 60, name: "Core 0 · Epicardium", os: "FreeRTOS · epicardium.elf" },
+        { y: 220, name: "Core 1 · Pycardium", os: "MicroPython · pycardium.elf" }];
+    const state = [];
+    cores.forEach((c, i) =>
+    {
+        box(25, c.y, 270, 100, c.name, c.os);
+        state[i] = el("circle", { cx: 280, cy: c.y + 15, r: 6, class: "state running" });
+        state[i].label = el("text", { x: 270, y: c.y + 19, class: "small", "text-anchor": "end" }, "running");
+        el("rect", { x: 165, y: c.y + 50, width: 120, height: 36, class: "box" });
+        el("text", { x: 175, y: c.y + 66, class: "title" }, "GDB stub");
+        el("text", { x: 175, y: c.y + 80, class: "small" }, "src/cm/src/gdb.rs");
+    });
+    el("text", { x: 40, y: 192, class: "small" }, "shared RAM · SEMA · SEV/WFE (the API)");
+    // the page: the gateway's ports, guest-web.js and sw.js, the iframes
+    box(395, 60, 140, 100, "port 3333", "core 0's stub, as TCP");
+    box(395, 220, 140, 100, "port 3334", "core 1's stub, as TCP");
+    box(555, 120, 140, 140, "guest-web.js", "sw.js: /gdb-wui/ → :80");
+    el("text", { x: 565, y: 168, class: "small" }, "/gdb-wui/core1/ → :82");
+    el("text", { x: 565, y: 183, class: "small" }, "HTTP and WebSockets");
+    el("text", { x: 565, y: 198, class: "small" }, "over the virtual net");
+    box(555, 285, 140, 50, "two iframes", "gdb-wui, below");
+    // the Linux machine: a gdb and a gdb-wui per core
+    [60, 220].forEach((y, i) =>
+    {
+        box(795, y, 120, 100, `gdb (${i ? "pycardium" : "epicardium"})`, `target remote :${CARD10_STUB_PORTS[i]}`);
+        box(955, y, 120, 100, `gdb-wui :${CARD10_WUI_PORTS[i]}`, "gdb/MI ↔ HTTP, WS");
+        link(`M915 ${y + 50} H955`);
+    });
+    // the links and their counters
+    const links = {
+        stub: [link("M285 128 H395"), link("M285 288 H395")],
+        net: [link("M535 110 C 650 110, 680 60, 795 110"), link("M535 270 C 650 270, 680 320, 795 270")],
+        web: [link("M1015 160 C 1015 200, 760 200, 695 190"), link("M1015 220 C 1015 200, 760 205, 695 200")],
+        frames: [link("M625 260 V285")],
+    };
+    const counts = {
+        stub: [label(340, 120, ""), label(340, 280, "")],
+        net: [label(665, 70, ""), label(665, 336, "")],
+        web: [label(860, 180, ""), label(860, 215, "")],
+    };
+    label(340, 142, "RSP", "small");
+    label(340, 302, "RSP", "small");
+    label(665, 86, "RSP over TCP (virtio-net)", "small");
+    label(665, 352, "RSP over TCP (virtio-net)", "small");
+
+    let last = null;
+    const tick = () =>
+    {
+        const now = performance.now();
+        const t = window.guest_traffic_snapshot ? window.guest_traffic_snapshot() : new Map();
+        const snap = {
+            in: [...live.packets_in], out: [...live.packets_out],
+            web: CARD10_WUI_PORTS.map(p => { const x = t.get(p); return x ? x.http + x.ws_in + x.ws_out : 0; }),
+        };
+        if(last)
+        {
+            const secs = (now - last.at) / 1000;
+            for(const i of [0, 1])
+            {
+                const rsp = (snap.in[i] - last.in[i] + snap.out[i] - last.out[i]) / secs;
+                const web = (snap.web[i] - last.web[i]) / secs;
+                const up = live.connected[i];
+                counts.stub[i].textContent = up ? `${rsp.toFixed(0)} packets/s` : "no gdb yet";
+                counts.net[i].textContent = up ? `${rsp.toFixed(0)} packets/s` : "";
+                counts.web[i].textContent = web ? `${web.toFixed(0)} messages/s` : "";
+                links.stub[i].classList.toggle("busy", up && rsp > 0);
+                links.net[i].classList.toggle("busy", up && rsp > 0);
+                links.web[i].classList.toggle("busy", web > 0);
+                const halted = card10.gdb_halted(i);
+                state[i].setAttribute("class", "state " + (halted ? "halted" : "running"));
+                state[i].label.textContent = halted ? "halted by gdb" : up ? "running (gdb attached)" : "running";
+            }
+            links.frames[0].classList.toggle("busy", snap.web.some((w, i) => w !== last.web[i]));
+        }
+        last = { at: now, ...snap };
+        setTimeout(tick, 500);
+    };
+    tick();
 }
 
 // The card10's two cores, live: how busy each is, and the API calls and

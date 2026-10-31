@@ -82,6 +82,11 @@ pub struct Cpu {
     pub(crate) cur_in_it: bool,
     /// Breakpoints (a debugger's), and whether to stop on them
     pub breakpoints: Vec<u32>,
+    /// A debugger resumed at this address: its breakpoint (if any) doesn't
+    /// stop the first instruction
+    pub debug_resume: Option<u32>,
+    /// A debugger's single step: interrupts wait (as with DHCSR.C_MASKINTS)
+    pub debug_mask_irqs: bool,
     /// When the bus next has something to do (ns)
     next_event: u64,
     /// Report instructions the core doesn't implement (once each)
@@ -128,6 +133,8 @@ impl Cpu {
             next_pc: 0,
             cur_in_it: false,
             breakpoints: Vec::new(),
+            debug_resume: None,
+            debug_mask_irqs: false,
             next_event: 0,
             log_unimplemented: true,
             unimplemented: Vec::new(),
@@ -333,6 +340,9 @@ impl Cpu {
     /// Take the highest-priority pending exception if it preempts what's
     /// running. Returns whether one was taken.
     pub fn check_interrupts(&mut self) -> bool {
+        if self.debug_mask_irqs {
+            return false;
+        }
         let Some((n, p)) = self.bus.scs.highest_pending() else { return false };
         if p >= self.exec_prio() {
             return false;
@@ -535,9 +545,10 @@ impl Cpu {
                 }
                 continue;
             }
-            if !self.breakpoints.is_empty() && self.breakpoints.contains(&self.pc) {
+            if !self.breakpoints.is_empty() && self.breakpoints.contains(&self.pc) && self.debug_resume != Some(self.pc) {
                 return Stop::Breakpoint;
             }
+            self.debug_resume = None;
             self.step();
             self.icount += 1;
             if let Some(s) = self.stopped.take() {
@@ -589,6 +600,9 @@ impl Cpu {
     /// WFI wakes for a pending exception that would preempt were PRIMASK
     /// clear (B1.5.19): a masked one wakes the core without being taken.
     pub fn wake_check(&mut self) -> bool {
+        if self.debug_mask_irqs {
+            return false;
+        }
         if self.check_interrupts() {
             return true;
         }

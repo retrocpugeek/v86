@@ -4,6 +4,10 @@
 # (tools/gdb-wui-guest/overlay.sh, from a gdb-wui checkout; needs Go).
 #
 #   GHIDRA_INSTALL_DIR=~/ghidra tools/a64-site/gdb-wui/build.sh <buildroot source> <output dir> <gdb-wui source>
+#
+# With build/card10/debug (tools/a64-site/card10/build.sh; or CARD10_DEBUG),
+# the image also has the card10's firmware for its debuggers, in
+# /root/mcu/card10 (S95gdb-wui's gdb_wui.card10).
 #   WEB=/gdb-wui/ WEB_APP=gdb-wui MEMORY=256 tools/a64-site/add-image.sh gdb-wui "..." \
 #       <output>/images/Image <output>/images/rootfs.squashfs \
 #       "rootwait root=/dev/vda ro rootfstype=squashfs console=ttyAMA0"
@@ -23,4 +27,14 @@ make -C "$BR" O="$OUT" BR2_DEFCONFIG="$OUT/gdb-wui_defconfig" defconfig
 make -C "$OUT" toolchain busybox
 "$HERE/../../gdb-wui-guest/overlay.sh" arm64 "$OUT/host/bin/aarch64-buildroot-linux-gnu-" "$SRC" "$OUT/gdb-wui-overlay" \
     "$(ls -d "$OUT"/build/busybox-*)/busybox"
+CARD10_DEBUG=${CARD10_DEBUG:-$HERE/../../../build/card10/debug}
+if [ -f "$CARD10_DEBUG/epicardium.elf" ]; then
+    mkdir -p "$OUT/gdb-wui-overlay/root/mcu"
+    rm -rf "${OUT:?}/gdb-wui-overlay/root/mcu/card10"
+    cp -r "$CARD10_DEBUG" "$OUT/gdb-wui-overlay/root/mcu/card10"
+fi
+# gdb built before expat was configured has no XML support: build it again
+if [ -e "$OUT/target/usr/bin/gdb" ] && grep -q "XML support was disabled" "$OUT/target/usr/bin/gdb"; then
+    make -C "$OUT" gdb-dirclean
+fi
 make -C "$OUT"

@@ -30,6 +30,12 @@ function error_page(status, message)
         { status, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
+async function client_url(id)
+{
+    const client = id && await self.clients.get(id);
+    return client ? client.url : "";
+}
+
 async function find_owner()
 {
     const scope = new URL(self.registration.scope).pathname;
@@ -38,8 +44,9 @@ async function find_owner()
     return pages.find(c => c.id === owner_id) || pages.find(c => c.focused) || pages[0];
 }
 
-async function handle(request)
+async function handle(request, client_id)
 {
+    const from = await client_url(client_id) || request.referrer;
     const owner = await find_owner();
     if(!owner)
     {
@@ -57,6 +64,9 @@ async function handle(request)
             type: "v86-guest-http",
             method: request.method,
             path: url.pathname + url.search,
+            // the page that asked (a path from the server's root goes to its
+            // server): its address (gdb-wui's pages send no referrer)
+            referrer: from,
             headers: [...request.headers],
             body,
         }, [channel.port2].concat(body ? [body] : []));
@@ -86,5 +96,5 @@ self.addEventListener("fetch", event =>
     // Only same-origin requests go to the guest (the guest's pages may load
     // things from elsewhere)
     if(new URL(event.request.url).origin !== self.location.origin) return;
-    event.respondWith(handle(event.request));
+    event.respondWith(handle(event.request, event.clientId));
 });

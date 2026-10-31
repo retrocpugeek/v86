@@ -22,7 +22,10 @@ BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_ZSTD=y
 # BR2_TARGET_ROOTFS_EXT2 is not set
 # BR2_TARGET_ROOTFS_TAR is not set
-# gdb (the full debugger and gdbserver), and socat for S95gdb-wui's login links
+# gdb (the full debugger and gdbserver), and socat for S95gdb-wui's login links;
+# expat for gdb's XML support: the target descriptions GDB stubs send (the
+# card10's Cortex-M cores')
+BR2_PACKAGE_EXPAT=y
 BR2_PACKAGE_GDB=y
 BR2_PACKAGE_GDB_SERVER=y
 BR2_PACKAGE_GDB_DEBUGGER=y

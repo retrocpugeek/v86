@@ -41,8 +41,36 @@ let guest_web = WEB_APPS.default;
 const FORWARD_HEADERS = new Set(["accept", "accept-language", "authorization", "content-type", "x-requested-with"]);
 const DROP_RESPONSE_HEADERS = new Set(["connection", "content-length", "keep-alive", "set-cookie", "transfer-encoding"]);
 
-// Responses from sw.js can't set cookies, so LuCI's session cookie is kept here
-const guest_cookies = new Map();
+// More than one web server in the guest (the card10's two gdb-wuis): paths
+// here starting with a route's prefix go to its port (the longest prefix
+// first); others to port 80 (with guest_web's prefix)
+let guest_routes = [];
+
+// Responses from sw.js can't set cookies, so LuCI's session cookie is kept
+// here: a jar per port, as each server has its own (gdb-wui's are alike)
+const guest_cookie_jars = new Map();
+function guest_cookies(port)
+{
+    if(!guest_cookie_jars.has(port)) guest_cookie_jars.set(port, new Map());
+    return guest_cookie_jars.get(port);
+}
+function cookie_header(port)
+{
+    const jar = guest_cookies(port);
+    return jar.size ? "Cookie: " + [...jar].map(([k, v]) => k + "=" + v).join("; ") : null;
+}
+// What went to and from each of the guest's ports, for pages that show it
+// (the card10's debug architecture): HTTP requests, WebSocket messages in
+// and out, bytes
+const guest_traffic = new Map();
+window.guest_traffic_snapshot = () => guest_traffic;
+function count_traffic(port, kind, bytes)
+{
+    if(!guest_traffic.has(port)) guest_traffic.set(port, { http: 0, ws_in: 0, ws_out: 0, bytes: 0 });
+    const t = guest_traffic.get(port);
+    t[kind]++;
+    t.bytes += bytes;
+}
 // The guest's static files, kept for this page's lifetime (they're slow to serve)
 const guest_static_cache = new Map();
 
@@ -74,7 +102,7 @@ function decode_chunked(data)
     return concat(chunks);
 }
 
-function update_cookie(set_cookie)
+function update_cookie(set_cookie, port)
 {
     const [pair, ...attributes] = set_cookie.split(";");
     const eq = pair.indexOf("=");
@@ -86,11 +114,11 @@ function update_cookie(set_cookie)
         return k.toLowerCase() === "max-age" && +v <= 0 ||
             k.toLowerCase() === "expires" && Date.parse(v) < Date.now();
     });
-    if(expired || value === "") guest_cookies.delete(name);
-    else guest_cookies.set(name, value);
+    if(expired || value === "") guest_cookies(port).delete(name);
+    else guest_cookies(port).set(name, value);
 }
 
-function parse_response(data, app)
+function parse_response(data, app, target)
 {
     let end = -1;
     for(let i = 0; i + 3 < data.length; i++)
@@ -111,12 +139,12 @@ function parse_response(data, app)
         if(colon < 1) continue;
         const name = line.slice(0, colon).trim().toLowerCase();
         let value = line.slice(colon + 1).trim();
-        if(name === "set-cookie") update_cookie(value);
+        if(name === "set-cookie") update_cookie(value, target.port);
         if(name === "transfer-encoding" && value.toLowerCase() === "chunked") body = decode_chunked(body);
         if(name === "location")
         {
             value = value.replace(/^https?:\/\/[^/]*/i, "");
-            if(app.prefix && value.startsWith("/")) value = app.prefix + value;
+            if(target.prefix && value.startsWith("/")) value = target.prefix + value;
         }
         if(!DROP_RESPONSE_HEADERS.has(name) && !(app.drop_headers || []).includes(name)) headers.push([name, value]);
     }
@@ -130,21 +158,30 @@ function parse_response(data, app)
     return { status: +m[1], status_text: m[2], headers, body: body.slice().buffer };
 }
 
-// The path in the guest for a path here: build.web's prefix removed
-function guest_path(path)
+// Where a path here goes in the guest: its port, the path there (the
+// route's or build.web's prefix removed) and that prefix. A path from the
+// server's root (gdb-wui's /js/, /api/) goes to the server of the page that
+// asked for it (`from`, its address), as it's that page's own.
+function guest_target(path, from)
 {
-    const prefix = guest_web.prefix;
-    if(prefix && (path === prefix || path.startsWith(prefix + "/") || path.startsWith(prefix + "?")))
+    const under = (p, prefix) => prefix && (p === prefix || p.startsWith(prefix + "/") || p.startsWith(prefix + "?"));
+    const route = guest_routes.find(r => under(path, r.prefix)) || { prefix: guest_web.prefix, port: 80 };
+    if(under(path, route.prefix))
     {
-        path = path.slice(prefix.length);
-        return path.startsWith("/") ? path : "/" + path;
+        const rest = path.slice(route.prefix.length);
+        return { path: rest.startsWith("/") ? rest : "/" + rest, port: route.port, prefix: route.prefix };
     }
-    return path;
+    let from_path = "";
+    try { from_path = from ? new URL(from).pathname : ""; } catch(e) {}
+    const page = guest_routes.find(r => under(from_path, r.prefix));
+    if(page) return { path, port: page.port, prefix: page.prefix };
+    return { path, port: route.port, prefix: route.prefix };
 }
 
 function guest_http(adapter, request)
 {
-    const path = guest_path(request.path);
+    const target = guest_target(request.path, request.referrer);
+    const path = target.path;
     if(guest_web.websocket && path === "/" + WEBSOCKET_SHIM)
     {
         return Promise.resolve({
@@ -154,9 +191,10 @@ function guest_http(adapter, request)
         });
     }
     const cacheable = request.method === "GET" && guest_web.static(path);
-    if(cacheable && guest_static_cache.has(path))
+    const cache_key = target.port + path;
+    if(cacheable && guest_static_cache.has(cache_key))
     {
-        return Promise.resolve(guest_static_cache.get(path));
+        return Promise.resolve(guest_static_cache.get(cache_key));
     }
 
     // HTTP/1.0, so the server closes the connection after the response
@@ -167,7 +205,8 @@ function guest_http(adapter, request)
     {
         if(FORWARD_HEADERS.has(name)) head.push(`${name}: ${value}`);
     }
-    if(guest_cookies.size) head.push("Cookie: " + [...guest_cookies].map(([k, v]) => k + "=" + v).join("; "));
+    const cookies = cookie_header(target.port);
+    if(cookies) head.push(cookies);
     if(request.body) head.push("Content-Length: " + request.body.byteLength);
     const data = [new TextEncoder().encode(head.join("\r\n") + "\r\n\r\n")];
     if(request.body) data.push(new Uint8Array(request.body));
@@ -181,10 +220,10 @@ function guest_http(adapter, request)
     {
         for(let attempt = 1; ; attempt++)
         {
-            const result = await guest_http_attempt(adapter, data);
+            const result = await guest_http_attempt(adapter, data, target);
             if(result.reply)
             {
-                if(cacheable && result.reply.status === 200) guest_static_cache.set(path, result.reply);
+                if(cacheable && result.reply.status === 200) guest_static_cache.set(cache_key, result.reply);
                 return result.reply;
             }
             console.warn(`guest http: ${request.method} ${path}: ${result.error} (attempt ${attempt})`);
@@ -227,15 +266,15 @@ async function with_guest_connection_slot(f)
     }
 }
 
-// One connection to the guest's port 80: resolves to { reply } or
-// { error, sent } (sent: the request may have reached the server)
-function guest_http_attempt(adapter, data)
+// One connection to the guest's web server (target.port): resolves to
+// { reply } or { error, sent } (sent: the request may have reached the server)
+function guest_http_attempt(adapter, data, target)
 {
     return new Promise(resolve =>
     {
         const chunks = [];
         let done = false, sent = false;
-        const conn = adapter.connect(80);
+        const conn = adapter.connect(target.port);
         let timer = setTimeout(() => fail("no connection to the guest's web server"), GUEST_CONNECT_TIMEOUT);
 
         function fail(error)
@@ -252,7 +291,9 @@ function guest_http_attempt(adapter, data)
         }
         function complete()
         {
-            const reply = parse_response(concat(chunks), guest_web);
+            const data = concat(chunks);
+            const reply = parse_response(data, guest_web, target);
+            count_traffic(target.port, "http", data.length);
             if(reply.error) fail(reply.error);
             else finish({ reply });
         }
@@ -303,17 +344,19 @@ function active_worker(registration)
     });
 }
 
-// A WebSocket to the guest's port 80 (RFC 6455 over the virtual network's
+// A WebSocket to the guest's web server (RFC 6455 over the virtual network's
 // TCP): calls on.open(), on.message(data, binary) with a string or a
 // Uint8Array, and on.close(code, reason, clean) once; returns { send, close }.
 function guest_websocket(adapter, path, on)
 {
     const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
-    const head = [`GET ${guest_path(path)} HTTP/1.1`, `Host: ${location.host}`, "Upgrade: websocket", "Connection: Upgrade",
+    const target = guest_target(path);
+    const head = [`GET ${target.path} HTTP/1.1`, `Host: ${location.host}`, "Upgrade: websocket", "Connection: Upgrade",
         `Sec-WebSocket-Key: ${key}`, "Sec-WebSocket-Version: 13", `Origin: ${location.origin}`];
-    if(guest_cookies.size) head.push("Cookie: " + [...guest_cookies].map(([k, v]) => k + "=" + v).join("; "));
+    const cookies = cookie_header(target.port);
+    if(cookies) head.push(cookies);
 
-    const conn = adapter.connect(80);
+    const conn = adapter.connect(target.port);
     let open = false, closed = false, close_sent = false;
     let buffer = new Uint8Array(0);
     let message = [], message_opcode = 0;
@@ -389,6 +432,7 @@ function guest_websocket(adapter, path, on)
             {
                 const data = concat(message);
                 message = [];
+                count_traffic(target.port, "ws_in", data.length);
                 if(message_opcode === 1) on.message(new TextDecoder().decode(data), false);
                 else on.message(data, true);
             }
@@ -429,6 +473,7 @@ function guest_websocket(adapter, path, on)
         send(data)
         {
             if(closed) return;
+            count_traffic(target.port, "ws_out", typeof data === "string" ? data.length : data.byteLength);
             if(typeof data === "string") send_frame(1, new TextEncoder().encode(data));
             else send_frame(2, ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data));
         },
@@ -464,6 +509,11 @@ const WEBSOCKET_SHIM_SOURCE = `"use strict";
     const NativeWebSocket = window.WebSocket;
     const STATES = ["CONNECTING", "OPEN", "CLOSING", "CLOSED"];
 
+    // A path from the server's root (gdb-wui's /ws) is under this page's
+    // own directory here (/gdb-wui/, /gdb-wui/core1/): the page routes by it
+    const page_dir = location.pathname.replace(/[^/]*$/, "");
+    const under_page = path => path.startsWith(page_dir) ? path : page_dir.replace(/\\/$/, "") + path;
+
     class GuestWebSocket extends EventTarget
     {
         constructor(url, protocols)
@@ -478,7 +528,7 @@ const WEBSOCKET_SHIM_SOURCE = `"use strict";
             this.bufferedAmount = 0;
             this.binaryType = "blob";
             this.onopen = this.onmessage = this.onerror = this.onclose = null;
-            this._socket = host.v86_guest_websocket(u.pathname + u.search, {
+            this._socket = host.v86_guest_websocket(under_page(u.pathname) + u.search, {
                 open: () =>
                 {
                     if(this.readyState !== 0) return;
@@ -706,25 +756,42 @@ function serve_gdb_stub(adapter, port, target, on_change)
     });
 }
 
-// options.gdb_stub: { port, target, on_change } for serve_gdb_stub
+// options.gdb_stub: { port, target, on_change } for serve_gdb_stub (or
+// options.gdb_stubs, several); options.views: the web servers to show, each
+// { prefix, port, login_port, frame, status, open, reload, login_attempts }
+// (an iframe, its status, its link, its reload button, and how many times to
+// ask for a login link, 3 s apart; the default: build.web on port 80
+// in the page's #web section), routed by prefix (guest_routes)
 async function start_guest_web(emulator, build, options = {})
 {
     const section = document.getElementById("web");
-    const status = document.getElementById("web-status");
-    const frame = document.getElementById("guest-web");
-    const open_link = document.getElementById("web-open");
     const path = build.web;
     guest_web = WEB_APPS[build.web_app] || WEB_APPS.default;
-    document.getElementById("web-title").textContent = guest_web.title;
-    if(guest_web.height) frame.style.minHeight = guest_web.height;
-    section.classList.toggle("wide", !!guest_web.wide);
-    const note = document.getElementById("web-note");
-    if(note)
+    const views = options.views || [{
+        prefix: path.replace(/\/$/, ""),
+        port: 80,
+        login_port: guest_web.login_port,
+        frame: document.getElementById("guest-web"),
+        status: document.getElementById("web-status"),
+        open: document.getElementById("web-open"),
+        reload: document.getElementById("web-reload"),
+    }];
+    guest_routes = views.filter(v => v.port !== 80).map(v => ({ prefix: v.prefix, port: v.port }))
+        .sort((a, b) => b.prefix.length - a.prefix.length);
+    const say = text => { for(const v of views) if(v.status) v.status.textContent = text; };
+    if(!options.views)
     {
-        note.textContent = guest_web.desktop_note || "";
-        note.hidden = !guest_web.desktop_note;
+        document.getElementById("web-title").textContent = guest_web.title;
+        if(guest_web.height) views[0].frame.style.minHeight = guest_web.height;
+        section.classList.toggle("wide", !!guest_web.wide);
+        const note = document.getElementById("web-note");
+        if(note)
+        {
+            note.textContent = guest_web.desktop_note || "";
+            note.hidden = !guest_web.desktop_note;
+        }
+        section.hidden = false;
     }
-    section.hidden = false;
 
     if(!("serviceWorker" in navigator)) throw new Error("this browser has no service workers");
     // The network adapter is created once the emulator has loaded
@@ -736,19 +803,18 @@ async function start_guest_web(emulator, build, options = {})
     if(!adapter || typeof adapter.connect !== "function") throw new Error("needs the default network (no ?relay=)");
 
     if(guest_web.kuna_port) serve_kuna(adapter, guest_web.kuna_port);
-    if(options.gdb_stub)
+    for(const stub of options.gdb_stubs || (options.gdb_stub ? [options.gdb_stub] : []))
     {
-        const { port, target, on_change } = options.gdb_stub;
-        serve_gdb_stub(adapter, port, target, on_change || (() => {}));
+        serve_gdb_stub(adapter, stub.port, stub.target, stub.on_change || (() => {}));
     }
     if(guest_web.websocket)
     {
         window.v86_guest_websocket = (ws_path, on) => guest_websocket(adapter, ws_path, on);
         // A new tab finds this page as its opener
-        open_link.rel = "opener";
+        for(const v of views) if(v.open) v.open.rel = "opener";
     }
 
-    status.textContent = "Starting …";
+    say("Starting …");
     // sw.js controls build.web's first directory (e.g. /cgi-bin/ or /gdb-wui/)
     const scope = new URL(path.split("/").slice(0, 2).join("/") + "/", location).pathname;
     const registration = await navigator.serviceWorker.register("sw.js", { scope });
@@ -764,42 +830,51 @@ async function start_guest_web(emulator, build, options = {})
     claim();
     window.addEventListener("focus", claim);
 
-    status.textContent = "Waiting for the guest's web server …";
-    while(!await guest_port_open(adapter))
+    await Promise.all(views.map(v => show_guest_view(adapter, v)));
+}
+
+// One of the guest's web servers in its iframe, once it's up: logged in with
+// a single-use link when it needs one
+async function show_guest_view(adapter, view)
+{
+    const say = text => { if(view.status) view.status.textContent = text; };
+    say("Waiting for the guest's web server …");
+    while(!await guest_port_open(adapter, view.port))
     {
         await new Promise(resolve => setTimeout(resolve, 5000));
     }
-
-    // A single-use login link, when the interface needs one: its token, here.
-    // (gdb-wui listens before its gdb has started, and hands out links after.)
+    const path = view.prefix + "/";
+    // (gdb-wui listens before its gdb has started, and hands out links after)
     async function url()
     {
-        if(!guest_web.login_port) return path;
+        if(!view.login_port) return path;
         for(let attempt = 1; ; attempt++)
         {
-            const link = await guest_read_port(adapter, guest_web.login_port).catch(() => "");
+            const link = await guest_read_port(adapter, view.login_port).catch(() => "");
             const token = link.match(/[?&]t=([\w-]+)/);
             if(token) return path + "?t=" + token[1];
-            if(attempt === 100) throw new Error("no login link from the guest");
-            status.textContent = `Waiting for ${guest_web.title} to start …`;
+            if(attempt === (view.login_attempts || 100)) throw new Error("no login link from the guest");
+            say(`Waiting for ${guest_web.title} to start …`);
             await new Promise(resolve => setTimeout(resolve, 3000));
         }
     }
-
-    status.textContent = "Loading (the first page takes a while) …";
-    frame.onload = () => { status.textContent = ""; };
-    frame.src = await url();
-    open_link.href = path;
-    document.getElementById("web-reload").onclick = async () =>
+    say("Loading (the first page takes a while) …");
+    view.frame.onload = () => say("");
+    view.frame.src = await url();
+    if(view.open) view.open.href = path;
+    if(view.reload)
     {
-        status.textContent = "Loading …";
-        try
+        view.reload.onclick = async () =>
         {
-            frame.src = await url();
-        }
-        catch(e)
-        {
-            status.textContent = "Unavailable: " + e.message;
-        }
-    };
+            say("Loading …");
+            try
+            {
+                view.frame.src = await url();
+            }
+            catch(e)
+            {
+                say("Unavailable: " + e.message);
+            }
+        };
+    }
 }

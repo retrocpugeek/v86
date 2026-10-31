@@ -35,11 +35,40 @@ if [ -n "$MCU" ] && [ -f "/root/mcu/$MCU/$MCU.elf" ]; then
 	TARGET="target remote ${GATEWAY:-192.168.86.1}:3333"
 fi
 export PROJECT MCU TARGET
+# gdb_wui.card10 on the kernel command line: the card10 badge's two cores,
+# each with its own debugger (tools/a64-site/index.html, ?build=card10&debug):
+# a gdb-wui for core 0 (Epicardium) on port 80 and one for core 1
+# (Pycardium) on port 82, their login links on 81 and 83, each connecting to
+# its core's GDB stub on the page's port 3333 or 3334 (with a remote timeout
+# for the round trips through two emulated machines). /root/mcu/card10 has
+# the ELFs and their sources, built under /firmware.
+CARD10=
+grep -q 'gdb_wui\.card10' /proc/cmdline && [ -f /root/mcu/card10/epicardium.elf ] && CARD10=/root/mcu/card10
+export CARD10
+
+# card10_wui PORT ELF STUB_PORT: one core's gdb-wui
+card10_wui() {
+	start-stop-daemon -S -q -b -m -p "/run/gdb-wui-$1.pid" -x /bin/sh -- -c \
+		"exec /usr/bin/gdb-wui -addr 0.0.0.0:$1 -listen-anywhere -open=false -no-config -project $CARD10 \$KUNA \
+			-exe $2 -gdb-command 'set substitute-path /firmware $CARD10/firmware' \
+			-gdb-command 'set remotetimeout 30' \
+			-gdb-command 'target remote ${GATEWAY:-192.168.86.1}:$3' >/tmp/gdb-wui-$1.log 2>&1"
+	# (the address through the environment: socat would take a ':' in its
+	# SYSTEM command for its own)
+	start-stop-daemon -S -q -b -m -p "/run/gdb-wui-url-$1.pid" -x /usr/bin/env -- WUI_ADDR=":$1" /usr/bin/socat \
+		TCP-LISTEN:$(($1 + 1)),reuseaddr,fork SYSTEM:'/usr/bin/gdb-wui -print-url -addr $WUI_ADDR 2>/dev/null'
+}
 
 case "$1" in
 start)
 	printf "Starting gdb-wui: "
 	mkdir -p -m 0700 "$XDG_RUNTIME_DIR"
+	if [ -n "$CARD10" ]; then
+		card10_wui 80 epicardium.elf 3333
+		card10_wui 82 pycardium.elf 3334
+		echo "OK (the card10's two cores)"
+		exit 0
+	fi
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui.pid -x /bin/sh -- -c \
 		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config -project "$PROJECT" $SIDECARS $KUNA \
 			${TARGET:+-exe "$MCU.elf" -gdb-command "$TARGET"} >/tmp/gdb-wui.log 2>&1'
@@ -49,8 +78,10 @@ start)
 	;;
 stop)
 	printf "Stopping gdb-wui: "
-	start-stop-daemon -K -q -p /run/gdb-wui-url.pid
-	start-stop-daemon -K -q -p /run/gdb-wui.pid
+	for p in /run/gdb-wui-url.pid /run/gdb-wui.pid /run/gdb-wui-url-80.pid /run/gdb-wui-80.pid \
+		/run/gdb-wui-url-82.pid /run/gdb-wui-82.pid; do
+		[ -f "$p" ] && start-stop-daemon -K -q -p "$p"
+	done
 	echo "OK"
 	;;
 restart)

@@ -108,6 +108,14 @@ fn card10_reset() {
                 c.warp_ns = now;
             }
             n.trace = m.trace.take().map(|_| Default::default());
+            // the debuggers stay, with their breakpoints
+            for c in 0..2 {
+                if let Some(mut g) = m.gdb[c].take() {
+                    let bps = std::mem::take(&mut m.cores[c].breakpoints);
+                    g.reattach(&mut n.cores[c], bps);
+                    n.gdb[c] = Some(g);
+                }
+            }
             **m = n;
         }
     }
@@ -249,6 +257,59 @@ pub extern "C" fn cm_trace_take() -> u32 {
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn cm_trace_ptr() -> u32 { unsafe { (*addr_of_mut!(TRACE_OUT)).as_ptr() as u32 } }
+
+// ---- the card10's debuggers: a GDB stub (gdb.rs) per core ----
+
+/// A debugger connects to core `core` (it stops). Returns 0, or -1 if this
+/// machine has no such core.
+#[no_mangle]
+pub extern "C" fn cm_gdb_attach(core: u32) -> i32 {
+    match card10() {
+        Some(m) if core < 2 => {
+            m.gdb_attach(core as usize);
+            0
+        }
+        _ => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cm_gdb_detach(core: u32) {
+    if let Some(m) = card10() {
+        if core < 2 {
+            m.gdb_detach(core as usize);
+        }
+    }
+}
+
+/// Bytes from core `core`'s debugger.
+#[no_mangle]
+pub extern "C" fn cm_gdb_input(core: u32, data: u32, len: u32) {
+    if let Some(m) = card10() {
+        if core < 2 {
+            m.gdb_input(core as usize, slice(data, len));
+        }
+    }
+}
+
+/// Bytes for core `core`'s debugger: returns how many there are, at
+/// cm_out_ptr().
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn cm_gdb_take(core: u32) -> u32 {
+    let out = unsafe { &mut *addr_of_mut!(OUT) };
+    out.clear();
+    if let Some(m) = card10() {
+        if core < 2 {
+            out.extend(m.gdb_take(core as usize));
+        }
+    }
+    out.len() as u32
+}
+
+/// Whether a debugger has core `core` stopped.
+#[no_mangle]
+pub extern "C" fn cm_gdb_halted(core: u32) -> u32 { card10().is_some_and(|m| core < 2 && m.halted(core as usize)) as u32 }
 
 #[no_mangle]
 pub extern "C" fn cm_instructions() -> f64 {

@@ -14,7 +14,10 @@
 # tools/a64-site/card10), with only the checkout mounted (as /firmware).
 #
 # Writes epicardium.elf, pycardium.elf, fat.img.gz, api.json (api-names.py)
-# and version.txt to out-dir
+# and version.txt to out-dir, and debug/ for the gdb-wui image
+# (tools/a64-site/gdb-wui/build.sh): the ELFs with their debug info, and the
+# sources it names, under firmware/ (as /firmware, where they were built;
+# listed with gdb-multiarch)
 # (default build/card10), then:
 #   tools/a64-site/add-card10.sh card10 "card10 badge: Epicardium and Pycardium" build/card10
 set -eu
@@ -51,8 +54,24 @@ cp "$SRC/build/epicardium.elf" "$SRC/build/pycardium.elf" "$SRC/build/version.tx
 gzip -9 -c "$SRC/build/fat.img" > "$OUT/fat.img.gz"
 # The API calls' and interrupts' names, for the page's view of the cores
 python3 -I "$(dirname "$0")/api-names.py" "$SRC/epicardium/epicardium.h" > "$OUT/api.json"
+# The debug bundle
+D=$OUT/debug
+rm -rf "${D:?}"
+mkdir -p "$D/firmware"
+cp "$SRC/build/epicardium/epicardium.elf" "$SRC/build/pycardium/pycardium.elf" "$D/"
+for elf in "$D/epicardium.elf" "$D/pycardium.elf"; do
+    gdb-multiarch -nx -batch "$elf" -ex 'maint expand-symtabs' -ex 'info sources' 2>/dev/null
+done | tr ',' '\n' | sed 's/^ *//' | grep '^/firmware/' |
+    python3 -I -c 'import os, sys; print("\n".join(sorted({os.path.relpath(os.path.normpath(l.strip()), "/firmware") for l in sys.stdin})))' |
+    while read -r f; do
+        if [ -f "$SRC/$f" ]; then
+            mkdir -p "$D/firmware/$(dirname "$f")"
+            cp "$SRC/$f" "$D/firmware/$f"
+        fi
+    done
+echo "debug bundle: $(find "$D/firmware" -type f | wc -l) source files"
 # (built in the container, under /firmware: no paths of this machine)
-if grep -l --binary-files=binary "$HOME" "$OUT/epicardium.elf" "$OUT/pycardium.elf" "$SRC/build/fat.img"; then
+if grep -rl --binary-files=binary "$HOME" "$OUT/epicardium.elf" "$OUT/pycardium.elf" "$SRC/build/fat.img" "$D"; then
     echo "the firmware names this machine's paths (above)" >&2
     exit 1
 fi

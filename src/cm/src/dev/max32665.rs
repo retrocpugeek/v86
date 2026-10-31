@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 use crate::bus::{Bus, Device};
 use crate::cpu::{Cpu, Stop};
+use crate::gdb::{Gdb, Mode};
 
 pub const FLASH_BASE: u32 = 0x1000_0000;
 pub const FLASH_SIZE: usize = 0x10_0000;
@@ -1452,6 +1453,8 @@ pub struct Card10 {
     pub lines: std::rc::Rc<Lines>,
     /// Watching the cores' interaction (for the page to show), if on
     pub trace: Option<Trace>,
+    /// A debugger on each core (gdb.rs): each stops and steps on its own
+    pub gdb: [Option<Gdb>; 2],
 }
 
 /// Where Epicardium and Pycardium share their API call state (the
@@ -1554,18 +1557,37 @@ impl Card10 {
             if self.lines.dirty.take() {
                 self.sync_lines();
             }
+            if self.gdb.iter().any(|g| g.as_ref().is_some_and(|g| g.reset.is_some())) {
+                // a debugger's `monitor reset`: the whole chip
+                return Stop::Reset;
+            }
             let mut idle = [false, !self.core1_on];
             for c in 0..2 {
                 if idle[c] {
                     continue;
                 }
-                self.hand_bus(c);
-                // a core that slept catches up with the other
+                let mode = self.gdb[c].as_ref().map(|g| g.mode);
+                // a core that slept, or a debugger stopped, catches up with the other
                 let other = self.cores[1 - c].now_ns();
                 let core = &mut self.cores[c];
-                if core.sleeping && other > core.now_ns() && (c == 0 || self.core1_on) {
+                if (core.sleeping || mode == Some(Mode::Halted)) && other > core.now_ns() && (c == 0 || self.core1_on) {
                     core.warp_ns += other - core.now_ns();
                 }
+                if mode == Some(Mode::Halted) {
+                    idle[c] = true;
+                    continue;
+                }
+                self.hand_bus(c);
+                if mode == Some(Mode::Stepping) {
+                    // one instruction (none, if it's waiting for an interrupt)
+                    let before = self.cores[c].icount;
+                    self.cores[c].run(1);
+                    left = left.saturating_sub(self.cores[c].icount - before);
+                    let (g, core) = (self.gdb[c].as_mut().unwrap(), &mut self.cores[c]);
+                    g.stopped(core);
+                    continue;
+                }
+                let core = &mut self.cores[c];
                 let before = core.icount;
                 let t0 = core.now_ns();
                 let stop = core.run(self.slice.min(left));
@@ -1583,6 +1605,13 @@ impl Card10 {
                     let o = &mut self.cores[1 - c];
                     o.event = true;
                 }
+                if stop == Stop::Breakpoint && mode == Some(Mode::Running) {
+                    // the debugger's breakpoint: this core stops, the other runs on
+                    let (g, core) = (self.gdb[c].as_mut().unwrap(), &mut self.cores[c]);
+                    g.stopped(core);
+                    idle[c] = true;
+                    continue;
+                }
                 match stop {
                     Stop::Idle => idle[c] = true,
                     Stop::Budget => {}
@@ -1599,9 +1628,9 @@ impl Card10 {
                 }
             }
             if idle[0] && idle[1] {
-                if !self.skip_idle() {
-                    return Stop::Idle;
-                }
+                // every core waits (or a debugger has it): the host says how
+                // long, skip_idle() or real time
+                return Stop::Idle;
             }
         }
         Stop::Budget
@@ -1634,22 +1663,52 @@ impl Card10 {
                 continue;
             }
             self.hand_bus(c);
+            let halted = self.halted(c);
             let core = &mut self.cores[c];
             let now = core.now_ns();
             core.bus.update(now);
             core.bus.scs.dirty = true;
-            core.wake_check();
+            if !halted {
+                core.wake_check();
+            }
         }
     }
+
+    /// A debugger has core `c` stopped.
+    pub fn halted(&self, c: usize) -> bool { self.gdb[c].as_ref().is_some_and(|g| g.mode == Mode::Halted) }
+
+    // ---- the debuggers (one per core) ----
+
+    /// A debugger connects to core `c`: it stops.
+    pub fn gdb_attach(&mut self, c: usize) {
+        self.hand_bus(c);
+        self.gdb[c] = Some(Gdb::attach(&mut self.cores[c]));
+    }
+
+    /// The debugger of core `c` goes away: the core runs on.
+    pub fn gdb_detach(&mut self, c: usize) {
+        if let Some(mut g) = self.gdb[c].take() {
+            g.detach(&mut self.cores[c]);
+        }
+    }
+
+    /// Bytes from core `c`'s debugger.
+    pub fn gdb_input(&mut self, c: usize, data: &[u8]) {
+        self.hand_bus(c);
+        if let Some(g) = self.gdb[c].as_mut() {
+            g.input(&mut self.cores[c], data);
+        }
+    }
+
+    /// Bytes for core `c`'s debugger.
+    pub fn gdb_take(&mut self, c: usize) -> Vec<u8> { self.gdb[c].as_mut().map(|g| std::mem::take(&mut g.out)).unwrap_or_default() }
 
     /// The host changed a device's input (a UART's): wake for its interrupt.
     pub fn input_changed(&mut self) {
         let bus = self.bus();
         bus.sync_all_irqs();
         bus.scs.dirty = true;
-        for c in self.cores.iter_mut() {
-            c.wake_check();
-        }
+        self.wake_running();
     }
 
     /// Pass the I2C devices' interrupt lines on to their GPIO pins.
@@ -1674,8 +1733,15 @@ impl Card10 {
         if self.lines.dirty.take() {
             self.sync_lines();
         }
-        for c in self.cores.iter_mut() {
-            c.wake_check();
+        self.wake_running();
+    }
+
+    /// Cores not stopped by a debugger wake for what's pending.
+    fn wake_running(&mut self) {
+        for c in 0..2 {
+            if !self.halted(c) {
+                self.cores[c].wake_check();
+            }
         }
     }
 
@@ -1789,7 +1855,7 @@ pub fn machine(epicardium: &[u8], pycardium: &[u8], ext_flash: &[u8], epoch: i64
     let mut c1 = Cpu::new(Bus::new(0, 0, CPU_HZ, CPU_HZ, false));
     c1.fpu = true;
     c1.bus.scs.ictr = 3;
-    Ok(Card10 { cores: [c0, c1], holder: 0, core1_on: false, slice: 1000, lines, trace: None })
+    Ok(Card10 { cores: [c0, c1], holder: 0, core1_on: false, slice: 1000, lines, trace: None, gdb: [None, None] })
 }
 
 /// The catch-all register file, to log what the firmware touches.

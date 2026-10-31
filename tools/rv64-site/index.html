@@ -326,7 +326,7 @@ code { color: var(--fg); }
 
 (async function()
 {
-    if(window.frameElement && window.frameElement.id === "guest-web")
+    if(window.frameElement && window.frameElement.id.startsWith("guest-web"))
     {
         // The guest's page navigated outside /cgi-bin/ (where sw.js serves it)
         document.body.textContent = "This page isn't served by the guest's web server.";
