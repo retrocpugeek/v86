@@ -42,8 +42,12 @@ SOURCE_DATE_EPOCH=$(git -C "$SRC" log -1 --format=%ct)
 export SOURCE_DATE_EPOCH
 cd "$SRC/fw"
 # The debug info names the sources as /root/mcu/osillyscope, where the
-# v86-riscv site's gdb-wui image has them (tools/rv64-gdb/build.sh)
-FLAGS="-march=rv32ec_zicsr -mabi=ilp32e -DCH32V003 -g -Os -flto -ffunction-sections -fdata-sections -msmall-data-limit=8 -fdebug-prefix-map=$SRC=/root/mcu/$NAME"
+# v86-riscv site's gdb-wui image has them (tools/rv64-gdb/build.sh).
+# Its functions are kept out of line (-fno-inline-...), unlike ch32fun.mk's
+# build: with LTO, GCC inlines most of them (scope_ui, capture_waveform, ...)
+# and they have no symbol, so gdb-wui's Symbols pane can't list them and a
+# breakpoint on one stops at its call site. 192 bytes more flash.
+FLAGS="-march=rv32ec_zicsr -mabi=ilp32e -DCH32V003 -g -Os -flto -ffunction-sections -fdata-sections -msmall-data-limit=8 -fno-inline-functions-called-once -fno-inline-small-functions -fdebug-prefix-map=$SRC=/root/mcu/$NAME"
 "${CROSS}gcc" -E -P -x c -DTARGET_MCU=CH32V003 -DMCU_PACKAGE=1 -DTARGET_MCU_LD=0 "$FUN/ch32fun.ld" > "$OUT/$NAME.ld"
 # (GCC 14 makes two of the warnings it gives errors: implicit declarations
 # and the display's functions assigned to the drawing library's void *

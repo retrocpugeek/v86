@@ -42,8 +42,12 @@ dir=$SRC/Software/TinyGameConsole
 cp "$HERE/mini-libc.c" "$dir/User/"
 cd "$dir"
 # The debug info names the sources as /root/mcu/minigameconsole, where the
-# v86-riscv site's gdb-wui image has them (tools/rv64-gdb/build.sh)
-FLAGS="-march=rv32ec_zicsr -mabi=ilp32e -Os -flto -g -ffunction-sections -fdata-sections -fno-common -fdebug-prefix-map=$dir=/root/mcu/$NAME"
+# v86-riscv site's gdb-wui image has them (tools/rv64-gdb/build.sh).
+# Its functions are kept out of line (-fno-inline-...), unlike the IDE's
+# build: with LTO, GCC inlines most of them and they have no symbol, so
+# gdb-wui's Symbols pane can't list them and a breakpoint on one stops at
+# its call site. About 770 bytes more flash, which it has.
+FLAGS="-march=rv32ec_zicsr -mabi=ilp32e -Os -flto -g -ffunction-sections -fdata-sections -fno-common -fno-inline-functions-called-once -fno-inline-small-functions -fdebug-prefix-map=$dir=/root/mcu/$NAME"
 "${CROSS}gcc" $FLAGS -c Startup/startup_ch32v00x.S -o "$OUT/startup.o"
 # shellcheck disable=SC2046
 "${CROSS}gcc" $FLAGS -std=gnu99 -fsigned-char -include stddef.h '-Dinterrupt(x)=interrupt' \
