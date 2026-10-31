@@ -20,7 +20,13 @@
 //! on the pins the host names (chip select, data/command, reset), fed by the
 //! CPU or by DMA1 channel 3 (with its interrupt, on the V003); ADC1's
 //! software-started conversions, of values the host sets (e.g. for buttons
-//! on a resistor ladder); GPIO inputs the host drives, and edges on output
+//! on a resistor ladder), and its continuous ones, timed by its clock, of
+//! those, a waveform the host sets or samples it streams (e.g. a
+//! microphone's), with the analog watchdog and its interrupt, and DMA1
+//! channel 1 moving each result to memory (circular or not, with its half
+//! and complete interrupts, on the V003); an I2C bus the firmware bit-bangs
+//! on GPIO pins the host names, with the SSD1306 on it (BitI2c); GPIO inputs
+//! the host drives, and edges on output
 //! pins it watches (e.g. a buzzer); TIM2's PWM output as the tone it plays
 //! (e.g. on a buzzer), for the host; the flash interface's fast (64-byte)
 //! page erase and programming, and 1 KB page erase (for saving data). Other
@@ -86,6 +92,22 @@ impl Chip {
             Chip::V307 => u32::MAX,
         }
     }
+
+    /// DMA1 channel 1's interrupt (modelled for the V003 only)
+    fn dma1_ch1_irq(self) -> u32 {
+        match self {
+            Chip::V003 => 22,
+            Chip::V307 => u32::MAX,
+        }
+    }
+
+    /// ADC1's interrupt (modelled for the V003 only)
+    fn adc_irq(self) -> u32 {
+        match self {
+            Chip::V003 => 29,
+            Chip::V307 => u32::MAX,
+        }
+    }
 }
 const PFIC_BASE: u64 = 0xe000_e000;
 const SYSTICK_BASE: u64 = 0xe000_f000;
@@ -123,6 +145,15 @@ const I2C_DMAEN: u32 = 1 << 11;
 const DMA_CH3: u64 = 0x30;
 const DMA_GIF3: u32 = 1 << 8;
 const DMA_TCIF3: u32 = 1 << 9;
+/// DMA1 channel 1's registers, ADC1's channel, its INTFR flags (global,
+/// transfer complete, half transfer) and more CFGR bits
+const DMA_CH1: u64 = 0x08;
+const DMA_GIF1: u32 = 1 << 0;
+const DMA_TCIF1: u32 = 1 << 1;
+const DMA_HTIF1: u32 = 1 << 2;
+const DMA_HTIE: u32 = 1 << 2;
+const DMA_CIRC: u32 = 1 << 5;
+const DMA_MINC: u32 = 1 << 7;
 // SPI CTLR1, CTLR2 and STATR bits
 const SPI_SPE: u32 = 1 << 6;
 const SPI_DFF: u32 = 1 << 11;
@@ -176,6 +207,19 @@ const ADC_CAL: u32 = 1 << 2;
 const ADC_RSTCAL: u32 = 1 << 3;
 const ADC_SWSTART: u32 = 1 << 22;
 const ADC_EOC: u32 = 1 << 1;
+const ADC_CONT: u32 = 1 << 1;
+const ADC_DMA: u32 = 1 << 8;
+const ADC_AWD: u32 = 1 << 0;
+// ADC CTLR1 bits: the analog watchdog's interrupt enable, single channel and
+// enable (regular channels)
+const ADC_AWDIE: u32 = 1 << 6;
+const ADC_AWDSGL: u32 = 1 << 9;
+const ADC_AWDEN: u32 = 1 << 23;
+/// How many conversions ahead the analog watchdog's next trip is looked for
+const AWD_HORIZON: u64 = 4096;
+/// Most of a streamed input kept ahead of the conversions (s): more is
+/// dropped, catching up
+const STREAM_BACKLOG_S: f64 = 0.25;
 /// Edges kept for the host (Ch32::take_edges) before the oldest are dropped
 const MAX_EDGES: usize = 1 << 16;
 
@@ -233,7 +277,9 @@ pub enum FlashOp {
     Program(usize, [u8; FLASH_PAGE]),
 }
 
-/// ADC1, converting on software start (SWSTART).
+/// ADC1, converting on software start (SWSTART), once or continuously
+/// (CONT): a conversion takes its channel's sample time and 11 cycles of
+/// ADCCLK (HCLK through the RCC's prescaler).
 #[derive(Default)]
 struct Adc {
     ctlr1: u32,
@@ -242,6 +288,141 @@ struct Adc {
     eoc: bool,
     rdatar: u32,
     regs: [u32; 20],
+    /// STATR's analog watchdog flag
+    awd: bool,
+    /// Converting continuously: conversion k (counting from 1) ends at
+    /// t0 + k * period_num / period_den (ns); `done` of them have
+    running: bool,
+    t0: u64,
+    done: u64,
+    period_num: u64,
+    period_den: u64,
+    /// When conversion done + 1 ends (ns)
+    next_t: u64,
+    /// The first conversion from done + 1 that trips the analog watchdog
+    /// (u64::MAX for none), of those before awd_horizon; awd_valid is false
+    /// when it must be looked for again (the window, input or timing changed)
+    awd_next: u64,
+    awd_horizon: u64,
+    awd_valid: bool,
+    /// DMA1 channel 1's transfer: its length (CNTR when enabled), and how
+    /// many items of it are done
+    dma_len: u32,
+    dma_idx: u32,
+}
+
+/// A waveform the host sets as an ADC channel's input: its shape (1 sine,
+/// 2 square, 3 triangle, 4 sawtooth), frequency (mHz), and centre and
+/// amplitude (ADC codes).
+#[derive(Clone, Copy)]
+pub struct Wave {
+    pub ch: usize,
+    pub shape: u32,
+    pub mhz: u64,
+    pub mid: f64,
+    pub amp: f64,
+}
+
+impl Wave {
+    fn at(&self, t: u64) -> u32 {
+        // The phase from integers: t * f is too large for an f64's precision
+        let p = (t as u128 * self.mhz as u128 % 1_000_000_000_000) as f64 / 1e12;
+        let x = match self.shape {
+            1 => (2.0 * std::f64::consts::PI * p).sin(),
+            2 => if p < 0.5 { 1.0 } else { -1.0 },
+            3 => 1.0 - 4.0 * (p - 0.5).abs(),
+            4 => 2.0 * p - 1.0,
+            _ => 0.0,
+        };
+        (self.mid + self.amp * x).round().clamp(0.0, 1023.0) as u32
+    }
+}
+
+/// Samples (ADC codes) the host streams as an ADC channel's input, e.g. a
+/// microphone's, period_ns apart: the first is at front_t (ns), set when
+/// they first meet a conversion. Between samples the input is interpolated;
+/// past the last it holds, and the next samples start afresh.
+pub struct Stream {
+    pub ch: usize,
+    period_ns: f64,
+    front_t: Option<f64>,
+    samples: VecDeque<u16>,
+    dry: bool,
+}
+
+impl Stream {
+    pub fn new(ch: usize, rate: u32) -> Stream {
+        Stream { ch, period_ns: 1e9 / rate.max(1) as f64, front_t: None, samples: VecDeque::new(), dry: false }
+    }
+
+    pub fn push(&mut self, samples: &[u16]) {
+        if self.dry {
+            self.samples.clear();
+            self.front_t = None;
+            self.dry = false;
+        }
+        self.samples.extend(samples.iter().map(|&v| v.min(1023)));
+    }
+
+    fn at(&self, t: u64) -> Option<u32> {
+        let ft = self.front_t?;
+        let last = *self.samples.back()?;
+        let pos = (t as f64 - ft) / self.period_ns;
+        if pos <= 0.0 {
+            return Some(self.samples[0] as u32);
+        }
+        let i = pos as usize;
+        if i + 1 >= self.samples.len() {
+            return Some(last as u32);
+        }
+        let (a, b) = (self.samples[i] as f64, self.samples[i + 1] as f64);
+        Some((a + (b - a) * (pos - i as f64)).round() as u32)
+    }
+
+    /// The conversions have reached `t`: start the samples there if they
+    /// haven't started, drop those passed and those too far ahead.
+    fn advance(&mut self, t: u64) {
+        let Some(ft) = self.front_t else {
+            if !self.samples.is_empty() {
+                self.front_t = Some(t as f64);
+            }
+            return;
+        };
+        let n = ((t as f64 - ft) / self.period_ns).max(0.0) as usize;
+        if n >= self.samples.len() {
+            self.dry = true;
+        }
+        let drop = n.min(self.samples.len().saturating_sub(1));
+        self.samples.drain(..drop);
+        self.front_t = Some(ft + drop as f64 * self.period_ns);
+        let max = (STREAM_BACKLOG_S * 1e9 / self.period_ns) as usize;
+        if self.samples.len() > max {
+            // Behind: skip ahead to the newest
+            let extra = self.samples.len() - max;
+            self.samples.drain(..extra);
+        }
+    }
+}
+
+/// An I2C bus the firmware bit-bangs on two GPIO pins (open drain), with
+/// the SSD1306 display on it: the pins' levels are decoded into STARTs,
+/// STOPs and bytes, and the display acknowledges its address and the bytes
+/// after it by pulling SDA low for the ninth clock.
+struct BitI2c {
+    scl: (usize, u32),
+    sda: (usize, u32),
+    scl_hi: bool,
+    sda_hi: bool,
+    /// The byte being clocked in, and how many of its bits (9: the
+    /// acknowledge clock)
+    byte: u8,
+    nbits: u8,
+    /// The next byte is the address; the display was addressed
+    first: bool,
+    to_display: bool,
+    /// The byte clocked in is acknowledged; SDA is being pulled low for it
+    ack: bool,
+    ack_drive: bool,
 }
 
 pub struct Ch32 {
@@ -278,8 +459,15 @@ pub struct Ch32 {
     /// The SSD1306 display on I2C1
     pub display: Ssd1306,
     adc: Adc,
-    /// ADC1's inputs (channels 0 to 9; 8 is the internal 1.2 V reference)
+    /// ADC1's inputs (channels 0 to 9; 8 is the internal 1.2 V reference),
+    /// and a waveform or samples the host sets for one instead
     pub adc_in: [u16; 10],
+    pub adc_wave: Option<Wave>,
+    pub adc_stream: Option<Stream>,
+    /// DMA1 channel 1's writes for the bus to make: address, value, size
+    dma_writes: Vec<(u32, u32, u32)>,
+    /// The I2C bus bit-banged on GPIO pins, if there's one
+    bitbang: Option<BitI2c>,
     /// GPIO pins the host drives, by port: mask and levels
     pub gpio_in: [(u32, u32); GPIO_PORTS as usize],
     /// Output pins whose changes are recorded, by port; the changes
@@ -342,9 +530,14 @@ impl Ch32 {
             regs: HashMap::from([(BKP_DR1, 0xa1a1)]),
             i2c: I2c::default(),
             display: Ssd1306::default(),
-            adc: Adc::default(),
+            // (WDHTR's reset value: the watchdog's window is everything)
+            adc: Adc { regs: { let mut r = [0; 20]; r[9] = 0x3ff; r }, ..Adc::default() },
             // VREFINT: 1.2 V of a 3.3 V supply, 10 bits
             adc_in: [0, 0, 0, 0, 0, 0, 0, 0, 372, 0],
+            adc_wave: None,
+            adc_stream: None,
+            dma_writes: Vec::new(),
+            bitbang: None,
             gpio_in: [(0, 0); GPIO_PORTS as usize],
             gpio_watch: [0; GPIO_PORTS as usize],
             edges: VecDeque::new(),
@@ -368,6 +561,23 @@ impl Ch32 {
     pub fn attach_lcd(&mut self, cs: (usize, u32), dc: (usize, u32), rst: (usize, u32)) {
         self.lcd = Some(St7735::default());
         self.lcd_pins = [cs, dc, rst];
+    }
+
+    /// Put an I2C bus, bit-banged by the firmware, with the SSD1306 display
+    /// on it, on these pins (port, pin; port 0 is GPIOA).
+    pub fn attach_bitbang_i2c(&mut self, scl: (usize, u32), sda: (usize, u32)) {
+        self.bitbang = Some(BitI2c {
+            scl,
+            sda,
+            scl_hi: true,
+            sda_hi: true,
+            byte: 0,
+            nbits: 0,
+            first: false,
+            to_display: false,
+            ack: false,
+            ack_drive: false,
+        });
     }
 
     /// Does pa belong to a peripheral modelled here?
@@ -446,6 +656,10 @@ impl Ch32 {
     pub fn update(&mut self, now: u64) {
         self.i2c_update(now);
         self.spi_update(now);
+        self.adc_run(now);
+        if self.adc_armed() && (!self.adc.awd_valid || self.adc.done + 1 >= self.adc.awd_horizon) {
+            self.adc_awd_scan();
+        }
         while now >= self.stk_next {
             self.invalidate();
             self.stk_sr |= 1;
@@ -461,7 +675,8 @@ impl Ch32 {
     }
 
     /// When update() next has something to do (ns), or u64::MAX: SysTick,
-    /// while DMA feeds I2C1, its bytes, and the end of a DMA transfer to SPI1.
+    /// while DMA feeds I2C1, its bytes, the end of a DMA transfer to SPI1,
+    /// and the next ADC conversion that interrupts.
     pub fn next_event_ns(&self) -> u64 {
         let i2c = &self.i2c;
         let dma = if i2c.dma_queue.is_empty() && i2c.dr.is_none() {
@@ -473,7 +688,7 @@ impl Ch32 {
         } else {
             u64::MAX
         };
-        self.stk_next.min(dma).min(self.spi.dma_done_at.unwrap_or(u64::MAX))
+        self.stk_next.min(dma).min(self.spi.dma_done_at.unwrap_or(u64::MAX)).min(self.adc_next_event_ns())
     }
 
     /// USART1's status register.
@@ -497,6 +712,12 @@ impl Ch32 {
             _ if n == self.chip.dma1_ch3_irq() => {
                 self.dma_intfr & DMA_TCIF3 != 0 && self.dma[(DMA_CH3 / 4) as usize] & DMA_TCIE != 0
             }
+            _ if n == self.chip.dma1_ch1_irq() => {
+                let cfgr = self.dma[(DMA_CH1 / 4) as usize];
+                self.dma_intfr & DMA_TCIF1 != 0 && cfgr & DMA_TCIE != 0
+                    || self.dma_intfr & DMA_HTIF1 != 0 && cfgr & DMA_HTIE != 0
+            }
+            _ if n == self.chip.adc_irq() => self.adc.awd && self.adc.ctlr1 & ADC_AWDIE != 0,
             _ => false,
         }
     }
@@ -520,8 +741,15 @@ impl Ch32 {
 
     fn compute_pending_irq(&self) -> Option<u32> {
         let enabled = |n: u32| (n as usize) < NUM_IRQS && self.ienr[(n / 32) as usize] >> (n % 32) & 1 != 0;
-        let candidates =
-            [IRQ_SYSTICK, IRQ_SOFTWARE, self.chip.usart1_irq(), self.chip.dma1_ch6_irq(), self.chip.dma1_ch3_irq()];
+        let candidates = [
+            IRQ_SYSTICK,
+            IRQ_SOFTWARE,
+            self.chip.usart1_irq(),
+            self.chip.dma1_ch6_irq(),
+            self.chip.dma1_ch3_irq(),
+            self.chip.dma1_ch1_irq(),
+            self.chip.adc_irq(),
+        ];
         let any_software = self.ipsr.iter().any(|&w| w != 0);
         let software = (0..if any_software { NUM_IRQS as u32 } else { 0 }).filter(|&n| self.ipsr[(n / 32) as usize] >> (n % 32) & 1 != 0);
         candidates
@@ -629,9 +857,15 @@ impl Ch32 {
         if a.wrapping_sub(GPIO_BASE) < GPIO_PORTS * 0x400 && a & 0x3ff == 0x08 {
             // INDR: what the host drives, otherwise what's driven or pulled
             // (OUTDR)
-            let (mask, levels) = self.gpio_in[((a - GPIO_BASE) / 0x400) as usize];
+            let port = ((a - GPIO_BASE) / 0x400) as usize;
+            let (mask, levels) = self.gpio_in[port];
             let out = self.regs.get(&(a + 4)).copied().unwrap_or(0);
-            return out & !mask | levels & mask;
+            // (the display pulling SDA low to acknowledge)
+            let ack = match &self.bitbang {
+                Some(b) if b.ack_drive && b.sda.0 == port => 1 << b.sda.1,
+                _ => 0,
+            };
+            return (out & !mask | levels & mask) & !ack;
         }
         if a.wrapping_sub(I2C1_BASE) < 0x400 {
             return self.i2c_read(a - I2C1_BASE, now);
@@ -655,6 +889,7 @@ impl Ch32 {
         if a.wrapping_sub(DMA1_BASE) < 0xa0 {
             self.i2c_update(now);
             self.spi_update(now);
+            self.adc_run(now);
             return match a - DMA1_BASE {
                 0x00 => self.dma_intfr,
                 0x04 => 0,
@@ -664,9 +899,10 @@ impl Ch32 {
             };
         }
         if a.wrapping_sub(ADC1_BASE) < 0x400 {
+            self.adc_run(now);
             let adc = &mut self.adc;
             return match a - ADC1_BASE {
-                0x00 => (adc.eoc as u32) << 1,
+                0x00 => (adc.eoc as u32) << 1 | adc.awd as u32,
                 0x04 => adc.ctlr1,
                 0x08 => adc.ctlr2,
                 0x34 => adc.rsqr3,
@@ -893,28 +1129,231 @@ impl Ch32 {
 
     // ---- ADC1 ----
 
-    fn adc_write(&mut self, off: u64, v: u32) {
-        let adc = &mut self.adc;
+    fn adc_write(&mut self, off: u64, v: u32, now: u64) {
+        self.adc_run(now);
+        // The watchdog's next trip may have changed
+        self.adc.awd_valid = false;
         match off {
-            0x00 => adc.eoc &= v & ADC_EOC != 0,
-            0x04 => adc.ctlr1 = v,
+            // STATR: writing 0 clears a flag
+            0x00 => {
+                self.adc.eoc &= v & ADC_EOC != 0;
+                self.adc.awd &= v & ADC_AWD != 0;
+            }
+            0x04 => self.adc.ctlr1 = v,
             0x08 => {
                 // Calibration finishes at once; a software start converts
-                // the first regular channel at once
-                adc.ctlr2 = v & !(ADC_CAL | ADC_RSTCAL | ADC_SWSTART);
-                if v & ADC_SWSTART != 0 && v & ADC_ADON != 0 {
-                    let ch = (adc.rsqr3 & 0x1f) as usize;
-                    adc.rdatar = self.adc_in.get(ch).copied().unwrap_or(0).min(1023) as u32;
-                    adc.eoc = true;
+                // the first regular channel at once, or starts converting
+                // it continuously
+                self.adc.ctlr2 = v & !(ADC_CAL | ADC_RSTCAL | ADC_SWSTART);
+                if v & ADC_ADON == 0 {
+                    self.adc.running = false;
+                } else if v & ADC_SWSTART != 0 {
+                    if v & ADC_CONT != 0 {
+                        self.adc.running = true;
+                        self.adc.t0 = now;
+                        self.adc.done = 0;
+                        self.adc_retime();
+                    } else {
+                        self.adc.rdatar = self.adc_value(now);
+                        self.adc.eoc = true;
+                    }
                 }
             }
-            0x34 => adc.rsqr3 = v,
+            0x34 => {
+                self.adc.rsqr3 = v;
+                self.adc_retime();
+            }
             off => {
-                if let Some(r) = adc.regs.get_mut(off as usize / 4) {
+                if let Some(r) = self.adc.regs.get_mut(off as usize / 4) {
                     *r = v;
+                }
+                // SAMPTR1 and 2: the sample times
+                if off == 0x0c || off == 0x10 {
+                    self.adc_retime();
                 }
             }
         }
+    }
+
+    /// ADCCLK's divisor of HCLK (the RCC's ADCPRE).
+    fn adc_div(&self) -> u64 {
+        let cfgr0 = self.rcc[1];
+        match self.chip {
+            Chip::V003 => {
+                // 0b0xx00 to 0b11x00: 2, 4, 6, 8; with bit 2 set, (b4:3 + 1)
+                // * 4, doubled by b1:0
+                let f = (cfgr0 >> 11 & 0x1f) as u64;
+                if f & 4 == 0 { [2, 4, 6, 8][(f >> 3 & 3) as usize] } else { (((f >> 3 & 3) + 1) * 4) << (f & 3) }
+            }
+            Chip::V307 => [2, 4, 6, 8][(cfgr0 >> 14 & 3) as usize],
+        }
+    }
+
+    /// Time the conversions from here with the clock and sample time now
+    /// set, continuing from the last one's end.
+    fn adc_retime(&mut self) {
+        if self.adc.running {
+            self.adc.t0 = self.adc_time(self.adc.done);
+            self.adc.done = 0;
+        }
+        let ch = self.adc.rsqr3 & 0x1f;
+        let smp = if ch < 10 { self.adc.regs[4] >> (3 * ch) } else { self.adc.regs[3] >> (3 * (ch - 10)) } & 7;
+        let cycles = [3, 9, 15, 30, 43, 57, 73, 241][smp as usize] + 11;
+        self.adc.period_num = cycles * self.adc_div() * 1_000_000_000;
+        self.adc.period_den = self.hclk().max(1);
+        self.adc.next_t = self.adc_time(self.adc.done + 1);
+        self.adc.awd_valid = false;
+    }
+
+    /// When continuous conversion k ends (ns; rounded up, as adc_run counts
+    /// those ended by a time).
+    fn adc_time(&self, k: u64) -> u64 {
+        let a = &self.adc;
+        a.t0 + (k as u128 * a.period_num as u128).div_ceil(a.period_den.max(1) as u128) as u64
+    }
+
+    /// The input of the channel converted, at `t` (ns).
+    fn adc_value(&self, t: u64) -> u32 { self.adc_input((self.adc.rsqr3 & 0x1f) as usize, t) }
+
+    /// ADC channel ch's input at `t` (ns): the samples streamed for it,
+    /// else the waveform set for it, else the level set for it.
+    pub fn adc_input(&self, ch: usize, t: u64) -> u32 {
+        if let Some(v) = self.adc_stream.as_ref().filter(|s| s.ch == ch).and_then(|s| s.at(t)) {
+            return v;
+        }
+        if let Some(w) = self.adc_wave.filter(|w| w.ch == ch) {
+            return w.at(t);
+        }
+        self.adc_in.get(ch).copied().unwrap_or(0).min(1023) as u32
+    }
+
+    /// The streamed input or waveform changed: the watchdog's next trip may
+    /// have.
+    pub fn adc_input_changed(&mut self) { self.adc.awd_valid = false }
+
+    /// The analog watchdog is on and hasn't tripped.
+    fn adc_armed(&self) -> bool { self.adc.running && self.adc.ctlr1 & ADC_AWDEN != 0 && !self.adc.awd }
+
+    /// Does the watchdog trip on value v (of the channel converted)?
+    fn adc_trips(&self, v: u32) -> bool {
+        let a = &self.adc;
+        let watched = a.ctlr1 & ADC_AWDSGL == 0 || a.ctlr1 & 0x1f == a.rsqr3 & 0x1f;
+        watched && (v > a.regs[9] & 0x3ff || v < a.regs[10] & 0x3ff)
+    }
+
+    /// Look for the watchdog's next trip, up to AWD_HORIZON conversions ahead.
+    fn adc_awd_scan(&mut self) {
+        let from = self.adc.done + 1;
+        let to = from + AWD_HORIZON;
+        self.adc.awd_next = (from..to).find(|&k| self.adc_trips(self.adc_value(self.adc_time(k)))).unwrap_or(u64::MAX);
+        self.adc.awd_horizon = to;
+        self.adc.awd_valid = true;
+    }
+
+    /// DMA1 channel 1 and ADC1's DMA requests are on, with items left.
+    fn adc_dma_on(&self) -> bool {
+        let ch = (DMA_CH1 / 4) as usize;
+        self.dma[ch] & DMA_EN != 0 && self.adc.ctlr2 & ADC_DMA != 0 && self.dma[ch + 1] & 0xffff != 0
+    }
+
+    /// DMA1 channel 1 moves a conversion's result to memory.
+    fn adc_dma_transfer(&mut self, v: u32) {
+        let ch = (DMA_CH1 / 4) as usize;
+        let cfgr = self.dma[ch];
+        let size = 1 << (cfgr >> 10 & 3);
+        let step = if cfgr & DMA_MINC != 0 { size } else { 0 };
+        self.dma_writes.push((self.dma[ch + 3].wrapping_add(self.adc.dma_idx * step), v, size));
+        self.adc.dma_idx += 1;
+        let left = (self.dma[ch + 1] & 0xffff) - 1;
+        self.dma[ch + 1] = left;
+        if self.adc.dma_idx == self.adc.dma_len / 2 {
+            self.dma_intfr |= DMA_GIF1 | DMA_HTIF1;
+        }
+        if left == 0 {
+            self.dma_intfr |= DMA_GIF1 | DMA_TCIF1;
+            if cfgr & DMA_CIRC != 0 {
+                self.dma[ch + 1] = self.adc.dma_len;
+                self.adc.dma_idx = 0;
+            }
+        }
+    }
+
+    /// Bring the continuous conversions up to `now`: with DMA, each one's
+    /// result goes to memory and the watchdog looks at it; without, the
+    /// watchdog's next trip is all that matters.
+    fn adc_run(&mut self, now: u64) {
+        if !self.adc.running || now < self.adc.next_t || self.adc.period_num == 0 {
+            return;
+        }
+        let a = &self.adc;
+        let target = if now < a.t0 { 0 } else { ((now - a.t0) as u128 * a.period_den as u128 / a.period_num as u128) as u64 };
+        if target <= a.done {
+            return;
+        }
+        self.invalidate();
+        while self.adc.done < target {
+            if self.adc_dma_on() {
+                let k = self.adc.done + 1;
+                let v = self.adc_value(self.adc_time(k));
+                if self.adc_armed() && self.adc_trips(v) {
+                    self.adc.awd = true;
+                }
+                self.adc_dma_transfer(v);
+                self.adc.done = k;
+                continue;
+            }
+            if self.adc_armed() {
+                if !self.adc.awd_valid || self.adc.done + 1 >= self.adc.awd_horizon {
+                    self.adc_awd_scan();
+                }
+                if self.adc.awd_next <= target {
+                    self.adc.awd = true;
+                    self.adc.done = self.adc.awd_next;
+                } else {
+                    self.adc.done = target.min(self.adc.awd_horizon - 1);
+                }
+                continue;
+            }
+            self.adc.done = target;
+        }
+        let t = self.adc_time(self.adc.done);
+        self.adc.next_t = self.adc_time(self.adc.done + 1);
+        self.adc.rdatar = self.adc_value(t);
+        self.adc.eoc = true;
+        if let Some(s) = self.adc_stream.as_mut() {
+            s.advance(t);
+        }
+    }
+
+    /// When the next conversion that interrupts ends (ns), or u64::MAX: the
+    /// watchdog's next trip, DMA's half and complete points.
+    fn adc_next_event_ns(&self) -> u64 {
+        let a = &self.adc;
+        if !a.running {
+            return u64::MAX;
+        }
+        let mut k = u64::MAX;
+        if self.adc_armed() && a.ctlr1 & ADC_AWDIE != 0 {
+            k = if a.awd_valid { a.awd_next.min(a.awd_horizon) } else { a.done + 1 };
+        }
+        if self.adc_dma_on() {
+            let ch = (DMA_CH1 / 4) as usize;
+            let (cfgr, left) = (self.dma[ch], (self.dma[ch + 1] & 0xffff) as u64);
+            let half = (a.dma_len / 2) as u64;
+            if cfgr & DMA_HTIE != 0 && (a.dma_idx as u64) < half {
+                k = k.min(a.done + half - a.dma_idx as u64);
+            }
+            if cfgr & DMA_TCIE != 0 {
+                k = k.min(a.done + left);
+            }
+        }
+        if k == u64::MAX { u64::MAX } else { self.adc_time(k) }
+    }
+
+    /// Hand over DMA1 channel 1's writes for the bus to make: address,
+    /// value, size.
+    pub fn take_dma_writes(&mut self) -> Option<Vec<(u32, u32, u32)>> {
+        (!self.dma_writes.is_empty()).then(|| std::mem::take(&mut self.dma_writes))
     }
 
     // ---- SPI1 and DMA1 channel 3 (SPI1 transmit), to the LCD ----
@@ -1068,6 +1507,9 @@ impl Ch32 {
 
     /// Record port's OUTDR changing from old to new, if it's watched there.
     fn gpio_changed(&mut self, port: usize, old: u32, new: u32, now: u64) {
+        if self.bitbang.as_ref().is_some_and(|b| b.scl.0 == port || b.sda.0 == port) {
+            self.bitbang_update();
+        }
         let (rst_port, rst_pin) = self.lcd_pins[2];
         if port == rst_port && old >> rst_pin & 1 != 0 && new >> rst_pin & 1 == 0 {
             if let Some(lcd) = self.lcd.as_mut() {
@@ -1079,6 +1521,65 @@ impl Ch32 {
                 self.edges.pop_front();
             }
             self.edges.push_back((now, port as u8, new as u16));
+        }
+    }
+
+    /// The bit-banged I2C bus's pins may have changed: decode them.
+    fn bitbang_update(&mut self) {
+        let out = |s: &Ch32, (port, pin): (usize, u32)| s.gpio_out(port as u32) >> pin & 1 != 0;
+        let Some(b) = self.bitbang.as_ref() else { return };
+        let (scl, sda_out) = (out(self, b.scl), out(self, b.sda));
+        let b = self.bitbang.as_mut().unwrap();
+        let sda = sda_out && !b.ack_drive;
+        if sda != b.sda_hi {
+            b.sda_hi = sda;
+            if b.scl_hi {
+                if !sda {
+                    // START (or a repeated one)
+                    b.nbits = 0;
+                    b.first = true;
+                    b.ack = false;
+                } else {
+                    // STOP
+                    b.to_display = false;
+                    b.first = false;
+                    b.nbits = 0;
+                }
+            }
+        }
+        if scl != b.scl_hi {
+            b.scl_hi = scl;
+            if scl {
+                if b.nbits < 8 {
+                    b.byte = b.byte << 1 | sda as u8;
+                    b.nbits += 1;
+                    if b.nbits == 8 {
+                        if b.first {
+                            b.first = false;
+                            b.to_display = b.byte >> 1 == ssd1306::ADDR && b.byte & 1 == 0;
+                            if b.to_display {
+                                self.display.start();
+                            }
+                            b.ack = b.to_display;
+                        } else {
+                            if b.to_display {
+                                self.display.byte(b.byte);
+                            }
+                            b.ack = b.to_display;
+                        }
+                    }
+                } else if b.nbits == 8 {
+                    b.nbits = 9;
+                }
+            } else if b.nbits == 8 && b.ack {
+                b.ack_drive = true;
+            } else if b.nbits == 9 {
+                b.ack_drive = false;
+                b.ack = false;
+                b.nbits = 0;
+            }
+            // (SDA as the display now leaves it, SCL being low)
+            b.sda_hi = sda_out && !b.ack_drive;
         }
     }
 
@@ -1186,8 +1687,9 @@ impl Ch32 {
             self.stk_cnt0 = self.stk_count(now);
             self.stk_t0 = now;
             self.rcc[((a - RCC_BASE) / 4) as usize] = v;
-            // SysTick's clock, and the hart's, may have changed
+            // SysTick's clock, the hart's and ADCCLK may have changed
             self.stk_schedule();
+            self.adc_retime();
             self.clock_changed = true;
             return;
         }
@@ -1210,7 +1712,7 @@ impl Ch32 {
             return;
         }
         if a.wrapping_sub(ADC1_BASE) < 0x400 {
-            self.adc_write(a - ADC1_BASE, v);
+            self.adc_write(a - ADC1_BASE, v, now);
             return;
         }
         if a.wrapping_sub(SPI1_BASE) < 0x400 {
@@ -1229,6 +1731,7 @@ impl Ch32 {
         if a.wrapping_sub(DMA1_BASE) < 0xa0 {
             self.i2c_update(now);
             self.spi_update(now);
+            self.adc_run(now);
             match a - DMA1_BASE {
                 0x00 => {}
                 // INTFCR: clearing a channel's GIF clears all its flags
@@ -1242,7 +1745,13 @@ impl Ch32 {
                     }
                 }
                 off => {
+                    let old = self.dma[(off / 4) as usize];
                     self.dma[(off / 4) as usize] = v;
+                    if off == DMA_CH1 && v & DMA_EN != 0 && old & DMA_EN == 0 {
+                        // Enabling channel 1 starts its transfer
+                        self.adc.dma_len = self.dma[(DMA_CH1 / 4 + 1) as usize] & 0xffff;
+                        self.adc.dma_idx = 0;
+                    }
                     if off == DMA_CH6 && v & DMA_EN == 0 {
                         // Disabling the channel ends its transfer
                         self.i2c.dma_queue.clear();
@@ -1322,5 +1831,127 @@ mod tests {
         // ... and that STAR1 read, then STAR2, clears it
         c.read(STAR2, 2, done + 3);
         assert_eq!(c.read(STAR1, 2, done + 4).unwrap() as u32 & I2C_ADDR, 0);
+    }
+
+    #[test]
+    fn adc_prescaler() {
+        // The osillyscope's divisors and the CFGR0 values it writes for them
+        let mut c = Ch32::new(Chip::V003, Box::new(|_| {}), 0);
+        for (div, bits) in [
+            (2, 0),
+            (4, 0x4000),
+            (6, 0x8000),
+            (8, 0xc000),
+            (12, 0xa000),
+            (16, 0xe000),
+            (24, 0xa800),
+            (32, 0xe800),
+            (64, 0xf000),
+            (96, 0xb800),
+            (128, 0xf800),
+        ] {
+            c.write(RCC_BASE + 4, 4, bits, 0);
+            assert_eq!(c.adc_div(), div, "CFGR0 {bits:#x}");
+        }
+    }
+
+    /// 48 MHz, ADC1 converting channel 5 continuously (9-cycle sample: 20
+    /// cycles of 24 MHz, 833 ns) into an 8-item circular DMA buffer.
+    fn converting(input: u16) -> Ch32 {
+        let mut c = Ch32::new(Chip::V003, Box::new(|_| {}), 0);
+        c.write(RCC_BASE + 4, 4, 2, 0);
+        c.adc_in[5] = input;
+        c.write(ADC1_BASE + 0x34, 4, 5, 0);
+        c.write(ADC1_BASE + 0x10, 4, 1 << 15, 0);
+        c.write(DMA1_BASE + DMA_CH1 + 4, 4, 8, 0);
+        c.write(DMA1_BASE + DMA_CH1 + 0xc, 4, SRAM_BASE, 0);
+        let cfgr = DMA_MINC | 1 << 8 | 1 << 10 | DMA_CIRC | DMA_HTIE | DMA_TCIE | DMA_EN;
+        c.write(DMA1_BASE + DMA_CH1, 4, cfgr as u64, 0);
+        c.write(ADC1_BASE + 8, 4, (ADC_ADON | ADC_CONT | ADC_DMA) as u64, 0);
+        c.write(ADC1_BASE + 8, 4, (ADC_ADON | ADC_CONT | ADC_DMA | ADC_SWSTART) as u64, 0);
+        c
+    }
+
+    #[test]
+    fn continuous_conversions_go_to_memory() {
+        let mut c = converting(300);
+        // Half the buffer by the 4th conversion's end, all of it by the 8th's
+        assert_eq!(c.next_event_ns(), 3334);
+        c.update(3333);
+        assert_eq!(c.dma_intfr & DMA_HTIF1, 0);
+        c.update(3334);
+        assert_ne!(c.dma_intfr & DMA_HTIF1, 0);
+        assert_eq!(c.next_event_ns(), 6667);
+        c.update(6667);
+        assert_ne!(c.dma_intfr & DMA_TCIF1, 0);
+        let writes = c.take_dma_writes().unwrap();
+        assert_eq!(writes.len(), 8);
+        assert_eq!(writes[7], (SRAM_BASE as u32 + 14, 300, 2));
+        // Circular: on again from the start
+        assert_eq!(c.read(DMA1_BASE + DMA_CH1 + 4, 4, 6667), Some(8));
+        assert_eq!(c.pending_irq(), None);
+        c.write(PFIC_BASE + 0x100, 4, 1 << 22, 6667);
+        assert_eq!(c.pending_irq(), Some(22));
+    }
+
+    #[test]
+    fn analog_watchdog_trips_at_the_crossing() {
+        let mut c = converting(300);
+        c.write(DMA1_BASE + DMA_CH1, 4, 0, 0);
+        // A square wave around 300, crossing 400 a quarter of the way into
+        // each 10 us; a window of 0 to 400
+        c.adc_wave = Some(Wave { ch: 5, shape: 2, mhz: 100_000_000, mid: 300.0, amp: 200.0 });
+        c.adc_input_changed();
+        c.write(ADC1_BASE + 0x24, 4, 400, 0);
+        c.write(ADC1_BASE + 0x28, 4, 0, 0);
+        c.write(ADC1_BASE + 4, 4, (ADC_AWDSGL | ADC_AWDEN | ADC_AWDIE | 5) as u64, 0);
+        c.update(0);
+        // The first conversion ends at 833 ns, in the wave's high half
+        assert_eq!(c.next_event_ns(), 834);
+        c.update(834);
+        assert!(c.adc.awd);
+        // Cleared while still high: trips again at the next conversion
+        c.write(ADC1_BASE, 4, !ADC_AWD as u64, 900);
+        c.update(900);
+        assert_eq!(c.next_event_ns(), 1667);
+        // A window it stays inside: no trip ahead, only a look further on
+        c.write(ADC1_BASE + 0x24, 4, 1023, 1000);
+        c.update(1000);
+        assert_eq!(c.adc.awd_next, u64::MAX);
+        assert_eq!(c.next_event_ns(), c.adc_time(c.adc.done + 1 + AWD_HORIZON));
+    }
+
+    #[test]
+    fn bit_banged_i2c_reaches_the_display() {
+        let mut c = Ch32::new(Chip::V003, Box::new(|_| {}), 0);
+        c.attach_bitbang_i2c((0, 1), (0, 2));
+        let outdr = GPIO_BASE + 0x0c;
+        let indr = GPIO_BASE + 0x08;
+        let mut lines = 0b110u64;
+        let mut set = |c: &mut Ch32, scl: bool, sda: bool| {
+            lines = (scl as u64) << 1 | (sda as u64) << 2;
+            c.write(outdr, 4, lines, 0);
+        };
+        // START, then bytes, each acknowledged (SDA read low on the 9th clock)
+        set(&mut c, true, true);
+        set(&mut c, true, false);
+        set(&mut c, false, false);
+        for byte in [(ssd1306::ADDR << 1), 0x40, 0xa5] {
+            for i in (0..8).rev() {
+                let bit = byte >> i & 1 != 0;
+                set(&mut c, false, bit);
+                set(&mut c, true, bit);
+                set(&mut c, false, bit);
+            }
+            set(&mut c, false, true);
+            set(&mut c, true, true);
+            assert_eq!(c.read(indr, 4, 0).unwrap() >> 2 & 1, 0, "byte {byte:#x} acknowledged");
+            set(&mut c, false, true);
+        }
+        // STOP
+        set(&mut c, false, false);
+        set(&mut c, true, false);
+        set(&mut c, true, true);
+        assert_eq!(c.display.ram[0], 0xa5);
     }
 }

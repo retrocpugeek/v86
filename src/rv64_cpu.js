@@ -743,6 +743,53 @@ RV64CPU.prototype.ch32_attach_lcd = function(cs, dc, rst)
 };
 
 /**
+ * CH32V: put the SSD1306 OLED display on an I2C bus the firmware bit-bangs
+ * on these pins (port * 16 + pin; port 0 is GPIOA). It stays across resets.
+ * @param {number} scl
+ * @param {number} sda
+ */
+RV64CPU.prototype.ch32_attach_i2c_gpio = function(scl, sda)
+{
+    if(this.ch32) this.wasm["rv64_ch32_attach_i2c_gpio"](scl, sda);
+};
+
+/**
+ * CH32V: make an ADC channel's input a waveform (it stays across resets).
+ * @param {number} channel
+ * @param {number} shape 1 sine, 2 square, 3 triangle, 4 sawtooth; 0 for none
+ * @param {number} hz
+ * @param {number} mid its centre, 0 to 1023
+ * @param {number} amp its amplitude (ADC codes)
+ */
+RV64CPU.prototype.ch32_set_adc_wave = function(channel, shape, hz, mid, amp)
+{
+    if(this.ch32) this.wasm["rv64_ch32_set_adc_wave"](channel, shape, hz, mid, amp);
+};
+
+/**
+ * CH32V: stream samples into an ADC channel (ch32_push_adc_samples), e.g.
+ * a microphone's.
+ * @param {number} channel
+ * @param {number} rate samples a second; 0 stops
+ */
+RV64CPU.prototype.ch32_adc_stream = function(channel, rate)
+{
+    if(this.ch32) this.wasm["rv64_ch32_adc_stream"](channel, rate);
+};
+
+/**
+ * CH32V: samples for the ADC channel being streamed into, in time order.
+ * @param {Uint16Array} samples ADC codes, 0 to 1023
+ */
+RV64CPU.prototype.ch32_push_adc_samples = function(samples)
+{
+    if(!this.ch32) return;
+    const ptr = this.wasm["rv64_ch32_adc_stream_buf"](samples.length) >>> 0;
+    new Uint16Array(this.wasm_memory.buffer, ptr, samples.length).set(samples);
+    this.wasm["rv64_ch32_adc_stream_push"](samples.length);
+};
+
+/**
  * CH32V: the LCD: its frame counter, which changes when what it shows may
  * have, and its pixels, RGBA row by row (a view into wasm memory, valid
  * until the next call).

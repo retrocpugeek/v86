@@ -42,6 +42,7 @@ instruction by instruction against QEMU, and has a JIT. It runs:
 - [Tetris on a WCH CH32V003 microcontroller](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris) (RV32EC, 2 KB of RAM), with touch controls on phones
 - [Stefan Wagner's CH32V003 Mini Game Console](https://v86-riscv.turret13.workers.dev/?build=gameconsole-tris) ([source](https://github.com/wagiminator/CH32V003-GameConsole)), with its OLED display, buttons and buzzer, and twelve games, among them Tiny Doom
 - [Maksym Curul's CH32V003 Mini Game Console](https://v86-riscv.turret13.workers.dev/?build=minigameconsole) ([source](https://github.com/max7d3/CH32V003-MiniGameConsole)), with its colour ST7735 LCD, buttons and buzzer: Snake, Pong, Jump Bird and Dino Run, with high scores saved in its flash
+- [Vlad Tomoiagă's osillyscope](https://v86-riscv.turret13.workers.dev/?build=osillyscope) ([source](https://github.com/tvlad1234/osillyscope)), a CH32V003 pocket oscilloscope built with ch32fun: its ADC sampling into DMA, triggered by the analog watchdog, fed a test signal or your microphone
 - [The RT-Thread shell on a WCH CH32V307](https://v86-riscv.turret13.workers.dev/?build=ch32v307-rtthread) (RV32IMAFC)
 
 **Debugging in the browser**: both sites have an image that runs

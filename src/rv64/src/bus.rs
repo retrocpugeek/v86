@@ -324,6 +324,16 @@ impl Bus {
         self.rom.get(off..off + size as usize).map(|b| read_le(b, size))
     }
 
+    /// Make the CH32V's DMA writes to memory (ADC results).
+    pub fn ch32_dma_writes(&mut self) {
+        let Some(writes) = self.ch32.as_mut().and_then(|c| c.take_dma_writes()) else { return };
+        for (addr, v, size) in writes {
+            if let Some(off) = self.ram_offset(addr as u64, size as u64) {
+                self.write_ram(off, size, v as u64);
+            }
+        }
+    }
+
     /// A byte of RAM or ROM (0 elsewhere), as DMA reads it.
     fn peek(&self, pa: u64) -> u8 {
         if let Some(off) = self.ram_offset(pa, 1) {
@@ -367,6 +377,7 @@ impl Bus {
         }
         if let Some(c) = self.ch32.as_mut() {
             if let Some(v) = c.read(pa, size, self.now_ns) {
+                self.ch32_dma_writes();
                 return v;
             }
         }
@@ -428,6 +439,7 @@ impl Bus {
                     }
                     None => {}
                 }
+                self.ch32_dma_writes();
                 return;
             }
         }

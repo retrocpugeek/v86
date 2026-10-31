@@ -39,12 +39,16 @@ paging is Sv32. The C extension has RV32C's C.JAL, C.FLW etc. (`rvc::expand32`).
 at 0x0800_0000 (and 0) as ROM, SRAM at 0x2000_0000, SysTick and the PFIC
 (interrupts in machine mode, priorities, SysTick's software interrupt),
 USART1 as the console, RCC, GPIO, I2C1 with an SSD1306 OLED (`ssd1306.rs`),
-SPI1 with an ST7735 colour LCD (`st7735.rs`), DMA1 channels 6 and 3 to them,
-ADC1, TIM2's PWM tone and the flash interface's page programming; in
+or that OLED on I2C bit-banged on GPIO pins, SPI1 with an ST7735 colour LCD
+(`st7735.rs`), DMA1 channels 6 and 3 to them, ADC1 (single and continuous
+conversions of a level, a waveform or streamed samples, with the analog
+watchdog) and DMA1 channel 1 from it, TIM2's PWM tone and the flash
+interface's page programming; in
 cpu.rs, QingKe's hardware register stacking (HPE) and vector table. Two
 chips: the CH32V003 (16 KB flash, 2 KB SRAM; `tools/ch32v003` has a Tetris
 for it, `tools/ch32v003-gameconsole` and `tools/ch32v003-minigameconsole`
-build two game consoles' firmware) and the CH32V307 (256 KB, 128 KB;
+build two game consoles' firmware, `tools/ch32v003-osillyscope` an
+oscilloscope's) and the CH32V307 (256 KB, 128 KB;
 `tools/ch32v307` builds RT-Thread). `rv64run --ch32v003
 flash.bin` (or `--ch32v307`) runs one natively in real time; in the browser
 it's `arch: "ch32v003"` or `"ch32v307"` with `bios` as the flash image.

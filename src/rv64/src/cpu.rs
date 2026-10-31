@@ -235,6 +235,7 @@ impl Cpu {
             // CH32V003: SysTick instead of the CLINT
             c.update(now);
             self.next_timer_ns = c.next_event_ns();
+            self.bus.ch32_dma_writes();
             return;
         }
         let cmp = self.bus.clint.mtimecmp;

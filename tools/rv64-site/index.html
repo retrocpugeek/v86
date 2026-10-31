@@ -97,6 +97,17 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #fire.down { background: #a54452; }
 #console .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 #console-note { color: var(--muted); font-size: 13px; }
+/* The osillyscope (builds with "board": "osillyscope") */
+#scope-panel { display: flex; flex-direction: column; gap: 12px; }
+#scope-panel[hidden], #scope-panel [hidden], #console .controls[hidden], #console .row[hidden] { display: none; }
+#scope-buttons button { min-width: 72px; height: 52px; font-size: 18px; touch-action: none; }
+#scope-buttons button.down { background: #3d6290; border-color: #6c9bd2; }
+#scope-panel label { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+#scope-panel input[type=range] { width: 160px; max-width: 40vw; }
+#scope-panel output { min-width: 5.5em; color: var(--muted); font-variant-numeric: tabular-nums; }
+#scope-level { width: 120px; height: 8px; border-radius: 4px; background: #2a2f38; overflow: hidden; }
+#scope-level i { display: block; height: 100%; width: 0; background: var(--accent); }
+#scope-note { color: var(--muted); font-size: 13px; }
 /* CH32V003 hardware and resources */
 #mcu-info { flex: 1 1 320px; max-width: 560px; font-size: 14px; }
 #mcu-info[hidden] { display: none; }
@@ -185,6 +196,38 @@ code { color: var(--fg); }
     <div class="row">
       <button id="sound" type="button">Sound: on</button>
       <span id="console-note">Keyboard: arrows or WASD, space or Z to fire.</span>
+    </div>
+    <div id="scope-panel" hidden>
+      <div class="row" id="scope-buttons" role="group" aria-label="The scope's buttons">
+        <button type="button" data-btn="l" aria-label="Left">&#x25c0;</button>
+        <button type="button" data-btn="c">Select</button>
+        <button type="button" data-btn="r" aria-label="Right">&#x25b6;</button>
+        <span id="scope-note">Select picks a setting (shown inverted), &#x25c0; &#x25b6; change it.
+          Keyboard: arrows, space.</span>
+      </div>
+      <div class="row">
+        <label>Input
+          <select id="scope-input">
+            <option value="1">Sine wave</option>
+            <option value="2">Square wave</option>
+            <option value="3">Triangle wave</option>
+            <option value="4">Sawtooth wave</option>
+            <option value="mic">Microphone</option>
+            <option value="0">Nothing (0 V)</option>
+          </select>
+        </label>
+        <button type="button" id="scope-audio">Time base for sound</button>
+      </div>
+      <div class="row">
+        <label id="scope-freq-label">Frequency
+          <input type="range" id="scope-freq" min="0" max="1000" value="860">
+          <output id="scope-freq-out"></output></label>
+        <label><span id="scope-amp-name">Amplitude</span>
+          <input type="range" id="scope-amp" min="1" max="32" value="10">
+          <output id="scope-amp-out"></output></label>
+        <span id="scope-level" hidden><i></i></span>
+      </div>
+      <span id="scope-status" class="muted"></span>
     </div>
   </section>
   <section id="shell-pad" hidden aria-label="Shell keys">
@@ -536,6 +579,43 @@ const MCUS = {
         buttons: { n: [3, 2], s: [2, 1], w: [2, 7], e: [3, 3], fire: [3, 4] },
         keep_flash: [0x3fc0, 64],
     },
+    osillyscope: {
+        name: "osillyscope",
+        mhz: 48,
+        hw: [
+            ["Board", `Vlad Tomoiagă's <a href="https://github.com/tvlad1234/osillyscope">osillyscope</a>, a pocket oscilloscope`],
+            ["Microcontroller", "WCH CH32V003F4P6 (20 pins)"],
+            ["CPU", "QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter, an instruction per clock cycle)"],
+            ["Clock", "@MHZ MHz (24 MHz internal oscillator, doubled by the PLL)"],
+            ["Flash", "16 KB (16,384 bytes) at 0x0800 0000, also at 0"],
+            ["SRAM", "2 KB (2,048 bytes) at 0x2000 0000"],
+            ["Input", "PD5, ADC channel 5, converting continuously: 20 cycles of ADCCLK (HCLK / 2 to / 128) a sample, " +
+                "1.2 million to 18,750 samples a second; the front end's 1.62 V offset and halving are applied to your signal"],
+            ["Display", "SSD1306 128 x 64 OLED on I2C bit-banged by the firmware (SCL PA1, SDA PA2)"],
+            ["Buttons", "Left PD4, select PC7, right PC6: pulled up, low when pressed"],
+            ["Peripherals", "SysTick, PFIC, RCC clocks, GPIO, ADC1 (continuous conversion, analog watchdog), " +
+                "DMA1 channel 1 from ADC1 (circular, half and complete interrupts)"],
+        ],
+        timing: "DMA1 channel 1 interrupts at each half of its 128-sample circular buffer; the ADC's analog watchdog " +
+            "interrupts when the signal crosses the trigger level (armed on one side, fired on the other); the firmware " +
+            "polls SysTick for its timing and redraws the display as fast as it can",
+        about: "Vlad Tomoiagă's osillyscope: a pocket oscilloscope made of a 10-cent RISC-V microcontroller, an OLED display " +
+            "and three buttons, emulated by v86's RISC-V core. Its firmware samples the input with the ADC into a circular " +
+            "DMA buffer and triggers with the ADC's analog watchdog. It's " +
+            `<a href="https://github.com/tvlad1234/osillyscope/tree/5ae18b9/fw">built from its source</a> with ` +
+            `<a href="https://github.com/cnlohr/ch32fun">ch32fun</a> (both MIT; <a href="${SRC}ch32v003-osillyscope">build script</a>). ` +
+            "Feed it a test signal, or your microphone: the sound goes into its ADC input as it's heard " +
+            "(and stays in this browser).",
+        // The display's I2C pins (port * 16 + pin), the input, the buttons
+        // ([port, pin]) and the firmware's menu (ui.h)
+        i2c: { scl: 0 * 16 + 1, sda: 0 * 16 + 2 },
+        scope: {
+            channel: 5,
+            buttons: { l: [3, 4], c: [2, 7], r: [2, 6] },
+            ui_tdiv: 3,
+            tdiv_slowest: 11,
+        },
+    },
     ch32v307: {
         name: "CH32V307",
         mhz: 144,
@@ -565,7 +645,7 @@ const MCUS = {
 function start_mcu(build, base, status, gdb_build, manifest)
 {
     const mcu = MCUS[build.board || build.arch];
-    if(build.board === "gameconsole" || build.board === "minigameconsole")
+    if(build.board === "gameconsole" || build.board === "minigameconsole" || build.board === "osillyscope")
     {
         start_game_console(build, base, status, mcu, gdb_build, manifest)
             .catch(e => { status.textContent = "Failed to start: " + e.message; });
@@ -626,6 +706,14 @@ async function start_game_console(build, base, status, mcu, gdb_build, manifest)
     document.querySelector("h1").textContent = "v86 " + mcu.name;
     document.title = "v86 " + mcu.name + ": " + build.label.replace(/^.*: /, "");
     const lcd = !!mcu.lcd;
+    if(mcu.scope)
+    {
+        document.getElementById("oled").setAttribute("aria-label", "The oscilloscope's display");
+        document.querySelector("#console .controls").hidden = true;
+        document.getElementById("sound").parentElement.hidden = true;
+        document.getElementById("scope-panel").hidden = false;
+        document.getElementById("console").setAttribute("aria-label", "Oscilloscope");
+    }
     let bios = { url: base + build.bios }, kept = null;
     if(mcu.keep_flash)
     {
@@ -656,7 +744,13 @@ async function start_game_console(build, base, status, mcu, gdb_build, manifest)
     emulator.add_listener("emulator-ready", () =>
     {
         if(!gdb_build) status.textContent = "Running";
-        if(lcd)
+        if(mcu.scope)
+        {
+            emulator.attach_i2c_gpio(mcu.i2c.scl, mcu.i2c.sda);
+            draw_oled(emulator);
+            setup_scope(emulator, mcu.scope, build);
+        }
+        else if(lcd)
         {
             emulator.attach_lcd(mcu.lcd.cs, mcu.lcd.dc, mcu.lcd.rst);
             draw_lcd(emulator);
@@ -976,6 +1070,221 @@ function setup_console_buttons(emulator, pins)
     document.addEventListener("keydown", e => key(e, true));
     document.addEventListener("keyup", e => key(e, false));
     window.addEventListener("blur", () => { keys.clear(); key_fire = false; update(); });
+}
+
+// The osillyscope (tools/ch32v003-osillyscope): its three buttons, and its
+// input (ADC channel 5): a waveform the emulator makes
+// (src/rv64/src/dev/ch32.rs), or the microphone's samples streamed in.
+// Volts at the probe become ADC codes as its front end makes them: halved,
+// inverted, around 1.62 V (the firmware's volts_from_adc undoes that).
+const SCOPE_MID = 1.62 * 1023 / 3.3, SCOPE_CODES_PER_VOLT = 1023 / 3.3 / 2;
+// The firmware looks at its buttons every 100 ms: a tap is held this long
+const SCOPE_MIN_HOLD = 130;
+
+function setup_scope(emulator, scope, build)
+{
+    const $ = id => document.getElementById(id);
+    const input = $("scope-input"), freq = $("scope-freq"), amp = $("scope-amp"), status = $("scope-status");
+    const audio_button = $("scope-audio"), level = $("scope-level");
+    const ch = scope.channel;
+    const symbols = build.stats && build.stats.symbols;
+
+    // Buttons: pulled up, low while held
+    const held = new Set(), since = {};
+    const update = () =>
+    {
+        const low = [0, 0, 0, 0, 0];
+        for(const b of held)
+        {
+            const [port, pin] = scope.buttons[b];
+            low[port] |= 1 << pin;
+        }
+        low.forEach((mask, port) => emulator.set_gpio_in(port, mask, 0));
+        document.querySelectorAll("#scope-buttons button").forEach(el => el.classList.toggle("down", held.has(el.dataset.btn)));
+    };
+    const press = b => { since[b] = performance.now(); held.add(b); update(); };
+    const release = b =>
+    {
+        const left = SCOPE_MIN_HOLD - (performance.now() - (since[b] || 0));
+        const up = () => { held.delete(b); update(); };
+        if(left > 0) setTimeout(up, left); else up();
+    };
+    for(const el of document.querySelectorAll("#scope-buttons button"))
+    {
+        el.addEventListener("pointerdown", e =>
+        {
+            e.preventDefault();
+            el.setPointerCapture(e.pointerId);
+            if(navigator.vibrate) navigator.vibrate(8);
+            press(el.dataset.btn);
+        });
+        el.addEventListener("pointerup", () => release(el.dataset.btn));
+        el.addEventListener("pointercancel", () => release(el.dataset.btn));
+        el.addEventListener("contextmenu", e => e.preventDefault());
+    }
+    const KEYS = { ArrowLeft: "l", ArrowRight: "r", " ": "c", Enter: "c", ArrowUp: "c", ArrowDown: "c" };
+    const key = (e, down) =>
+    {
+        const b = KEYS[e.key];
+        if(!b || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+        e.preventDefault();
+        if(e.repeat) return;
+        if(down) press(b); else release(b);
+    };
+    document.addEventListener("keydown", e => key(e, true));
+    document.addEventListener("keyup", e => key(e, false));
+    window.addEventListener("blur", () => { held.clear(); update(); });
+
+    // The input. Frequency: 10 Hz to 200 kHz, logarithmically (at first
+    // about 50 kHz: two cycles across the screen at its first time base);
+    // amplitude: 0.1 to 3.2 V (for the microphone, a full-scale sound's)
+    const hz = () => 10 * Math.pow(2e4, freq.value / 1000);
+    const volts = () => amp.value / 10;
+    const show = () =>
+    {
+        const f = hz();
+        $("scope-freq-out").textContent = f < 1000 ? f.toFixed(f < 100 ? 1 : 0) + " Hz" : (f / 1000).toFixed(f < 1e4 ? 2 : 1) + " kHz";
+        $("scope-amp-out").textContent = volts().toFixed(1) + " V";
+    };
+    let mic = null, mic_wanted = false;
+    const apply = () =>
+    {
+        show();
+        const v = input.value;
+        mic_wanted = v === "mic";
+        $("scope-freq-label").hidden = mic_wanted || v === "0";
+        $("scope-amp-name").textContent = mic_wanted ? "Full scale" : "Amplitude";
+        level.hidden = !mic_wanted;
+        if(mic_wanted)
+        {
+            emulator.set_adc_wave(ch, 0, 0, 0, 0);
+            start_mic();
+            return;
+        }
+        stop_mic();
+        status.textContent = "";
+        emulator.set_adc_wave(ch, +v, hz(), SCOPE_MID, -volts() * SCOPE_CODES_PER_VOLT);
+    };
+
+    // The microphone: its samples, as they come, into the ADC's input (an
+    // AudioWorklet taps them; nothing is played or kept)
+    let peak = 0;
+    const start_mic = async () =>
+    {
+        if(mic) return;
+        if(!navigator.mediaDevices || !window.AudioWorkletNode)
+        {
+            status.textContent = "This browser can't give the page its microphone.";
+            return;
+        }
+        status.textContent = "Asking for the microphone…";
+        let stream, ctx;
+        try
+        {
+            stream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+            });
+            ctx = new AudioContext();
+            const tap = "registerProcessor('scope-tap', class extends AudioWorkletProcessor {" +
+                "process(inputs) { const c = inputs[0] && inputs[0][0]; if(c) this.port.postMessage(c.slice(0)); return true; } });";
+            await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([tap], { type: "application/javascript" })));
+            if(!mic_wanted) throw new Error("no longer wanted");
+            const source = ctx.createMediaStreamSource(stream);
+            const node = new AudioWorkletNode(ctx, "scope-tap");
+            // (connected, silently, so that it runs)
+            const mute = ctx.createGain();
+            mute.gain.value = 0;
+            source.connect(node);
+            node.connect(mute);
+            mute.connect(ctx.destination);
+            emulator.stream_adc(ch, ctx.sampleRate);
+            node.port.onmessage = e =>
+            {
+                const f = e.data, k = volts() * SCOPE_CODES_PER_VOLT;
+                const codes = new Uint16Array(f.length);
+                for(let i = 0; i < f.length; i++)
+                {
+                    codes[i] = Math.max(0, Math.min(1023, Math.round(SCOPE_MID - f[i] * k)));
+                    peak = Math.max(peak, Math.abs(f[i]));
+                }
+                emulator.push_adc_samples(codes);
+            };
+            mic = { stream, ctx };
+            status.textContent = `Microphone on (${ctx.sampleRate} samples a second), into the scope's input.`;
+            if(symbols) set_time_base(scope.tdiv_slowest);
+        }
+        catch(e)
+        {
+            if(stream) stream.getTracks().forEach(t => t.stop());
+            if(ctx) ctx.close();
+            if(mic_wanted)
+            {
+                status.textContent = "No microphone: " + e.message;
+                input.value = "1";
+                apply();
+            }
+        }
+    };
+    const stop_mic = () =>
+    {
+        if(!mic) return;
+        emulator.stream_adc(ch, 0);
+        mic.stream.getTracks().forEach(t => t.stop());
+        mic.ctx.close();
+        mic = null;
+    };
+    const meter = () =>
+    {
+        level.firstElementChild.style.width = Math.min(100, Math.round(100 * peak)) + "%";
+        peak *= 0.85;
+        requestAnimationFrame(meter);
+    };
+    meter();
+
+    // The slowest time base (853 us a division), for sound: the scope's own
+    // buttons pressed, watching its menu's state in its RAM (where the
+    // build found it), until it's set
+    let setting = false;
+    const set_time_base = async target =>
+    {
+        if(setting) return;
+        setting = true;
+        audio_button.disabled = true;
+        const read = addr => emulator.read_memory(addr, 1)[0];
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        // Hold a button until what it changes has changed
+        const click = async (b, addr) =>
+        {
+            const before = read(addr);
+            held.add(b);
+            update();
+            for(let t = 0; t < 1000 && read(addr) === before; t += 10) await sleep(10);
+            held.delete(b);
+            update();
+            await sleep(150);
+        };
+        try
+        {
+            for(let i = 0; i < 8 && read(symbols.ui_selector) !== scope.ui_tdiv; i++) await click("c", symbols.ui_selector);
+            for(let i = 0; i < 16 && read(symbols.tdiv_sel) < target; i++) await click("r", symbols.tdiv_sel);
+            for(let i = 0; i < 16 && read(symbols.tdiv_sel) > target; i++) await click("l", symbols.tdiv_sel);
+            for(let i = 0; i < 8 && read(symbols.ui_selector) !== 0; i++) await click("c", symbols.ui_selector);
+        }
+        finally
+        {
+            setting = false;
+            audio_button.disabled = false;
+        }
+    };
+    audio_button.hidden = !symbols;
+    audio_button.addEventListener("click", () => set_time_base(scope.tdiv_slowest));
+
+    input.addEventListener("change", apply);
+    freq.addEventListener("input", apply);
+    amp.addEventListener("input", () => mic ? show() : apply());
+    // Nothing: 0 V at the probe
+    emulator.set_adc_input(ch, Math.round(SCOPE_MID));
+    apply();
 }
 
 // The buzzer (PA1): the game toggles it in timed loops. Its edges come with

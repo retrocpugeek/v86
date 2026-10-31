@@ -18,7 +18,12 @@
 //! and release the fire button (PA2 low), "<ms> pad <n>" sets the direction
 //! buttons' ADC value (channel 2; 0 when none is pressed), "<ms> frame"
 //! prints the display's frame counter and the pc (a hang shows as both
-//! staying the same). --jitter moves virtual time on by up to 1 us between
+//! staying the same). For other boards: "<ms> i2c <scl> <sda>" puts the
+//! SSD1306 on an I2C bus bit-banged on those pins (port * 16 + pin, port 0
+//! being GPIOA), "<ms> gpio <port> <mask> <levels>" drives a port's pins,
+//! "<ms> wave <ch> <shape> <hz> <mid> <amp>" sets an ADC channel's input to
+//! a waveform (shape 1 sine, 2 square, 3 triangle, 4 sawtooth; centre and
+//! amplitude in ADC codes). --jitter moves virtual time on by up to 1 us between
 //! batches of instructions, as following the host clock does in the browser.
 //!
 //! Boots like `qemu-system-riscv64 -M virt -bios ... -kernel ...`. The serial
@@ -261,6 +266,25 @@ fn run_script(cpu: &mut Cpu, script: &str, jitter: bool) {
             ["fire"] => c.gpio_in[0] = (1 << 2, 0),
             ["nofire"] => c.gpio_in[0] = (0, 0),
             ["pad", n] => c.adc_in[2] = n.parse().unwrap_or(0),
+            ["i2c", scl, sda] => {
+                let pin = |p: &str| p.parse::<u32>().map(|p| ((p / 16) as usize, p % 16)).unwrap_or((0, 0));
+                c.attach_bitbang_i2c(pin(scl), pin(sda));
+            }
+            ["gpio", port, mask, levels] => {
+                let n = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), if s.starts_with("0x") { 16 } else { 10 }).unwrap_or(0);
+                c.gpio_in[n(port) as usize] = (n(mask), n(levels));
+            }
+            ["wave", ch, shape, hz, mid, amp] => {
+                let f = |s: &str| s.parse::<f64>().unwrap_or(0.0);
+                c.adc_wave = Some(v86_rv64::dev::ch32::Wave {
+                    ch: f(ch) as usize,
+                    shape: f(shape) as u32,
+                    mhz: (f(hz) * 1000.0) as u64,
+                    mid: f(mid),
+                    amp: f(amp),
+                });
+                c.adc_input_changed();
+            }
             _ => eprintln!("rv64run: unknown script event {what:?}"),
         }
     }

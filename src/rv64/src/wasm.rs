@@ -150,6 +150,16 @@ pub extern "C" fn rv64_init_ch32(chip: u32, ptr: u32, len: u32, epoch_secs: f64)
     if let Some([cs, dc, rst]) = unsafe { LCD_PINS } {
         cpu.bus.ch32.as_mut().unwrap().attach_lcd(cs, dc, rst);
     }
+    #[allow(static_mut_refs)]
+    if let Some([scl, sda]) = unsafe { I2C_PINS } {
+        cpu.bus.ch32.as_mut().unwrap().attach_bitbang_i2c(scl, sda);
+    }
+    #[allow(static_mut_refs)]
+    {
+        let c = cpu.bus.ch32.as_mut().unwrap();
+        c.adc_wave = unsafe { ADC_WAVE };
+        c.adc_stream = unsafe { ADC_STREAM }.map(|(ch, rate)| crate::dev::ch32::Stream::new(ch, rate));
+    }
     if let Some(g) = gdb() {
         g.reattach(&mut cpu, breakpoints);
     }
@@ -233,6 +243,13 @@ static mut EDGES: Vec<f64> = Vec::new();
 static mut TONES: Vec<f64> = Vec::new();
 /// The ST7735 LCD's pins (port, pin), kept for machines made later (resets)
 static mut LCD_PINS: Option<[(usize, u32); 3]> = None;
+/// Likewise the bit-banged I2C bus's pins (SCL, SDA), an ADC input's
+/// waveform, and the channel and rate of samples streamed into one
+static mut I2C_PINS: Option<[(usize, u32); 2]> = None;
+static mut ADC_WAVE: Option<crate::dev::ch32::Wave> = None;
+static mut ADC_STREAM: Option<(usize, u32)> = None;
+/// Samples for rv64_ch32_adc_stream_push
+static mut STREAM_BUF: Vec<u16> = Vec::new();
 static mut LCD_RGB: [u32; crate::dev::st7735::VIEW_WIDTH * crate::dev::st7735::VIEW_HEIGHT] =
     [0; crate::dev::st7735::VIEW_WIDTH * crate::dev::st7735::VIEW_HEIGHT];
 static mut LCD_PIXELS: [u8; crate::dev::st7735::VIEW_WIDTH * crate::dev::st7735::VIEW_HEIGHT * 4] =
@@ -268,6 +285,70 @@ pub extern "C" fn rv64_ch32_attach_lcd(cs: u32, dc: u32, rst: u32) {
     unsafe { *addr_of_mut!(LCD_PINS) = Some(pins) };
     if let Some(c) = ch32() {
         c.attach_lcd(pins[0], pins[1], pins[2]);
+    }
+}
+
+/// CH32V: put the SSD1306 OLED display on an I2C bus the firmware
+/// bit-bangs on these pins (port * 16 + pin; port 0 is GPIOA).
+#[no_mangle]
+pub extern "C" fn rv64_ch32_attach_i2c_gpio(scl: u32, sda: u32) {
+    let pin = |p: u32| ((p / 16) as usize, p % 16);
+    unsafe { *addr_of_mut!(I2C_PINS) = Some([pin(scl), pin(sda)]) };
+    if let Some(c) = ch32() {
+        c.attach_bitbang_i2c(pin(scl), pin(sda));
+    }
+}
+
+/// CH32V: make ADC channel `ch`'s input a waveform: `shape` 1 sine, 2
+/// square, 3 triangle, 4 sawtooth (0: none, the level set instead), at `hz`,
+/// around `mid` with amplitude `amp` (ADC codes, 0 to 1023).
+#[no_mangle]
+pub extern "C" fn rv64_ch32_set_adc_wave(ch: u32, shape: u32, hz: f64, mid: f64, amp: f64) {
+    let wave = (shape != 0).then_some(crate::dev::ch32::Wave {
+        ch: ch as usize,
+        shape,
+        mhz: (hz.max(0.0) * 1000.0) as u64,
+        mid,
+        amp,
+    });
+    unsafe { *addr_of_mut!(ADC_WAVE) = wave };
+    if let Some(c) = ch32() {
+        c.adc_wave = wave;
+        c.adc_input_changed();
+    }
+}
+
+/// CH32V: stream samples (rv64_ch32_adc_stream_push) into ADC channel
+/// `ch` at `rate` Hz, e.g. a microphone's; rate 0 stops.
+#[no_mangle]
+pub extern "C" fn rv64_ch32_adc_stream(ch: u32, rate: u32) {
+    let s = (rate != 0).then_some((ch as usize, rate));
+    unsafe { *addr_of_mut!(ADC_STREAM) = s };
+    if let Some(c) = ch32() {
+        c.adc_stream = s.map(|(ch, rate)| crate::dev::ch32::Stream::new(ch, rate));
+        c.adc_input_changed();
+    }
+}
+
+/// CH32V: room for `n` samples (u16 ADC codes) to stream; returns where.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_adc_stream_buf(n: u32) -> u32 {
+    let buf = unsafe { &mut *addr_of_mut!(STREAM_BUF) };
+    buf.resize(n as usize, 0);
+    buf.as_ptr() as u32
+}
+
+/// CH32V: stream the first `n` samples written at rv64_ch32_adc_stream_buf.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_adc_stream_push(n: u32) {
+    let buf = unsafe { &*addr_of!(STREAM_BUF) };
+    if let Some(c) = ch32() {
+        if let Some(s) = c.adc_stream.as_mut() {
+            s.push(&buf[..(n as usize).min(buf.len())]);
+            c.adc_input_changed();
+        }
     }
 }
 

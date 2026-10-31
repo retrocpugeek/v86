@@ -1606,6 +1606,57 @@ V86.prototype.set_adc_input = function(channel, value)
 };
 
 /**
+ * Microcontrollers: put the SSD1306 OLED display on an I2C bus the firmware
+ * bit-bangs on these pins (port * 16 + pin; port 0 is GPIOA).
+ * @param {number} scl
+ * @param {number} sda
+ */
+V86.prototype.attach_i2c_gpio = function(scl, sda)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_attach_i2c_gpio) cpu.ch32_attach_i2c_gpio(scl, sda);
+};
+
+/**
+ * Microcontrollers: make an ADC channel's input a waveform (shape 1 sine,
+ * 2 square, 3 triangle, 4 sawtooth, 0 none; centre and amplitude in ADC
+ * codes).
+ * @param {number} channel
+ * @param {number} shape
+ * @param {number} hz
+ * @param {number} mid
+ * @param {number} amp
+ */
+V86.prototype.set_adc_wave = function(channel, shape, hz, mid, amp)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_set_adc_wave) cpu.ch32_set_adc_wave(channel, shape, hz, mid, amp);
+};
+
+/**
+ * Microcontrollers: stream samples into an ADC channel at a rate (0
+ * stops), e.g. a microphone's; see push_adc_samples.
+ * @param {number} channel
+ * @param {number} rate
+ */
+V86.prototype.stream_adc = function(channel, rate)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_adc_stream) cpu.ch32_adc_stream(channel, rate);
+};
+
+/**
+ * Microcontrollers: samples (ADC codes, 0 to 1023) for the channel being
+ * streamed into.
+ * @param {Uint16Array} samples
+ */
+V86.prototype.push_adc_samples = function(samples)
+{
+    const cpu = this.v86.cpu;
+    if(cpu.ch32_push_adc_samples) cpu.ch32_push_adc_samples(samples);
+};
+
+/**
  * Microcontrollers: put an ST7735 colour LCD on SPI1, with its chip select,
  * data/command and reset on these pins (port * 16 + pin; port 0 is GPIOA).
  * @param {number} cs
