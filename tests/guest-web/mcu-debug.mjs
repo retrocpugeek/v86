@@ -9,6 +9,10 @@
 //   SITE=http://localhost:8789 node tests/guest-web/mcu-debug.mjs [screenshot-prefix]
 //   SITE=... BUILD=gameconsole-tris FUNC=ADC_read SOURCE=gpio.h node tests/guest-web/mcu-debug.mjs
 //
+// THROTTLE=<n> slows Chrome's CPU n times, as a slow laptop would: gdb then
+// takes over 30 seconds to start in the debugger's machine, which gdb-wui
+// has to wait for (-gdb-start-timeout, tools/gdb-wui-guest/S95gdb-wui).
+//
 // Needs google-chrome and the site from tools/rv64-site (npx wrangler dev
 // --config tools/rv64-site/wrangler.jsonc --port 8789).
 import { spawn } from "node:child_process";
@@ -96,6 +100,7 @@ async function main()
 
     await send("Runtime.enable");
     await send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 1800, deviceScaleFactor: 1, mobile: false });
+    if(process.env.THROTTLE) await send("Emulation.setCPUThrottlingRate", { rate: +process.env.THROTTLE });
     await send("Page.navigate", { url: SITE + "/?build=" + BUILD + "&debug" });
     await sleep(3000);
     const held = await page_status();
