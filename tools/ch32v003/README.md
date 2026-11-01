@@ -10,6 +10,13 @@ arrows or a/d/w/s, space hard drop, z rotate back, p pause, r restart. It
 runs from a 10 ms SysTick interrupt and sleeps (`wfi`) in between, and only
 redraws what changed.
 
+![Tetris on the emulated CH32V003](media/tetris.gif)
+
+[Play it](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris), or
+[debug it](https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&debug):
+gdb-wui stopped at a breakpoint in `draw()`, next to the game
+([screenshot](media/tetris-debug.png)).
+
 No SDK: `start.S` (reset entry), `link.ld`, `ch32v003.h` (the registers
 used) and `libgcc.c` (multiply, divide, memset, memcpy for RV32EC). The
 same image should run on a real CH32V003 with a USB-serial adapter on
