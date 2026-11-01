@@ -22,6 +22,16 @@ tests/rv64/ch32v003.mjs
 tools/rv64-site/add-mcu.sh ch32v003-tetris "CH32V003 (bare metal): Tetris" build/ch32v003/tetris.bin
 ```
 
-The emulated CH32V003 models SysTick, the PFIC, USART1 and RCC; see
-`dev/ch32.rs` for what isn't (the hardware register stacking, which the
-firmware turns off; timers, ADC, I2C, SPI, DMA).
+Tetris needs only SysTick, the PFIC, USART1 and RCC of the emulated
+CH32V003, which also models what the site's other CH32V003 firmware uses:
+QingKe's hardware register stacking (HPE), GPIO, the ADC (with its analog
+watchdog), I2C1 and SPI1 as masters (to an SSD1306 OLED and an ST7735 LCD),
+DMA1 channels 1, 3 and 6, TIM2's PWM tone and the flash interface. See
+`src/rv64/src/dev/ch32.rs` for the full list, and for what isn't modelled
+(interrupt nesting, timer counters and interrupts, I2C and SPI reception,
+the other DMA channels).
+
+Its other firmware, each built from source by a script here:
+`tools/ch32v003-gameconsole` (Stefan Wagner's game console),
+`tools/ch32v003-minigameconsole` (Maksym Curul's mini game console) and
+`tools/ch32v003-osillyscope` (Vlad Tomoiagă's oscilloscope).
