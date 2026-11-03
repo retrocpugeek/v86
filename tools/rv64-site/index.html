@@ -130,6 +130,10 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #shell-pad button { min-width: 56px; height: 42px; padding: 0 12px; border-radius: 10px; background: #233041; border: 1px solid #3c4d66;
     color: var(--fg); font-size: 15px; touch-action: manipulation; }
 #shell-pad .cmd button { font-family: ui-monospace, monospace; font-size: 14px; }
+#programs { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+#programs[hidden] { display: none; }
+#programs h2 { font-size: 15px; margin: 0; }
+#programs p { margin: 0; color: var(--muted); font-size: 13px; }
 /* Your own firmware (?build=upload) */
 #upload { flex-basis: 100%; max-width: 900px; display: flex; flex-direction: column; gap: 8px; padding: 12px;
     box-sizing: border-box; border: 1px dashed #3c4d66; border-radius: 10px; }
@@ -279,6 +283,11 @@ code { color: var(--fg); }
     </div>
     <div class="row cmd" id="shell-cmds"></div>
     <span id="shell-note" class="live"></span>
+    <div id="programs" hidden>
+      <h2>Example programs</h2>
+      <div class="row cmd" id="program-list"></div>
+      <p id="program-note"></p>
+    </div>
   </section>
   <section id="mcu-info" hidden>
     <p id="mcu-debug" hidden></p>
@@ -574,6 +583,39 @@ const MCUS = {
             "v86's RISC-V core, running a bare-metal Tetris that draws over its serial port " +
             `(<a href="${SRC}ch32v003">firmware source</a>).`,
     },
+    basic: {
+        name: "CH32V003",
+        mhz: 24,
+        hw: [
+            ["Microcontroller", "WCH CH32V003"],
+            ["CPU", "QingKe V2A: RISC-V RV32EC, machine mode only (run by v86's interpreter)"],
+            ["Clock", "24 MHz internal oscillator, as the firmware sets it (the chip runs up to 48 MHz)"],
+            ["Flash", "16 KB (16,384 bytes) at 0x0800 0000, also at 0; SAVE writes the last 1 KB, which this browser keeps"],
+            ["SRAM", "2 KB (2,048 bytes) at 0x2000 0000: 888 bytes for the program"],
+            ["Peripherals", "SysTick timer, PFIC interrupt controller, USART1 as the serial console (115200 baud), RCC clocks, " +
+                "GPIO (PC0 to PC3 shown as LEDs), the flash interface; POKE and PEEK reach the rest"],
+        ],
+        timing: "SysTick interrupt every ms (TIME, DELAY); the CPU sleeps (<code>wfi</code>) while it waits for a key",
+        about: "A WCH CH32V003 microcontroller (RISC-V RV32EC, 2 KB of RAM, 16 KB of flash) emulated by v86's RISC-V core, " +
+            "running a bare-metal Tiny BASIC with a Wozmon-style machine monitor (MON). " +
+            "Pick one of the example programs under the terminal, or try:<br>" +
+            "<code>10 FOR I=0 TO 15: PRINT I, I*I: NEXT</code>, then <code>RUN</code>; " +
+            "<code>POKE $40021018, PEEK($40021018) OR $10</code> and <code>POKE $40011000, $1111</code> make PC0 to PC3 " +
+            "outputs, and <code>POKE $4001100C, 5</code> lights two of the LEDs " +
+            `(<a href="${SRC}ch32v003-basic">source and manual</a>).`,
+        keep_flash: [0x3c00, 1024],
+        // Example programs (tools/ch32v003-basic/examples, served in
+        // examples/basic): [button, file, what it does]
+        programs: [
+            ["Counter", "counter", "counts to 15 in binary on the LEDs, with POKE"],
+            ["Scanner", "scanner", "a light sweeping across the LEDs, until Ctrl-C"],
+            ["Primes", "primes", "the primes below 300"],
+            ["Guess", "guess", "a number guessing game, with INPUT and RND"],
+            ["FizzBuzz", "fizzbuzz", "FizzBuzz to 30"],
+            ["Speed", "speed", "how many loops a second this BASIC runs"],
+            ["Mandelbrot", "mandelbrot", "the Mandelbrot set in integers, in 13 seconds"],
+        ],
+    },
     gameconsole: {
         name: "CH32V003 Game Console",
         mhz: 12,
@@ -717,10 +759,16 @@ function start_mcu(build, base, status, gdb_build, manifest)
     about.hidden = false;
     document.querySelector("h1").textContent = "v86 " + mcu.name;
     document.title = "v86 " + mcu.name + ": " + build.label.replace(/^.*: /, "");
+    initial_flash(build, base, mcu).then(({ bios, kept }) => start_terminal_mcu(build, status, mcu, gdb_build, manifest, SizedTerminal, bios, kept))
+        .catch(e => { status.textContent = "Failed to start: " + e.message; });
+}
+
+function start_terminal_mcu(build, status, mcu, gdb_build, manifest, SizedTerminal, bios, kept)
+{
     const emulator = window.emulator = new V86({
         arch: build.arch,
         wasm_path: "v86-rv64.wasm",
-        bios: build.flash ? { buffer: build.flash.slice().buffer } : { url: base + build.bios },
+        bios,
         serial_console: { type: "xtermjs", container: document.getElementById("terminal"), xterm_lib: SizedTerminal },
         // held at reset for the debugger
         autostart: !gdb_build,
@@ -729,7 +777,11 @@ function start_mcu(build, base, status, gdb_build, manifest)
         disable_speaker: true,
     });
     setup_console_log(emulator, build);
-    emulator.add_listener("emulator-ready", () => { if(!gdb_build) status.textContent = "Running"; });
+    emulator.add_listener("emulator-ready", () =>
+    {
+        if(!gdb_build) status.textContent = "Running";
+        if(mcu.keep_flash) keep_flash(emulator, build, mcu.keep_flash, kept);
+    });
     setup_debugging(emulator, build, status, gdb_build, manifest);
     if(build.controls === "tetris")
     {
@@ -739,7 +791,42 @@ function start_mcu(build, base, status, gdb_build, manifest)
     {
         setup_shell_pad(emulator, build.commands || []);
     }
+    if(mcu.programs) setup_programs(emulator, mcu.programs);
     show_mcu_info(emulator, mcu, build);
+}
+
+// Tiny BASIC's example programs: a button types one in (after Ctrl-C, which
+// stops what's running or leaves the monitor, and NEW) and runs it
+function setup_programs(emulator, programs)
+{
+    document.getElementById("shell-pad").hidden = false;
+    document.getElementById("programs").hidden = false;
+    const list = document.getElementById("program-list");
+    for(const [name, file, about] of programs)
+    {
+        const button = document.createElement("button");
+        button.textContent = name;
+        button.title = about;
+        button.addEventListener("click", async () =>
+        {
+            button.disabled = true;
+            try
+            {
+                const response = await fetch(`examples/basic/${file}.bas`);
+                if(!response.ok) throw new Error(response.status + " " + response.statusText);
+                const lines = (await response.text()).split(/\r?\n/).filter(l => l.trim());
+                emulator.serial0_send("\x03NEW\r" + lines.join("\r") + "\rRUN\r");
+            }
+            catch(e)
+            {
+                document.getElementById("program-note").textContent = `Couldn't load ${file}.bas: ${e.message}`;
+            }
+            button.disabled = false;
+        });
+        list.append(button);
+    }
+    document.getElementById("program-note").innerHTML = "Each types its program in and runs it; LIST shows it, and you can change it " +
+        `and RUN it again. Their source: <a href="${SRC}ch32v003-basic/examples">tools/ch32v003-basic/examples</a>.`;
 }
 
 // The CH32V003 game consoles: Stefan Wagner's (tools/ch32v003-gameconsole),
@@ -765,16 +852,7 @@ async function start_game_console(build, base, status, mcu, gdb_build, manifest)
         document.getElementById("scope-panel").hidden = false;
         document.getElementById("console").setAttribute("aria-label", "Oscilloscope");
     }
-    let bios = build.flash ? { buffer: build.flash.slice().buffer } : { url: base + build.bios }, kept = null;
-    if(mcu.keep_flash)
-    {
-        // The flash as this browser last kept it
-        const image = new Uint8Array(await (await fetch(base + build.bios)).arrayBuffer());
-        const flash = new Uint8Array(16384).fill(0xff);
-        flash.set(image);
-        kept = restore_flash(build, mcu.keep_flash, flash);
-        bios = { buffer: flash.buffer };
-    }
+    const { bios, kept } = await initial_flash(build, base, mcu);
     if(lcd)
     {
         document.getElementById("oled").setAttribute("aria-label", "The LCD");
@@ -824,6 +902,19 @@ async function start_game_console(build, base, status, mcu, gdb_build, manifest)
 // browser's local storage per build: put back into the flash image before
 // the machine starts, and saved when it changes.
 function flash_key(build) { return "v86-riscv-flash:" + build.id; }
+
+// The flash a build starts with: its image, with the page this browser keeps
+// (mcu.keep_flash) as it last kept it; and that page now, in hex (kept)
+async function initial_flash(build, base, mcu)
+{
+    if(build.flash) return { bios: { buffer: build.flash.slice().buffer }, kept: null };
+    if(!mcu.keep_flash) return { bios: { url: base + build.bios }, kept: null };
+    const image = new Uint8Array(await (await fetch(base + build.bios)).arrayBuffer());
+    const flash = new Uint8Array(16384).fill(0xff);
+    flash.set(image);
+    const kept = restore_flash(build, mcu.keep_flash, flash);
+    return { bios: { buffer: flash.buffer }, kept };
+}
 
 const flash_hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 
@@ -956,6 +1047,7 @@ const OUR_EXAMPLES = "examples/";
 const UPLOAD_EXAMPLES = {
     ch32v003: [
         ["Tetris", OUR_EXAMPLES + "tetris.elf", "this site's, no SDK"],
+        ["Tiny BASIC", OUR_EXAMPLES + "basic.elf", "this site's, with a machine monitor"],
         ...[["debugprintfdemo", "printf through the debug interface"], ["uartdemo", "printf through USART1"],
             ["systick_irq", "SysTick interrupts"], ["template", "ch32fun's project template"],
             ["random_numbers", "a random number generator"], ["flashtest", "erases and writes its flash"],

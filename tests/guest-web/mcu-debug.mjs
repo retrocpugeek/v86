@@ -15,6 +15,10 @@
 // its functions), and kuna must decompile FUNC (default main) there:
 //   SITE=... FIRMWARE=tiny_invaders.hex BOARD=gameconsole node tests/guest-web/mcu-debug.mjs
 //
+// IDLE=1: the firmware sleeps when left alone (Tiny BASIC at its prompt),
+// so running free it need not keep the CPU busy:
+//   SITE=... BUILD=ch32v003-basic FUNC=main SOURCE=basic.c IDLE=1 node tests/guest-web/mcu-debug.mjs
+//
 // THROTTLE=<n> slows Chrome's CPU n times, as a slow laptop would: gdb then
 // takes over 30 seconds to start in the debugger's machine, which gdb-wui
 // has to wait for (-gdb-start-timeout, tools/gdb-wui-guest/S95gdb-wui).
@@ -172,7 +176,7 @@ async function main()
     if(await frame(stopped)) throw new Error("stopped again: " + await stack());
     const ran = await ev("emulator.get_instruction_counter()") - before;
     console.log(`  ran ${(ran / 1e6).toFixed(1)} M instructions in 3 s`);
-    if(ran < 1e5) throw new Error("the firmware didn't run");
+    if(ran < (process.env.IDLE ? 1000 : 1e5)) throw new Error("the firmware didn't run");
     await frame("d.getElementById('btn-pause').click()");
     await until("paused", stopped, 60);
     console.log("  paused at:", await stack());
