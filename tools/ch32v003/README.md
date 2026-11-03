@@ -50,5 +50,10 @@ a `.bin`, Intel `.hex` or `.elf` (kept in your browser, not uploaded), or
 raw.githubusercontent.com), on a board like one of the above (`&board=`
 `ch32v003`, `gameconsole`, `minigameconsole` or `osillyscope`). ch32fun's
 printf goes to the serial console. The page lists what the firmware uses
-that isn't modelled (e.g. TIM1, EXTI), and `&debug` attaches gdb without
-symbols.
+that isn't modelled (e.g. TIM1, EXTI). With `&debug`, gdb-wui gets the
+firmware as an ELF: yours, with its symbols, or a `.bin` or `.hex` wrapped
+in one, with symbols where the page finds functions start (the reset
+vector, `main` from the startup code's `mepc`, and every call's target,
+`sub_<address>`), and kuna decompiles it. For example, Stefan Wagner's own
+build of
+[Tiny Invaders](https://v86-riscv.turret13.workers.dev/?build=upload&board=gameconsole&firmware=https%3A%2F%2Fraw.githubusercontent.com%2Fwagiminator%2FCH32V003-GameConsole%2Fmain%2Fsoftware%2Ftiny_invaders%2Fbin%2Ftiny_invaders.hex&debug).

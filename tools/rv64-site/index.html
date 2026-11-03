@@ -293,7 +293,7 @@ code { color: var(--fg); }
   <details id="debug-arch" hidden>
     <summary>How the debugging works</summary>
     <svg viewBox="0 0 900 490" role="img" aria-labelledby="debug-arch-title">
-      <title id="debug-arch-title">Two emulators in this page: gdb and gdb-wui in a riscv64 Linux machine, connected through the page's JavaScript to the GDB stub in the emulated CH32V003, and gdb-wui's frontend in an iframe</title>
+      <title id="debug-arch-title">Two emulators in this page: gdb and gdb-wui in a riscv64 Linux machine, connected through the page's JavaScript to the GDB stub in the emulated CH32V003 (and, for your own firmware, given it by the page), and gdb-wui's frontend in an iframe</title>
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
       </defs>
@@ -342,30 +342,37 @@ code { color: var(--fg); }
       <line class="link" x1="747" y1="158" x2="747" y2="184" marker-start="url(#arr)" marker-end="url(#arr)"/>
 
       <rect class="box js" x="20" y="340" width="862" height="134" rx="8"/>
-      <rect class="inner" x="34" y="354" width="250" height="80" rx="6"/>
-      <text class="h" x="46" y="378">sw.js + WebSocket relay</text>
+      <rect class="inner" x="34" y="354" width="190" height="80" rx="6"/>
+      <text class="h" x="46" y="378">sw.js + WebSocket</text>
       <text x="46" y="398">the frontend's requests</text>
       <text x="46" y="416">to the guest's port 80</text>
-      <rect class="inner" x="308" y="354" width="250" height="80" rx="6"/>
-      <text class="h" x="320" y="378">kuna, port 5717</text>
-      <text x="320" y="398">a decompiler, as</text>
-      <text x="320" y="416">WebAssembly in a worker</text>
-      <rect class="inner stub" x="582" y="354" width="286" height="80" rx="6"/>
-      <text class="h" x="594" y="378">The probe, port 3333</text>
-      <text x="594" y="398">TCP from gdb ⇄ the stub:</text>
-      <text x="594" y="416">V86.gdb_input / gdb_attach</text>
+      <rect class="inner" x="238" y="354" width="190" height="80" rx="6"/>
+      <text class="h" x="250" y="378">kuna, port 5717</text>
+      <text x="250" y="398">a decompiler, as</text>
+      <text x="250" y="416">WebAssembly in a worker</text>
+      <rect class="inner" x="442" y="354" width="200" height="80" rx="6"/>
+      <text class="h" x="454" y="378">Your firmware, port 5718</text>
+      <text x="454" y="398">?build=upload: the file,</text>
+      <text x="454" y="416">as an ELF, for gdb, kuna</text>
+      <rect class="inner stub" x="656" y="354" width="212" height="80" rx="6"/>
+      <text class="h" x="668" y="378">The probe, port 3333</text>
+      <text x="668" y="398">TCP from gdb ⇄ the stub:</text>
+      <text x="668" y="416">V86.gdb_input / gdb_attach</text>
       <text class="h" x="34" y="460">The page's JavaScript: the guests' gateway, 192.168.86.1, on v86's virtual network</text>
 
       <line class="link" x1="100" y1="278" x2="100" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
       <text class="l" x="108" y="306">fetch,</text>
       <text class="l" x="108" y="322">WebSocket</text>
-      <line class="link" x1="320" y1="228" x2="230" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
-      <text class="l" x="216" y="300">TCP :80</text>
-      <line class="link" x1="380" y1="228" x2="420" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
-      <text class="l" x="408" y="300">TCP :5717</text>
-      <line class="link stub-link" x1="530" y1="228" x2="640" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
-      <text class="l" x="594" y="294">TCP :3333, the GDB</text>
-      <text class="l" x="594" y="310">remote protocol</text>
+      <line class="link" x1="320" y1="228" x2="180" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="232" y="300" text-anchor="end">TCP :80</text>
+      <line class="link" x1="380" y1="228" x2="333" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="362" y="300">TCP :5717</text>
+      <line class="link" x1="510" y1="228" x2="530" y2="352" marker-start="url(#arr)"/>
+      <text class="l" x="512" y="292" text-anchor="end">TCP :5718,</text>
+      <text class="l" x="512" y="308" text-anchor="end">at boot</text>
+      <line class="link stub-link" x1="560" y1="228" x2="740" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
+      <text class="l" x="694" y="318" text-anchor="end">TCP :3333, the</text>
+      <text class="l" x="694" y="334" text-anchor="end">GDB protocol</text>
       <line class="link stub-link" x1="830" y1="264" x2="830" y2="352" marker-start="url(#arr)" marker-end="url(#arr)"/>
       <text class="l" x="822" y="300" text-anchor="end">packets in,</text>
       <text class="l" x="822" y="316" text-anchor="end">replies out</text>
@@ -957,15 +964,27 @@ async function start_upload(params, manifest, status)
     };
     const take = async file =>
     {
+        let fw;
         try
         {
-            const fw = parse_firmware(new Uint8Array(await file.arrayBuffer()));
-            localStorage.setItem(UPLOAD_KEY, JSON.stringify(
-                { name: file.name, board: board_select.value, flash: to_base64(fw.flash), stats: fw.stats }));
+            fw = parse_firmware(new Uint8Array(await file.arrayBuffer()));
         }
         catch(e)
         {
             note.textContent = `${file.name}: ${e.message}`;
+            return;
+        }
+        const keep = { name: file.name, board: board_select.value, flash: to_base64(fw.flash), stats: fw.stats, base: fw.base };
+        try
+        {
+            // An ELF is kept too, for the debugger's symbols, unless the
+            // browser has no room for it
+            try { localStorage.setItem(UPLOAD_KEY, JSON.stringify(fw.elf ? { ...keep, elf: to_base64(fw.elf) } : keep)); }
+            catch(e) { localStorage.setItem(UPLOAD_KEY, JSON.stringify(keep)); }
+        }
+        catch(e)
+        {
+            note.textContent = `${file.name}: this browser won't keep it (${e.message})`;
             return;
         }
         params.delete("firmware");
@@ -997,7 +1016,8 @@ async function start_upload(params, manifest, status)
         }
         else if(saved && saved.flash)
         {
-            fw = { name: saved.name, flash: from_base64(saved.flash), stats: saved.stats };
+            fw = { name: saved.name, flash: from_base64(saved.flash), stats: saved.stats, base: saved.base || 0,
+                elf: saved.elf ? from_base64(saved.elf) : null };
         }
     }
     catch(e)
@@ -1022,9 +1042,11 @@ async function start_upload(params, manifest, status)
         board: board === "ch32v003" ? undefined : board,
         flash: fw.flash,
         stats: fw.stats,
-        // (no project in the gdb-wui image: gdb connects without symbols)
+        // (no project in the gdb-wui image: the debugger gets the firmware
+        // from the page, as an ELF)
         debug: "upload",
         upload: true,
+        program: debug_program(fw),
         mcu: upload_mcu(board),
     };
     const gdb_build = params.has("debug") && manifest.builds.find(b => b.web_app === "gdb-wui");
@@ -1080,11 +1102,12 @@ function watch_unmodelled()
 function parse_firmware(bytes)
 {
     const image = new Uint8Array(UPLOAD_FLASH).fill(0xff);
-    let end = 0, stats;
+    let end = 0, stats, base = 0;
     // An address in the flash (at 0x0800 0000, or 0 where it also is)
     const put = (addr, data) =>
     {
         const off = addr >= 0x08000000 ? addr - 0x08000000 : addr;
+        if(addr >= 0x08000000) base = 0x08000000;
         if(off < 0 || off + data.length > UPLOAD_FLASH)
         {
             throw new Error(`it has ${data.length} bytes at 0x${addr.toString(16)}, outside the 16 KB of flash`);
@@ -1155,7 +1178,151 @@ function parse_firmware(bytes)
     const flash = image.slice(0, end);
     if(stats) stats.flash = end;
     else stats = { flash: end, flash_size: UPLOAD_FLASH };
-    return { flash, stats };
+    const elf = bytes[0] === 0x7f ? bytes.slice() : null;
+    return { flash, stats, base, elf };
+}
+
+// The firmware for the debugger (S95gdb-wui fetches it): its ELF, or its
+// flash image as one (at the address it was given, or 0), so that gdb-wui
+// can have kuna decompile it.
+function debug_program(fw)
+{
+    const name = (fw.name || "").replace(/\.[^.]*$/, "").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60) || "firmware";
+    return { name: name + ".elf", bytes: fw.elf || wrap_elf(fw.flash, fw.base || 0), elf: !!fw.elf };
+}
+
+// A 32-bit RISC-V ELF of a flash image: one loadable segment at base, which
+// is also its entry point (the reset vector), in a .text section, with
+// symbols where functions start (code_entries), which a decompiler would
+// not all find on its own.
+function wrap_elf(flash, base)
+{
+    const entries = code_entries(flash, base);
+    const syms = [], strtab = [0];
+    for(const [addr, name] of entries)
+    {
+        syms.push([strtab.length, addr]);
+        strtab.push(...new TextEncoder().encode(name), 0);
+    }
+    const names = new TextEncoder().encode("\0.text\0.symtab\0.strtab\0.shstrtab\0");
+    const align = n => n + 3 & ~3;
+    const code = 0x100;
+    const symtab = align(code + flash.length), strings = symtab + 16 * (syms.length + 1);
+    const shnames = align(strings + strtab.length), sh = align(shnames + names.length);
+    const out = new Uint8Array(sh + 5 * 40);
+    const view = new DataView(out.buffer);
+    out.set([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1]);
+    view.setUint16(16, 2, true);              // executable
+    view.setUint16(18, 243, true);            // RISC-V
+    view.setUint32(20, 1, true);
+    view.setUint32(24, base, true);           // entry
+    view.setUint32(28, 52, true);             // program headers
+    view.setUint32(32, sh, true);             // section headers
+    view.setUint32(36, 0x9, true);            // flags: RVE and RVC (the CH32V003 is RV32EC)
+    view.setUint16(40, 52, true);
+    view.setUint16(42, 32, true);
+    view.setUint16(44, 1, true);
+    view.setUint16(46, 40, true);
+    view.setUint16(48, 5, true);
+    view.setUint16(50, 4, true);              // .shstrtab
+    // PT_LOAD, read and execute
+    [1, code, base, base, flash.length, flash.length, 5, 4].forEach((v, i) => view.setUint32(52 + i * 4, v, true));
+    out.set(flash, code);
+    // Global functions in .text
+    syms.forEach(([name, addr], i) =>
+    {
+        const at = symtab + 16 * (i + 1);
+        view.setUint32(at, name, true);
+        view.setUint32(at + 4, addr, true);
+        out[at + 12] = 0x12;
+        view.setUint16(at + 14, 1, true);
+    });
+    out.set(strtab, strings);
+    out.set(names, shnames);
+    const section = (i, fields) => fields.forEach((v, j) => view.setUint32(sh + i * 40 + j * 4, v, true));
+    // .text: PROGBITS, alloc and exec; .symtab, linked to .strtab; .strtab;
+    // .shstrtab (names at their offsets in names)
+    section(1, [1, 1, 6, base, code, flash.length, 0, 0, 2, 0]);
+    section(2, [7, 2, 0, 0, symtab, 16 * (syms.length + 1), 3, 1, 4, 16]);
+    section(3, [15, 3, 0, 0, strings, strtab.length, 0, 0, 1, 0]);
+    section(4, [23, 3, 0, 0, shnames, names.length, 0, 0, 1, 0]);
+    return out;
+}
+
+// Where functions start in a flash image at base, as [address, name]: the
+// reset vector ("reset_vector"), its jump ("reset"), what the reset code puts in mepc before
+// its mret (main, usually), and what's called (jal or c.jal with ra), in
+// a pass over the image as code (sub_<address>).
+function code_entries(flash, base)
+{
+    const half = i => i + 1 < flash.length ? flash[i] | flash[i + 1] << 8 : 0;
+    const word = i => (half(i) | half(i + 2) << 16) >>> 0;
+    const sx = (v, bits) => v << (32 - bits) >> (32 - bits);
+    const jal_offset = w => sx((w >>> 31 & 1) << 20 | (w >>> 12 & 0xff) << 12 | (w >>> 20 & 1) << 11 | (w >>> 21 & 0x3ff) << 1, 21);
+    const cj_offset = h => sx((h >> 12 & 1) << 11 | (h >> 11 & 1) << 4 | (h >> 9 & 3) << 8 | (h >> 8 & 1) << 10 |
+        (h >> 7 & 1) << 6 | (h >> 6 & 1) << 7 | (h >> 3 & 7) << 1 | (h >> 2 & 1) << 5, 12);
+    const found = new Map();
+    const add = (addr, name) =>
+    {
+        if(addr >= base && addr < base + flash.length && !(addr & 1) && !found.has(addr)) found.set(addr, name);
+    };
+
+    // The reset vector: j (jal x0) or c.j
+    add(base, "reset_vector");
+    let reset = null;
+    if((word(0) & 0xfff) === 0x06f) reset = base + jal_offset(word(0));
+    else if((half(0) & 0xe003) === 0xa001) reset = base + cj_offset(half(0));
+    if(reset !== null)
+    {
+        add(reset, "reset");
+        // Its constants, as far as its mret: lui, auipc, addi, c.li, c.lui,
+        // c.addi and c.mv, and csrw mepc (csrrw x0, mepc, rs)
+        const reg = new Map();
+        for(let pc = reset, n = 0; n < 200 && pc - base + 2 <= flash.length; n++)
+        {
+            const h = half(pc - base);
+            if((h & 3) !== 3)
+            {
+                const rd = h >> 7 & 31, imm6 = sx((h >> 12 & 1) << 5 | h >> 2 & 31, 6);
+                if((h & 0xe003) === 0x4001) reg.set(rd, imm6);                              // c.li
+                else if((h & 0xe003) === 0x6001 && rd !== 2) reg.set(rd, imm6 << 12);         // c.lui
+                else if((h & 0xe003) === 0x0001 && reg.has(rd)) reg.set(rd, reg.get(rd) + imm6); // c.addi
+                else if((h & 0xf003) === 0x8002 && (h >> 2 & 31))                            // c.mv
+                {
+                    const rs = h >> 2 & 31;
+                    if(reg.has(rs)) reg.set(rd, reg.get(rs)); else reg.delete(rd);
+                }
+                else if(rd) reg.delete(rd);
+                pc += 2;
+                continue;
+            }
+            const w = word(pc - base);
+            const op = w & 0x7f, rd = w >> 7 & 31, rs1 = w >> 15 & 31;
+            if(w === 0x30200073) break;                                                      // mret
+            if(op === 0x37) reg.set(rd, w & 0xfffff000 | 0);                                 // lui
+            else if(op === 0x17) reg.set(rd, (pc + (w & 0xfffff000)) | 0);                    // auipc
+            else if(op === 0x13 && (w >> 12 & 7) === 0 && reg.has(rs1)) reg.set(rd, reg.get(rs1) + (w >> 20)); // addi
+            else if((w & 0xfff07fff) === 0x34101073 && reg.has(rs1)) add(reg.get(rs1) >>> 0, "main");
+            else if(op === 0x6f || op === 0x67) break;                                       // a jump: the end
+            else if(rd && op !== 0x23 && op !== 0x73) reg.delete(rd);
+            pc += 4;
+        }
+    }
+    // Calls
+    for(let i = 0; i + 2 <= flash.length;)
+    {
+        const h = half(i);
+        if((h & 3) !== 3)
+        {
+            if((h & 0xe003) === 0x2001) add(base + i + cj_offset(h), "");  // c.jal (RV32)
+            i += 2;
+            continue;
+        }
+        const w = word(i);
+        if((w & 0xfff) === 0x0ef) add(base + i + jal_offset(w), "");       // jal ra
+        i += 4;
+    }
+    return [...found].sort((a, b) => a[0] - b[0]).map(([addr, name]) => [addr, name || "sub_" + addr.toString(16)]);
 }
 
 function to_base64(bytes)
@@ -1179,6 +1346,8 @@ function from_base64(text)
 // line, runs target remote to its gateway's port 3333 (serve_gdb_stub in
 // guest-web.js). The microcontroller is held at reset until gdb connects.
 const GDB_STUB_PORT = 3333;
+// Your own firmware, for the debugger (S95gdb-wui fetches it)
+const UPLOAD_FILE_PORT = 5718;
 
 function setup_debugging(emulator, build, status, gdb_build, manifest)
 {
@@ -1197,7 +1366,9 @@ function setup_debugging(emulator, build, status, gdb_build, manifest)
     {
         offer.innerHTML = `<a href="${link(true)}">Debug this firmware with gdb</a>: ` +
             (build.upload ?
-                "registers, memory, disassembly and breakpoints by address (without its symbols, for now), in gdb-wui, " :
+                "registers, memory, disassembly, breakpoints and kuna's decompilation of it " +
+                    (build.program && build.program.elf ? "(with its symbols, if its ELF has them) " : "(by address: a .bin or .hex has no symbols) ") +
+                    "in gdb-wui, " :
                 "source-level debugging in gdb-wui, ") +
             "in a Linux machine next to this one, as through a debug probe (a desktop browser, and a minute to boot).";
         offer.hidden = false;
@@ -1221,8 +1392,10 @@ function setup_debugging(emulator, build, status, gdb_build, manifest)
         web_status.textContent = "Downloading kernel";
         const kernel = await fetch_kernel(image_base(gdb_build) + gdb_build.kernel, web_status);
         const vm = window.debugger_emulator =
-            start_linux(gdb_build, kernel, document.getElementById("debug-terminal"), "gdb_wui.mcu=" + build.debug);
+            start_linux(gdb_build, kernel, document.getElementById("debug-terminal"),
+                "gdb_wui.mcu=" + build.debug + (build.program ? " gdb_wui.exe=" + build.program.name : ""));
         await start_guest_web(vm, gdb_build, {
+            files: build.program ? [{ port: UPLOAD_FILE_PORT, bytes: build.program.bytes }] : [],
             gdb_stub: {
                 port: GDB_STUB_PORT,
                 target: emulator,

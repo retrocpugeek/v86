@@ -9,6 +9,12 @@
 //   SITE=http://localhost:8789 node tests/guest-web/mcu-debug.mjs [screenshot-prefix]
 //   SITE=... BUILD=gameconsole-tris FUNC=ADC_read SOURCE=gpio.h node tests/guest-web/mcu-debug.mjs
 //
+// FIRMWARE=<.bin, .hex or .elf> debugs that as your own firmware instead
+// (?build=upload&firmware=, on BOARD's board): the page hands it to the
+// debugger as an ELF (a .bin or .hex wrapped in one, with what it finds of
+// its functions), and kuna must decompile FUNC (default main) there:
+//   SITE=... FIRMWARE=tiny_invaders.hex BOARD=gameconsole node tests/guest-web/mcu-debug.mjs
+//
 // THROTTLE=<n> slows Chrome's CPU n times, as a slow laptop would: gdb then
 // takes over 30 seconds to start in the debugger's machine, which gdb-wui
 // has to wait for (-gdb-start-timeout, tools/gdb-wui-guest/S95gdb-wui).
@@ -16,14 +22,16 @@
 // Needs google-chrome and the site from tools/rv64-site (npx wrangler dev
 // --config tools/rv64-site/wrangler.jsonc --port 8789).
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const SITE = process.env.SITE || "http://localhost:8789";
 const BUILD = process.env.BUILD || "ch32v003-tetris";
-const FUNC = process.env.FUNC || "draw";
-const SOURCE = process.env.SOURCE || "tetris.c";
+const FIRMWARE = process.env.FIRMWARE;
+const FUNC = process.env.FUNC || (FIRMWARE ? "main" : "draw");
+// (a .bin or .hex has no source to stop in)
+const SOURCE = process.env.SOURCE ?? (FIRMWARE ? "" : "tetris.c");
 const OUT = process.argv[2];
 const PORT = +(process.env.PORT || 9349);
 const t0 = Date.now();
@@ -101,7 +109,10 @@ async function main()
     await send("Runtime.enable");
     await send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 1800, deviceScaleFactor: 1, mobile: false });
     if(process.env.THROTTLE) await send("Emulation.setCPUThrottlingRate", { rate: +process.env.THROTTLE });
-    await send("Page.navigate", { url: SITE + "/?build=" + BUILD + "&debug" });
+    const firmware = FIRMWARE && "data:application/octet-stream;base64," + readFileSync(FIRMWARE).toString("base64");
+    await send("Page.navigate", { url: SITE + (FIRMWARE ?
+        `/?build=upload&board=${process.env.BOARD || "ch32v003"}&firmware=${encodeURIComponent(firmware)}&debug` :
+        "/?build=" + BUILD + "&debug") });
     await sleep(3000);
     const held = await page_status();
     console.log("page:", held);
@@ -109,9 +120,9 @@ async function main()
 
     await until("gdb-wui connected", "d.getElementById('conn')?.dataset.state === 'open'", +(process.env.CONNECT_TIMEOUT || 600));
     // (the reset vector: Tetris's _start, the game console's jump_reset,
-    // ch32fun's InterruptVector)
+    // ch32fun's InterruptVector, the page's reset_vector for your own)
     await until("attached, stopped at the reset vector",
-        `${stopped} && /_start|jump_reset|InterruptVector/.test(d.getElementById('stack').innerText)`, 180);
+        `${stopped} && /_start|jump_reset|InterruptVector|reset_vector/.test(d.getElementById('stack').innerText)`, 180);
     console.log("  page:", await page_status(), "| program:", await frame("d.getElementById('exe-name').textContent"), "| stack:", await stack());
     if(!/attached/.test(await page_status())) throw new Error("the page doesn't say gdb-wui is attached");
     await shot("reset");
@@ -136,11 +147,21 @@ async function main()
     await frame("d.getElementById('btn-continue').click()");
     await until(`stopped in ${FUNC}`, `${stopped} && d.getElementById('source-path').textContent.includes(${JSON.stringify(SOURCE)}) && d.getElementById('stack').innerText.includes(${JSON.stringify(FUNC)})`, 120);
     console.log("  source:", await frame("d.getElementById('source-path').textContent"), "| stack:", await stack());
-    const line = "(d.getElementById('stack').innerText.match(/:(\\d+)/) || [])[1]";
-    const before_next = await frame(line);
-    await frame("d.getElementById('btn-next').click()");
-    await until("stepped a line", `${stopped} && ${line} !== ${JSON.stringify(before_next)}`, 60);
-    console.log("  after next:", await stack());
+    if(SOURCE)
+    {
+        const line = "(d.getElementById('stack').innerText.match(/:(\\d+)/) || [])[1]";
+        const before_next = await frame(line);
+        await frame("d.getElementById('btn-next').click()");
+        await until("stepped a line", `${stopped} && ${line} !== ${JSON.stringify(before_next)}`, 60);
+        console.log("  after next:", await stack());
+    }
+    else
+    {
+        // kuna's decompilation of it (the only decompiler for your own)
+        await frame("d.querySelector('button.tab[data-center=decomp]').click()");
+        await until(`${FUNC} decompiled by kuna`, `new RegExp(${JSON.stringify("\\b" + FUNC + "\\s*\\(")}).test(d.getElementById('decomp').textContent)`, 300);
+        console.log("  decompiled:", (await frame("d.getElementById('decomp').textContent")).replace(/\s+/g, " ").slice(0, 200));
+    }
     await shot("stopped");
 
     // Free running, with the breakpoint gone: the firmware draws; then Pause
