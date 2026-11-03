@@ -1,7 +1,8 @@
 // Runs your own firmware on the v86-riscv site's CH32V003 in headless Chrome
 // (?build=upload, tools/rv64-site/index.html, start_upload): a .bin, an ELF
 // and an Intel HEX picked on the page, each on its board, and firmware from
-// ?firmware=URL, whose use of TIM1 (not modelled) the page must point out.
+// a URL (pasted into the page, then from ?firmware=), whose use of TIM1 (not
+// modelled) the page must point out; and each board's list of examples.
 //
 //   SITE=http://localhost:8789 node tests/guest-web/mcu-upload.mjs [screenshot-prefix]
 //
@@ -142,11 +143,38 @@ async function main()
     if(await unmodelled()) throw new Error("Tetris uses nothing unmodelled: " + await unmodelled());
     await shot("hex");
 
-    // ?firmware=URL (a data: URL), which uses TIM1: the page says so
+    // Each board's examples, linked to run and to debug (shown open with no
+    // firmware: the one picked last is forgotten)
+    await ev("localStorage.removeItem('v86-riscv-upload')");
+    for(const board of ["ch32v003", "gameconsole", "minigameconsole", "osillyscope"])
+    {
+        await open(`${SITE}/?build=upload&board=${board}`);
+        if(!await ev("document.getElementById('upload-examples').open")) throw new Error("the examples should show with no firmware running");
+        const links = await ev("[...document.querySelectorAll('#upload-examples a')].map(a => a.getAttribute('href'))");
+        const runs = links.filter(h => !h.endsWith("&debug"));
+        if(!runs.length || runs.length * 2 !== links.length || !runs.every(h => h.includes("board=" + board) && h.includes("firmware=")))
+        {
+            throw new Error(`${board}'s examples: ${JSON.stringify(links).slice(0, 300)}`);
+        }
+        console.log(`  ${board}: ${runs.length} examples`);
+        // This site's own run from their links
+        for(const href of runs.filter(h => /firmware=examples%2F/.test(h)))
+        {
+            const name = decodeURIComponent(href.match(/firmware=examples%2F([^&]*)/)[1]);
+            await open(`${SITE}/${href}`);
+            await until(`  ${name} running`, `!!window.emulator && document.getElementById('upload-status').textContent.startsWith('Running ${name}')`, 30);
+            await ev("localStorage.removeItem('v86-riscv-upload')");
+        }
+    }
+
+    // A URL pasted into the page (a data: URL), firmware that uses TIM1: the
+    // page says so, and has it in its address (?firmware=) for a reload
     const url = "data:application/octet-stream;base64," + Buffer.from(TIM1_PROGRAM).toString("base64");
-    await open(`${SITE}/?build=upload&board=ch32v003&firmware=${encodeURIComponent(url)}`);
+    await ev(`document.getElementById('upload-url').value = ${JSON.stringify(url)}; document.getElementById('upload-url-form').requestSubmit()`);
+    await until("the pasted URL in the address", `new URLSearchParams(location.search).get('firmware') === ${JSON.stringify(url)} && document.readyState === 'complete'`, 30);
     const text = await until("TIM1 pointed out", "(() => { const b = document.getElementById('upload-unmodelled'); return !b.hidden && b.textContent; })()", 15);
     if(!text.includes("TIM1")) throw new Error("expected TIM1: " + text);
+    if(await ev("document.getElementById('upload-url').value") !== url) throw new Error("the URL box should show the firmware's URL");
     console.log("  " + text);
     await shot("url");
 

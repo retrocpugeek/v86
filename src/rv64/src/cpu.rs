@@ -159,6 +159,8 @@ pub struct Cpu {
 }
 
 /// The registers QingKe's HPE saves: ra, t0-t2, a0-a7, t3-t6.
+/// How many traps' frames the QingKe hardware stack keeps (generously)
+const HPE_DEPTH: usize = 8;
 const HPE_REGS: [usize; 16] = [1, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 28, 29, 30, 31];
 const INTSYSCR_HWSTKEN: u64 = 1 << 0;
 /// Interrupts off, and the next mret doesn't restore the HPE frame (RTOS
@@ -390,6 +392,13 @@ impl Cpu {
     /// else instructions to jump to.
     fn ch32_trap(&mut self, cause: u64, interrupt: bool) {
         let frame = (interrupt && self.csr.intsyscr & INTSYSCR_HWSTKEN != 0).then(|| HPE_REGS.map(|r| self.x[r]));
+        // The hardware stack has a few levels (2 on the CH32V003's QingKe
+        // V2A, 3 on the V4); traps taken without an mret, as from a fault
+        // handler that faults again, overwrite the oldest instead of
+        // growing it without end
+        if self.hpe_stack.len() >= HPE_DEPTH {
+            self.hpe_stack.remove(0);
+        }
         self.hpe_stack.push(frame);
         let mtvec = self.csr.mtvec;
         if mtvec & 1 == 0 {
@@ -615,5 +624,25 @@ impl Cpu {
             }
         }
         RunExit::Budget
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dev::ch32::{machine, Chip};
+
+    // A fault at the trap handler itself, over and over (ch32fun's
+    // self_modify_code reading every CSR did as much): the CH32's hardware
+    // stack keeps a few frames, and the emulator's memory stays put.
+    #[test]
+    fn traps_without_mret_dont_grow_the_hardware_stack() {
+        // An illegal instruction (all zeros) at the reset vector, which
+        // is also where traps go (mtvec 0)
+        let mut cpu = machine(Chip::V003, &[0; 4], Box::new(|_| {}), 0).unwrap();
+        for _ in 0..1000 {
+            cpu.run(100);
+        }
+        assert!(cpu.hpe_stack.len() <= HPE_DEPTH, "{} frames", cpu.hpe_stack.len());
     }
 }

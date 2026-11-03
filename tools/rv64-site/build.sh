@@ -21,6 +21,11 @@ cp tools/rv64-site/_headers tools/a64-site/sw.js tools/a64-site/guest-web.js bui
 V=$(cat build/libv86.js build/v86-rv64.wasm tools/a64-site/guest-web.js | sha256sum | cut -c1-12)
 sed -e "s|src=\"libv86.js\"|src=\"libv86.js?v=$V\"|" -e "s|src=\"guest-web.js\"|src=\"guest-web.js?v=$V\"|" -e "s|wasm_path: \"v86-rv64.wasm\"|wasm_path: \"v86-rv64.wasm?v=$V\"|" \
   tools/rv64-site/index.html > "$OUT/index.html"
+# The upload page's examples (tools/ch32v003-examples, built by its
+# build.sh), served by this site
+rm -rf "${OUT:?}/examples"
+mkdir -p "$OUT/examples"
+cp tools/ch32v003-examples/firmware/* "$OUT/examples/"
 [ -f "$OUT/images/manifest.json" ] || echo '{ "builds": [] }' > "$OUT/images/manifest.json"
 # Each image in a directory named after its contents (see the script)
 python3 tools/version-images.py "$OUT"
