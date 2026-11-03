@@ -130,6 +130,17 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #shell-pad button { min-width: 56px; height: 42px; padding: 0 12px; border-radius: 10px; background: #233041; border: 1px solid #3c4d66;
     color: var(--fg); font-size: 15px; touch-action: manipulation; }
 #shell-pad .cmd button { font-family: ui-monospace, monospace; font-size: 14px; }
+/* Your own firmware (?build=upload) */
+#upload { flex-basis: 100%; max-width: 900px; display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    box-sizing: border-box; border: 1px dashed #3c4d66; border-radius: 10px; }
+#upload[hidden], #upload [hidden] { display: none; }
+#upload.drop { border-color: var(--accent); background: #16202c; }
+#upload h2 { font-size: 15px; margin: 0; }
+#upload p { margin: 0; }
+#upload .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+#upload select { max-width: 100%; }
+#upload-status { color: var(--muted); }
+#upload-unmodelled { padding: 6px 10px; border: 1px solid #a8812f; background: #2a2210; }
 footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
 a { color: var(--accent); }
 code { color: var(--fg); }
@@ -169,6 +180,17 @@ code { color: var(--fg); }
 </dialog>
 <p id="web-note" role="note" hidden></p>
 <main>
+  <section id="upload" hidden aria-label="Your own firmware">
+    <h2>Run your own CH32V003 firmware</h2>
+    <p>A <code>.bin</code>, Intel <code>.hex</code> or <code>.elf</code> built for the CH32V003 (16 KB of flash at
+      0x0800 0000, or 0), on one of the boards below. It stays in this browser: nothing is uploaded.</p>
+    <div class="row">
+      <label>Board <select id="upload-board"></select></label>
+      <label>Firmware <input type="file" id="upload-file" accept=".bin,.hex,.ihx,.elf"></label>
+    </div>
+    <p id="upload-status" role="status"></p>
+    <p id="upload-unmodelled" role="status" hidden></p>
+  </section>
   <div id="terminal"></div>
   <section id="pad" hidden aria-label="Game controls">
     <div class="row"><button data-key="rotate" aria-label="Rotate">&#x27f3; Rotate</button></div>
@@ -381,7 +403,9 @@ code { color: var(--fg); }
     const select = document.getElementById("build");
 
     const manifest = await (await fetch("images/manifest.json", { cache: "no-cache" })).json();
-    const build = manifest.builds.find(b => b.id === params.get("build")) || manifest.builds[0];
+    // (?build=upload: your own firmware, not a build in the manifest)
+    const upload = params.get("build") === "upload";
+    const build = upload ? null : manifest.builds.find(b => b.id === params.get("build")) || manifest.builds[0];
 
     // The image list: the Linux machines, then the microcontrollers. Builds
     // with a "group" (the game console's games) are one entry in it, the one
@@ -402,7 +426,7 @@ code { color: var(--fg); }
         {
             if(groups.has(b.group)) continue;
             groups.add(b.group);
-            const shown = build.group === b.group ? build : b;
+            const shown = build && build.group === b.group ? build : b;
             const n = manifest.builds.filter(g => g.group === b.group).length;
             option = new Option(`${b.group}: ${n} games`, shown.id, false, shown === build);
         }
@@ -412,8 +436,14 @@ code { color: var(--fg); }
         }
         lists[MCUS[b.arch] ? "mcu" : "linux"].append(option);
     }
+    lists.mcu.append(new Option("Your own firmware (CH32V003)", "upload", false, upload));
     select.append(lists.linux, lists.mcu);
     select.onchange = () => go(select.value);
+    if(upload)
+    {
+        await start_upload(params, manifest, status);
+        return;
+    }
     if(build.group)
     {
         const game = document.getElementById("game");
@@ -644,7 +674,7 @@ const MCUS = {
 // the page's width.
 function start_mcu(build, base, status, gdb_build, manifest)
 {
-    const mcu = MCUS[build.board || build.arch];
+    const mcu = build.mcu || MCUS[build.board || build.arch];
     if(build.board === "gameconsole" || build.board === "minigameconsole" || build.board === "osillyscope")
     {
         start_game_console(build, base, status, mcu, gdb_build, manifest)
@@ -669,7 +699,7 @@ function start_mcu(build, base, status, gdb_build, manifest)
     const emulator = window.emulator = new V86({
         arch: build.arch,
         wasm_path: "v86-rv64.wasm",
-        bios: { url: base + build.bios },
+        bios: build.flash ? { buffer: build.flash.slice().buffer } : { url: base + build.bios },
         serial_console: { type: "xtermjs", container: document.getElementById("terminal"), xterm_lib: SizedTerminal },
         // held at reset for the debugger
         autostart: !gdb_build,
@@ -714,7 +744,7 @@ async function start_game_console(build, base, status, mcu, gdb_build, manifest)
         document.getElementById("scope-panel").hidden = false;
         document.getElementById("console").setAttribute("aria-label", "Oscilloscope");
     }
-    let bios = { url: base + build.bios }, kept = null;
+    let bios = build.flash ? { buffer: build.flash.slice().buffer } : { url: base + build.bios }, kept = null;
     if(mcu.keep_flash)
     {
         // The flash as this browser last kept it
@@ -883,6 +913,263 @@ function setup_tone(emulator)
     }, 25);
 }
 
+// Your own CH32V003 firmware (?build=upload): a .bin, Intel .hex or .elf
+// picked on the page (kept in this browser's local storage) or fetched from
+// ?firmware=URL, on a board like one of the builds' (?board=). What the
+// firmware uses that the emulator doesn't model is listed as it runs.
+const UPLOAD_KEY = "v86-riscv-upload";
+const UPLOAD_BOARDS = {
+    ch32v003: "Serial console: USART1 at 115200 baud, and ch32fun's printf",
+    gameconsole: "Stefan Wagner's Game Console: SSD1306 OLED on I2C1, buttons on the ADC (PC4) and PA2, buzzer on PA1",
+    minigameconsole: "Maksym Curul's Mini Game Console: ST7735 LCD on SPI1, five buttons, TIM2's buzzer",
+    osillyscope: "osillyscope: SSD1306 OLED bit-banged on PA1 and PA2, input on PD5 (ADC channel 5), three buttons",
+};
+const UPLOAD_FLASH = 16384;
+
+async function start_upload(params, manifest, status)
+{
+    const section = document.getElementById("upload");
+    const board_select = document.getElementById("upload-board");
+    const file_input = document.getElementById("upload-file");
+    const note = document.getElementById("upload-status");
+    section.hidden = false;
+    document.querySelector("h1").textContent = "v86 CH32V003";
+    document.title = "v86 CH32V003: your firmware";
+
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(UPLOAD_KEY) || "null"); } catch(e) {}
+    const url = params.get("firmware");
+    let board = params.get("board") || (!url && saved && saved.board) || "ch32v003";
+    if(!UPLOAD_BOARDS[board]) board = "ch32v003";
+    for(const [id, label] of Object.entries(UPLOAD_BOARDS))
+    {
+        board_select.add(new Option(label, id, false, id === board));
+    }
+    const reload = () =>
+    {
+        const search = "?" + params.toString().replace(/\bdebug=(?=&|$)/, "debug");
+        if(search === location.search) location.reload(); else location.search = search;
+    };
+    board_select.onchange = () =>
+    {
+        params.set("board", board_select.value);
+        reload();
+    };
+    const take = async file =>
+    {
+        try
+        {
+            const fw = parse_firmware(new Uint8Array(await file.arrayBuffer()));
+            localStorage.setItem(UPLOAD_KEY, JSON.stringify(
+                { name: file.name, board: board_select.value, flash: to_base64(fw.flash), stats: fw.stats }));
+        }
+        catch(e)
+        {
+            note.textContent = `${file.name}: ${e.message}`;
+            return;
+        }
+        params.delete("firmware");
+        params.set("board", board_select.value);
+        reload();
+    };
+    file_input.onchange = () => { if(file_input.files[0]) take(file_input.files[0]); };
+    section.addEventListener("dragover", e => { e.preventDefault(); section.classList.add("drop"); });
+    section.addEventListener("dragleave", () => section.classList.remove("drop"));
+    section.addEventListener("drop", e =>
+    {
+        e.preventDefault();
+        section.classList.remove("drop");
+        if(e.dataTransfer.files[0]) take(e.dataTransfer.files[0]);
+    });
+
+    let fw;
+    try
+    {
+        if(url)
+        {
+            status.textContent = "Downloading firmware";
+            const response = await fetch(url);
+            if(!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+            fw = parse_firmware(new Uint8Array(await response.arrayBuffer()));
+            const where = new URL(url, location.href);
+            fw.name = where.protocol.startsWith("http") && decodeURIComponent(where.pathname.split("/").pop()) || "firmware";
+            fw.from = where.protocol.startsWith("http") ? where.href : "";
+        }
+        else if(saved && saved.flash)
+        {
+            fw = { name: saved.name, flash: from_base64(saved.flash), stats: saved.stats };
+        }
+    }
+    catch(e)
+    {
+        status.textContent = "";
+        note.textContent = `Couldn't load ${url}: ${e.message}` +
+            (e instanceof TypeError ? " (its server may not allow it to be fetched from another site)" : "");
+        return;
+    }
+    if(!fw)
+    {
+        status.textContent = "Pick a firmware file";
+        note.textContent = "No firmware yet. Pick one, or drop it here.";
+        return;
+    }
+    note.textContent = `Running ${fw.name} (${fw.flash.length.toLocaleString("en")} bytes)` +
+        (fw.from ? ", from " + fw.from : "") + ". Pick another file to replace it.";
+    const build = {
+        id: "upload",
+        label: "Your firmware: " + fw.name,
+        arch: "ch32v003",
+        board: board === "ch32v003" ? undefined : board,
+        flash: fw.flash,
+        stats: fw.stats,
+        // (no project in the gdb-wui image: gdb connects without symbols)
+        debug: "upload",
+        upload: true,
+        mcu: upload_mcu(board),
+    };
+    const gdb_build = params.has("debug") && manifest.builds.find(b => b.web_app === "gdb-wui");
+    start_mcu(build, "", status, gdb_build || null, manifest);
+    watch_unmodelled();
+}
+
+// A board's description for your own firmware: its hardware, but the clock
+// and peripherals the firmware sets up, and nothing kept in the flash.
+function upload_mcu(board)
+{
+    const mcu = MCUS[board];
+    const hw = mcu.hw.filter(([k]) => !["Board", "Peripherals", "Clock"].includes(k));
+    hw.splice(1, 0,
+        ["Board", UPLOAD_BOARDS[board]],
+        ["Clock", "As the firmware sets it: 24 MHz internal oscillator, 48 MHz with the PLL"]);
+    hw.push(["Emulated", "SysTick, PFIC, RCC, GPIO, USART1, I2C1 and SPI1 (sending), ADC1 with its analog watchdog, " +
+        "DMA1 channels 1, 3 and 6, TIM2's PWM tone, the flash interface, ch32fun's printf (to the serial console)"]);
+    hw.push(["Not yet", "TIM1, TIM2's counter and interrupts, EXTI, the watchdogs, standby and auto-wakeup, " +
+        "I2C and SPI reception, interrupt nesting"]);
+    return Object.assign({}, mcu, {
+        name: "CH32V003",
+        hw,
+        timing: "As the firmware sets it up",
+        about: "Your own firmware on a WCH CH32V003 (RISC-V RV32EC, 2 KB of RAM, 16 KB of flash) emulated by " +
+            `v86's RISC-V core (<a href="https://github.com/retrocpugeek/v86/blob/ports/src/rv64/src/dev/ch32.rs">what it models</a>). ` +
+            "The firmware stays in this browser.",
+        keep_flash: null,
+    });
+}
+
+// What the firmware has used that the emulator doesn't model, shown once
+// it has.
+function watch_unmodelled()
+{
+    const box = document.getElementById("upload-unmodelled");
+    let shown = "";
+    setInterval(() =>
+    {
+        const list = window.emulator ? window.emulator.get_unmodelled() : [];
+        const text = list.join(", ");
+        if(text === shown) return;
+        shown = text;
+        box.hidden = !list.length;
+        box.textContent = "This firmware uses what the emulator doesn't model yet, so it may not work as it would " +
+            `on a chip: ${text}.`;
+    }, 1000);
+}
+
+// The flash image in firmware (a .bin, Intel .hex or .elf, told apart by
+// their contents) and, for an ELF, its sizes (as add-mcu.sh's): throws if
+// it isn't one or doesn't fit.
+function parse_firmware(bytes)
+{
+    const image = new Uint8Array(UPLOAD_FLASH).fill(0xff);
+    let end = 0, stats;
+    // An address in the flash (at 0x0800 0000, or 0 where it also is)
+    const put = (addr, data) =>
+    {
+        const off = addr >= 0x08000000 ? addr - 0x08000000 : addr;
+        if(off < 0 || off + data.length > UPLOAD_FLASH)
+        {
+            throw new Error(`it has ${data.length} bytes at 0x${addr.toString(16)}, outside the 16 KB of flash`);
+        }
+        image.set(data, off);
+        end = Math.max(end, off + data.length);
+    };
+    if(bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46)
+    {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if(bytes[4] !== 1 || bytes[5] !== 1 || view.getUint16(18, true) !== 243)
+        {
+            throw new Error("it's an ELF file, but not 32-bit little-endian RISC-V");
+        }
+        // Loadable segments, at their load (physical) addresses
+        const phoff = view.getUint32(28, true), phentsize = view.getUint16(42, true), phnum = view.getUint16(44, true);
+        for(let i = 0; i < phnum; i++)
+        {
+            const p = phoff + i * phentsize;
+            const filesz = view.getUint32(p + 16, true);
+            if(view.getUint32(p, true) !== 1 || !filesz) continue;
+            const offset = view.getUint32(p + 4, true);
+            put(view.getUint32(p + 12, true), bytes.subarray(offset, offset + filesz));
+        }
+        // Sizes by section: code and constants, initial data, zeroed data
+        const shoff = view.getUint32(32, true), shentsize = view.getUint16(46, true), shnum = view.getUint16(48, true);
+        stats = { flash: 0, flash_size: UPLOAD_FLASH, text: 0, data: 0, bss: 0, ram_base: 0x20000000, ram_size: 2048 };
+        for(let i = 0; i < shnum; i++)
+        {
+            const s = shoff + i * shentsize;
+            const type = view.getUint32(s + 4, true), flags = view.getUint32(s + 8, true), size = view.getUint32(s + 20, true);
+            if(!(flags & 2)) continue;
+            if(!(flags & 1)) stats.text += size;
+            else if(type === 8) stats.bss += size;
+            else stats.data += size;
+        }
+    }
+    else if(bytes[0] === 0x3a)
+    {
+        // Intel HEX: data records, and extended segment and linear addresses
+        let base = 0;
+        const lines = new TextDecoder().decode(bytes).split(/\r?\n/);
+        for(const [i, line] of lines.entries())
+        {
+            if(!line.trim()) continue;
+            const rec = line.trim().match(/^:((?:[0-9a-fA-F]{2})+)$/);
+            const b = rec && rec[1].match(/../g).map(h => parseInt(h, 16));
+            if(!b || b.length < 5 || b.length !== b[0] + 5 || b.reduce((s, x) => s + x, 0) & 0xff)
+            {
+                throw new Error(`line ${i + 1} isn't an Intel HEX record`);
+            }
+            const addr = b[1] << 8 | b[2], data = b.slice(4, 4 + b[0]);
+            if(b[3] === 0) put(base + addr, data);
+            else if(b[3] === 1) break;
+            else if(b[3] === 2) base = (data[0] << 8 | data[1]) << 4;
+            else if(b[3] === 4) base = (data[0] << 8 | data[1]) * 0x10000;
+        }
+    }
+    else
+    {
+        if(bytes.length > UPLOAD_FLASH)
+        {
+            throw new Error(`it's ${bytes.length.toLocaleString("en")} bytes; the flash holds 16,384`);
+        }
+        put(0, bytes);
+    }
+    if(!end) throw new Error("it has nothing for the flash");
+    const flash = image.slice(0, end);
+    if(stats) stats.flash = end;
+    else stats = { flash: end, flash_size: UPLOAD_FLASH };
+    return { flash, stats };
+}
+
+function to_base64(bytes)
+{
+    let s = "";
+    for(let i = 0; i < bytes.length; i += 0x2000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x2000));
+    return btoa(s);
+}
+
+function from_base64(text)
+{
+    return Uint8Array.from(atob(text), c => c.charCodeAt(0));
+}
+
 // Debugging the firmware with gdb-wui (?debug, for builds with "debug": the
 // name of its project in the gdb-wui image, /root/mcu/<debug>, with its ELF
 // and sources; tools/rv64-gdb/build.sh). gdb-wui's Linux machine, the gdb-wui
@@ -898,11 +1185,21 @@ function setup_debugging(emulator, build, status, gdb_build, manifest)
     const offer = document.getElementById("mcu-debug");
     const can_debug = build.debug && manifest.builds.some(b => b.web_app === "gdb-wui");
     if(!can_debug) return;
+    // This page's address with ?debug or without (keeping ?board and
+    // ?firmware for your own firmware)
+    const link = debug =>
+    {
+        const p = new URLSearchParams(location.search);
+        if(debug) p.set("debug", ""); else p.delete("debug");
+        return "?" + p.toString().replace(/\bdebug=(?=&|$)/, "debug").replace(/&/g, "&amp;");
+    };
     if(!gdb_build)
     {
-        offer.innerHTML = `<a href="?build=${encodeURIComponent(build.id)}&amp;debug">Debug this firmware with gdb</a>: ` +
-            "source-level debugging in gdb-wui, in a Linux machine next to this one, as through a debug probe " +
-            "(a desktop browser, and a minute to boot).";
+        offer.innerHTML = `<a href="${link(true)}">Debug this firmware with gdb</a>: ` +
+            (build.upload ?
+                "registers, memory, disassembly and breakpoints by address (without its symbols, for now), in gdb-wui, " :
+                "source-level debugging in gdb-wui, ") +
+            "in a Linux machine next to this one, as through a debug probe (a desktop browser, and a minute to boot).";
         offer.hidden = false;
         document.getElementById("debug-arch").hidden = false;
         return;
@@ -910,7 +1207,7 @@ function setup_debugging(emulator, build, status, gdb_build, manifest)
     const arch = document.getElementById("debug-arch");
     arch.hidden = false;
     arch.open = true;
-    offer.innerHTML = `Debugging with gdb-wui, below. <a href="?build=${encodeURIComponent(build.id)}">Without the debugger</a>`;
+    offer.innerHTML = `Debugging with gdb-wui, below. <a href="${link(false)}">Without the debugger</a>`;
     offer.hidden = false;
     status.textContent = "Held at reset until gdb-wui connects: its machine is starting";
     let started = false;
@@ -1417,7 +1714,14 @@ function show_mcu_info(emulator, mcu, build)
     document.getElementById("mcu-stack-row").hidden = !has_stack;
     document.getElementById("mcu-live").textContent = (has_stack ? "Stack and CPU load are" : "CPU load is") +
         " measured live in the emulator, every second.";
-    if(stats)
+    if(stats && stats.text === undefined)
+    {
+        // (your own firmware as a .bin or .hex: only its size is known)
+        document.getElementById("mcu-flash").innerHTML =
+            `${n(stats.flash)} bytes: ${pct(stats.flash, stats.flash_size)} of flash` + bar(stats.flash, stats.flash_size);
+        document.getElementById("mcu-ram-row").hidden = true;
+    }
+    else if(stats)
     {
         document.getElementById("mcu-flash").innerHTML =
             `${n(stats.flash)} bytes: ${pct(stats.flash, stats.flash_size)} of flash (code and constants ${n(stats.text)}, initial data ${n(stats.data)})` +
@@ -1445,12 +1749,14 @@ function show_mcu_info(emulator, mcu, build)
             leds.forEach((l, i) => dots[i].classList.toggle("on", !!(emulator.get_gpio_out(l.port) >> l.pin & 1)));
         }, 50));
     }
-    const MHZ = build.mhz || mcu.mhz;
+    const MHZ_BUILD = build.mhz || mcu.mhz;
     let last_count = emulator.get_instruction_counter(), last_time = performance.now();
     setInterval(() =>
     {
         const count = emulator.get_instruction_counter(), time = performance.now();
         const ips = (count - last_count) / ((time - last_time) / 1000);
+        // (your own firmware: the clock it set)
+        const MHZ = build.upload && emulator.get_mcu_clock() / 1e6 || MHZ_BUILD;
         last_count = count;
         last_time = time;
         document.getElementById("mcu-cpu").innerHTML =

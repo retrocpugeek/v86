@@ -1753,6 +1753,28 @@ V86.prototype.take_tones = function()
 };
 
 /**
+ * Microcontrollers: the clock the CPU runs at, as the firmware set it (Hz),
+ * or 0.
+ * @return {number}
+ */
+V86.prototype.get_mcu_clock = function()
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_hclk ? cpu.ch32_hclk() : 0;
+};
+
+/**
+ * Microcontrollers: what the firmware has used that the emulator doesn't
+ * model; see RV64CPU.ch32_unmodelled.
+ * @return {!Array<string>}
+ */
+V86.prototype.get_unmodelled = function()
+{
+    const cpu = this.v86.cpu;
+    return cpu.ch32_unmodelled ? cpu.ch32_unmodelled() : [];
+};
+
+/**
  * Microcontrollers: the flash's contents (a view, valid until the next
  * call), or null; see RV64CPU.ch32_flash.
  */

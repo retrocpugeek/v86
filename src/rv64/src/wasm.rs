@@ -406,6 +406,27 @@ pub extern "C" fn rv64_ch32_flash_len() -> u32 {
     unsafe { CPU.as_deref() }.filter(|c| c.bus.ch32.is_some()).map_or(0, |c| c.bus.rom.len() as u32)
 }
 
+/// CH32V: HCLK, the clock the hart runs at (Hz), as the firmware set it; 0
+/// for other machines.
+#[no_mangle]
+pub extern "C" fn rv64_ch32_hclk() -> f64 { ch32().map_or(0.0, |c| c.hclk() as f64) }
+
+static mut UNMODELLED: String = String::new();
+
+/// CH32V: what the firmware has used that isn't modelled, one per line;
+/// returns its length in bytes, and rv64_ch32_unmodelled_ptr() where it is.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_unmodelled() -> u32 {
+    let s = unsafe { &mut *addr_of_mut!(UNMODELLED) };
+    *s = ch32().map_or(String::new(), |c| c.unmodelled.iter().cloned().collect::<Vec<_>>().join("\n"));
+    s.len() as u32
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn rv64_ch32_unmodelled_ptr() -> u32 { unsafe { (*addr_of!(UNMODELLED)).as_ptr() as u32 } }
+
 /// CH32V: drive the pins of GPIO `port` in `mask` to `levels`.
 #[no_mangle]
 pub extern "C" fn rv64_ch32_set_gpio_in(port: u32, mask: u32, levels: u32) {
