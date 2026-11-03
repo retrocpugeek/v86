@@ -756,8 +756,30 @@ function serve_gdb_stub(adapter, port, target, on_change)
     });
 }
 
+// A file for the guest (your own firmware, for its gdb-wui): the guest
+// connects to the page's port and sends a line, and gets the file's bytes
+// before the connection is closed (S95gdb-wui fetches it with socat).
+function serve_file(adapter, port, bytes)
+{
+    adapter.bus.register("tcp-connection", conn =>
+    {
+        if(conn.sport !== port) return;
+        let sent = false;
+        conn.on("data", () =>
+        {
+            if(sent) return;
+            sent = true;
+            conn.write(bytes);
+            conn.close();
+        });
+        conn.on("shutdown", () => { if(!sent) conn.close(); });
+        conn.accept();
+    });
+}
+
 // options.gdb_stub: { port, target, on_change } for serve_gdb_stub (or
-// options.gdb_stubs, several); options.views: the web servers to show, each
+// options.gdb_stubs, several); options.files: [{ port, bytes }] for
+// serve_file; options.views: the web servers to show, each
 // { prefix, port, login_port, frame, status, open, reload, login_attempts }
 // (an iframe, its status, its link, its reload button, and how many times to
 // ask for a login link, 3 s apart; the default: build.web on port 80
@@ -807,6 +829,7 @@ async function start_guest_web(emulator, build, options = {})
     {
         serve_gdb_stub(adapter, stub.port, stub.target, stub.on_change || (() => {}));
     }
+    for(const file of options.files || []) serve_file(adapter, file.port, file.bytes);
     if(guest_web.websocket)
     {
         window.v86_guest_websocket = (ws_path, on) => guest_websocket(adapter, ws_path, on);

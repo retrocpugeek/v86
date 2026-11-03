@@ -32,8 +32,11 @@ export KUNA
 # microcontroller the page runs next to this machine. The page offers its
 # GDB stub on its port 3333 (tools/rv64-site/index.html, ?debug), as a
 # debug probe would. Without an ELF for NAME there (your own firmware on the
-# page, ?build=upload), gdb connects all the same, without symbols: the
-# stub tells it the architecture.
+# page, ?build=upload), gdb_wui.exe=FILE names the page's firmware as an ELF
+# (a .bin or .hex wrapped in one) that the page hands out on its port 5718
+# (serve_file in guest-web.js), for gdb's symbols, if it has any, and for
+# kuna to decompile. Without either, gdb connects all the same, without
+# symbols: the stub tells it the architecture.
 PROJECT=/root/demo
 TARGET=
 EXE=
@@ -46,6 +49,15 @@ if [ -n "$MCU" ]; then
 	else
 		PROJECT=/tmp/$MCU
 		mkdir -p "$PROJECT"
+		FILE=$(sed -n 's/.*gdb_wui\.exe=\([A-Za-z0-9_.-]*\).*/\1/p' /proc/cmdline)
+		if [ -n "$FILE" ]; then
+			# (a line asks for it; the page closes the connection after it)
+			for i in 1 2 3; do
+				echo get | socat -t 30 - "TCP:${GATEWAY:-192.168.86.1}:5718,connect-timeout=10" \
+					> "$PROJECT/$FILE" 2>/dev/null && [ -s "$PROJECT/$FILE" ] && EXE=$FILE && break
+				sleep 2
+			done
+		fi
 	fi
 fi
 export PROJECT MCU TARGET EXE
