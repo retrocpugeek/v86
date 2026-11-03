@@ -42,3 +42,13 @@ Its other firmware, each built from source by a script here:
 `tools/ch32v003-gameconsole` (Stefan Wagner's game console),
 `tools/ch32v003-minigameconsole` (Maksym Curul's mini game console) and
 `tools/ch32v003-osillyscope` (Vlad Tomoiagă's oscilloscope).
+
+Your own firmware runs there too:
+[?build=upload](https://v86-riscv.turret13.workers.dev/?build=upload) takes
+a `.bin`, Intel `.hex` or `.elf` (kept in your browser, not uploaded), or
+`&firmware=<url>` fetches one (from a server that allows it, such as
+raw.githubusercontent.com), on a board like one of the above (`&board=`
+`ch32v003`, `gameconsole`, `minigameconsole` or `osillyscope`). ch32fun's
+printf goes to the serial console. The page lists what the firmware uses
+that isn't modelled (e.g. TIM1, EXTI), and `&debug` attaches gdb without
+symbols.

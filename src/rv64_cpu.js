@@ -846,6 +846,26 @@ RV64CPU.prototype.ch32_flash = function()
     return ptr ? new Uint8Array(this.wasm_memory.buffer, ptr, this.wasm["rv64_ch32_flash_len"]()) : null;
 };
 
+/** @return {number} CH32V: the clock the hart runs at (Hz), or 0 */
+RV64CPU.prototype.ch32_hclk = function()
+{
+    return this.ch32 ? this.wasm["rv64_ch32_hclk"]() : 0;
+};
+
+/**
+ * CH32V: what the firmware has used that isn't modelled (e.g. "TIM1"), as
+ * a reason it may not work.
+ * @return {!Array<string>}
+ */
+RV64CPU.prototype.ch32_unmodelled = function()
+{
+    if(!this.ch32) return [];
+    const n = this.wasm["rv64_ch32_unmodelled"]();
+    if(!n) return [];
+    const bytes = new Uint8Array(this.wasm_memory.buffer, this.wasm["rv64_ch32_unmodelled_ptr"]() >>> 0, n);
+    return new TextDecoder().decode(bytes).split("\n");
+};
+
 /**
  * CH32V: record changes of output pins (e.g. a buzzer's), taken with
  * ch32_take_gpio_edges.

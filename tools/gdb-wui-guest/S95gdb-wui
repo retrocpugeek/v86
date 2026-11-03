@@ -31,15 +31,24 @@ export KUNA
 # firmware instead, /root/mcu/NAME/NAME.elf with its sources, on the
 # microcontroller the page runs next to this machine. The page offers its
 # GDB stub on its port 3333 (tools/rv64-site/index.html, ?debug), as a
-# debug probe would.
+# debug probe would. Without an ELF for NAME there (your own firmware on the
+# page, ?build=upload), gdb connects all the same, without symbols: the
+# stub tells it the architecture.
 PROJECT=/root/demo
 TARGET=
+EXE=
 MCU=$(sed -n 's/.*gdb_wui\.mcu=\([A-Za-z0-9_.-]*\).*/\1/p' /proc/cmdline)
-if [ -n "$MCU" ] && [ -f "/root/mcu/$MCU/$MCU.elf" ]; then
-	PROJECT=/root/mcu/$MCU
+if [ -n "$MCU" ]; then
 	TARGET="target remote ${GATEWAY:-192.168.86.1}:3333"
+	if [ -f "/root/mcu/$MCU/$MCU.elf" ]; then
+		PROJECT=/root/mcu/$MCU
+		EXE=$MCU.elf
+	else
+		PROJECT=/tmp/$MCU
+		mkdir -p "$PROJECT"
+	fi
 fi
-export PROJECT MCU TARGET
+export PROJECT MCU TARGET EXE
 # gdb_wui.card10 on the kernel command line: the card10 badge's two cores,
 # each with its own debugger (tools/a64-site/index.html, ?build=card10&debug):
 # a gdb-wui for core 0 (Epicardium) on port 80 and one for core 1
@@ -76,7 +85,7 @@ start)
 	fi
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui.pid -x /bin/sh -- -c \
 		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config $START -project "$PROJECT" $SIDECARS $KUNA \
-			${TARGET:+-exe "$MCU.elf" -gdb-command "$TARGET"} >/tmp/gdb-wui.log 2>&1'
+			${EXE:+-exe "$EXE"} ${TARGET:+-gdb-command "$TARGET"} >/tmp/gdb-wui.log 2>&1'
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui-url.pid -x /usr/bin/socat -- \
 		TCP-LISTEN:81,reuseaddr,fork SYSTEM:"/usr/bin/gdb-wui -print-url 2>/dev/null"
 	echo "OK"

@@ -23,7 +23,8 @@
 //! being GPIOA), "<ms> gpio <port> <mask> <levels>" drives a port's pins,
 //! "<ms> wave <ch> <shape> <hz> <mid> <amp>" sets an ADC channel's input to
 //! a waveform (shape 1 sine, 2 square, 3 triangle, 4 sawtooth; centre and
-//! amplitude in ADC codes). --jitter moves virtual time on by up to 1 us between
+//! amplitude in ADC codes), "<ms> unmodelled" prints what the firmware has
+//! used that isn't modelled. --jitter moves virtual time on by up to 1 us between
 //! batches of instructions, as following the host clock does in the browser.
 //!
 //! Boots like `qemu-system-riscv64 -M virt -bios ... -kernel ...`. The serial
@@ -256,12 +257,17 @@ fn run_script(cpu: &mut Cpu, script: &str, jitter: bool) {
             }
             if matches!(cpu.run(10_000), RunExit::PowerOff | RunExit::Reset | RunExit::Idle) {
                 eprintln!("rv64run: the CPU stopped at {} ms", cpu.now_ns() / 1_000_000);
+                let c = cpu.bus.ch32.as_ref().unwrap();
+                if !c.unmodelled.is_empty() {
+                    eprintln!("rv64run: unmodelled: {}", c.unmodelled.iter().cloned().collect::<Vec<_>>().join(", "));
+                }
                 return;
             }
         }
         let c = cpu.bus.ch32.as_mut().unwrap();
         match what.as_slice() {
             ["show"] => show_display(cpu, ms),
+            ["unmodelled"] => println!("{ms} ms: unmodelled: {}", c.unmodelled.iter().cloned().collect::<Vec<_>>().join(", ")),
             ["frame"] => println!("{ms} ms: display frame {}, pc {:#x}", c.display.frame, cpu.pc),
             ["fire"] => c.gpio_in[0] = (1 << 2, 0),
             ["nofire"] => c.gpio_in[0] = (0, 0),

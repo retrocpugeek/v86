@@ -29,16 +29,20 @@
 //! the host drives, and edges on output
 //! pins it watches (e.g. a buzzer); TIM2's PWM output as the tone it plays
 //! (e.g. on a buzzer), for the host; the flash interface's fast (64-byte)
-//! page erase and programming, and 1 KB page erase (for saving data). Other
+//! page erase and programming, and 1 KB page erase (for saving data); the
+//! debug module's DMDATA0/1 as a debugger attached through them sees them,
+//! for ch32fun's printf over SWIO (to the console, like USART1). Other
 //! peripheral registers (AFIO, PWR, ...) hold what's written.
 //!
 //! Not modelled: interrupt nesting and preemption by priority, the RV32E
 //! register limit, timer counters and interrupts, I2C reception and
 //! interrupts, SPI reception, other DMA channels, USB, Ethernet, flash
-//! locking and standard (16-bit) programming.
+//! locking and standard (16-bit) programming. The firmware's use of those
+//! that are on the chip is recorded (Ch32::unmodelled), for the host to say
+//! why firmware may not work.
 
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::bus::Bus;
@@ -109,6 +113,9 @@ impl Chip {
         }
     }
 }
+/// The debug module's DMDATA0, DMDATA1 and (ch32fun's name)
+/// DMSTATUS_SENTINEL, which reads 0 with a debugger attached
+const DM_BASE: u64 = 0xe000_00f4;
 const PFIC_BASE: u64 = 0xe000_e000;
 const SYSTICK_BASE: u64 = 0xe000_f000;
 /// APB and AHB peripherals
@@ -171,6 +178,37 @@ const FLASH_PAGE: usize = 64;
 /// Tone changes kept for the host (Ch32::take_tones) before the oldest are
 /// dropped
 const MAX_TONES: usize = 4096;
+/// Peripherals not modelled, by the address of their registers (the
+/// CH32V003's and the CH32V307's)
+const UNMODELLED: [(u64, &str); 23] = [
+    (0x4000_0400, "TIM3"),
+    (0x4000_0800, "TIM4"),
+    (0x4000_0c00, "TIM5"),
+    (0x4000_1000, "TIM6"),
+    (0x4000_1400, "TIM7"),
+    (0x4000_2c00, "the window watchdog (WWDG)"),
+    (0x4000_3000, "the independent watchdog (IWDG)"),
+    (0x4000_3800, "SPI2"),
+    (0x4000_3c00, "SPI3"),
+    (0x4000_4400, "USART2"),
+    (0x4000_4800, "USART3"),
+    (0x4000_4c00, "UART4"),
+    (0x4000_5000, "UART5"),
+    (0x4000_5800, "I2C2"),
+    (0x4000_6400, "CAN1"),
+    (0x4000_6800, "CAN2"),
+    (0x4000_7400, "the DAC"),
+    (0x4001_0400, "EXTI (external interrupts)"),
+    (0x4001_2800, "ADC2"),
+    (0x4001_2c00, "TIM1"),
+    (0x4001_3400, "TIM8"),
+    (0x4002_0400, "DMA2"),
+    (0x4002_3000, "the CRC unit"),
+];
+/// Peripherals whose registers just hold what's written, and that's enough:
+/// AFIO, the flash interface, EXTEN, the backup registers
+const HOLDING: [u64; 4] = [0x4001_0000, FLASH_R_BASE, 0x4002_3800, 0x4000_6c00];
+const PWR_BASE: u64 = 0x4000_7000;
 
 pub const IRQ_SYSTICK: u32 = 12;
 /// SysTick's software interrupt (CTLR.SWIE)
@@ -495,6 +533,12 @@ pub struct Ch32 {
     /// The flash interface's page buffer, and a change for the bus to make
     flash_buf: [u8; FLASH_PAGE],
     flash_op: Option<FlashOp>,
+    /// What the firmware used that isn't modelled, e.g. "TIM1"
+    pub unmodelled: BTreeSet<String>,
+    /// A narrow write is reading the word it merges into (not the firmware)
+    merging: bool,
+    /// DMDATA0 and DMDATA1
+    dmdata: [u32; 2],
 }
 
 impl Ch32 {
@@ -553,6 +597,9 @@ impl Ch32 {
             tones: VecDeque::new(),
             flash_buf: [0xff; FLASH_PAGE],
             flash_op: None,
+            unmodelled: BTreeSet::new(),
+            merging: false,
+            dmdata: [0; 2],
         }
     }
 
@@ -583,6 +630,7 @@ impl Ch32 {
     /// Does pa belong to a peripheral modelled here?
     pub fn claims(&self, pa: u64) -> bool {
         pa.wrapping_sub(PFIC_BASE) < 0x1000
+            || pa.wrapping_sub(DM_BASE) < 12
             || pa.wrapping_sub(SYSTICK_BASE) < 0x100
             || pa.wrapping_sub(PERIPH_BASE) < PERIPH_SIZE
             || pa.wrapping_sub(INFO_BASE) < 0x1000
@@ -792,6 +840,9 @@ impl Ch32 {
         if a.wrapping_sub(INFO_BASE) < 0x1000 {
             return self.info(a);
         }
+        if a.wrapping_sub(DM_BASE) < 12 {
+            return self.dmdata.get(((a - DM_BASE) / 4) as usize).copied().unwrap_or(0);
+        }
         if a.wrapping_sub(SYSTICK_BASE) < 0x100 {
             self.update(now);
             let cnt = self.stk_count(now);
@@ -871,6 +922,10 @@ impl Ch32 {
             return self.i2c_read(a - I2C1_BASE, now);
         }
         if a.wrapping_sub(SPI1_BASE) < 0x400 {
+            // DATAR: what's received
+            if a - SPI1_BASE == 0x0c {
+                self.note("SPI1 reception");
+            }
             self.spi_update(now);
             let word_ns = self.spi_word_ns();
             let spi = &self.spi;
@@ -913,7 +968,68 @@ impl Ch32 {
                 off => adc.regs.get(off as usize / 4).copied().unwrap_or(0),
             };
         }
+        self.note_held(a, None);
         self.regs.get(&a).copied().unwrap_or(0)
+    }
+
+    /// The firmware used something that isn't modelled.
+    fn note(&mut self, what: &str) {
+        if !self.merging && !self.unmodelled.contains(what) {
+            self.unmodelled.insert(what.to_string());
+        }
+    }
+
+    /// Registers that just hold what's written (read32 and write32's last
+    /// resort; `written` is the value of a write): note those of
+    /// peripherals that aren't modelled.
+    fn note_held(&mut self, a: u64, written: Option<u32>) {
+        let block = a & !0x3ff;
+        if a.wrapping_sub(GPIO_BASE) < GPIO_PORTS * 0x400 || HOLDING.contains(&block) || block == RTC_BASE {
+            return;
+        }
+        match block {
+            // PWR: its voltage detector reads as the supply being fine, but
+            // standby (CTLR's PDDS) and the auto-wakeup timer (AWUCSR's
+            // AWUEN) aren't modelled
+            PWR_BASE => match (a - PWR_BASE, written) {
+                (0x00, Some(v)) if v & 1 << 1 != 0 => self.note("standby (PWR)"),
+                (0x08, Some(v)) if v & 1 << 1 != 0 => self.note("the auto-wakeup timer (AWU)"),
+                _ => {}
+            },
+            // TIM2's tone is modelled, not its count or interrupts
+            TIM2_BASE => {
+                if matches!(a - TIM2_BASE, 0x10 | 0x24) {
+                    self.note("TIM2's counter and interrupts");
+                }
+            }
+            _ => match UNMODELLED.iter().find(|u| u.0 == block) {
+                Some(&(_, name)) => self.note(name),
+                None => self.note(&format!("the peripheral at {block:#010x}")),
+            },
+        }
+    }
+
+    // ---- The debug module's DMDATA (ch32fun's printf) ----
+
+    /// DMDATA0's low byte: bit 7 set by the firmware when it has written a
+    /// print, cleared by the debugger once it's taken; bits 0 to 3 the
+    /// number of bytes plus 4, the first three in DMDATA0's other bytes and
+    /// the rest in DMDATA1's. The print is taken at once.
+    fn dm_write(&mut self, off: u64, v: u32) {
+        match off {
+            0 if v & 0x80 != 0 && v & 0x40 == 0 => {
+                let n = ((v & 0xf) as usize).saturating_sub(4).min(7);
+                let bytes = [v.to_le_bytes(), self.dmdata[1].to_le_bytes()].concat();
+                for &b in &bytes[1..1 + n] {
+                    (self.out)(b);
+                }
+                // Taken, with no input for the firmware
+                self.dmdata[0] = 0;
+            }
+            0 => self.dmdata[0] = v,
+            4 => self.dmdata[1] = v,
+            _ => {}
+        }
     }
 
     // ---- I2C1 ----
@@ -987,6 +1103,10 @@ impl Ch32 {
     }
 
     fn i2c_read(&mut self, off: u64, now: u64) -> u32 {
+        // DATAR: what's received
+        if off == 0x10 {
+            self.note("I2C1 reception");
+        }
         self.i2c_update(now);
         let i2c = &mut self.i2c;
         let idle = i2c.shifting.is_none() && i2c.dr.is_none();
@@ -1604,7 +1724,9 @@ impl Ch32 {
         } else {
             let shift = (pa & 3) * 8;
             let m = ((1u64 << (8 * size)) - 1) << shift;
+            self.merging = true;
             let old = if a.wrapping_sub(USART1_BASE) == 4 { 0 } else { self.read32(a, now) as u64 };
+            self.merging = false;
             ((old & !m) | (value << shift & m)) as u32
         };
         self.write32(a, v, now);
@@ -1613,6 +1735,10 @@ impl Ch32 {
 
     fn write32(&mut self, a: u64, v: u32, now: u64) {
         if a.wrapping_sub(INFO_BASE) < 0x1000 {
+            return;
+        }
+        if a.wrapping_sub(DM_BASE) < 12 {
+            self.dm_write(a - DM_BASE, v);
             return;
         }
         if a.wrapping_sub(SYSTICK_BASE) < 0x100 {
@@ -1720,6 +1846,10 @@ impl Ch32 {
             return;
         }
         if a.wrapping_sub(TIM2_BASE) < 0x400 {
+            // DMAINTENR: its interrupts (or DMA requests)
+            if a - TIM2_BASE == 0x0c && v != 0 {
+                self.note("TIM2's counter and interrupts");
+            }
             self.regs.insert(a, v);
             self.tim2_tone(now);
             return;
@@ -1745,6 +1875,11 @@ impl Ch32 {
                     }
                 }
                 off => {
+                    // (CFGR of channels 1 to 7 at 0x08, 0x1c, ...)
+                    let ch = (off - 0x08) / 0x14 + 1;
+                    if off >= 0x08 && (off - 0x08) % 0x14 == 0 && v & DMA_EN != 0 && ![1, 3, 6].contains(&ch) {
+                        self.note(&format!("DMA1 channel {ch}"));
+                    }
                     let old = self.dma[(off / 4) as usize];
                     self.dma[(off / 4) as usize] = v;
                     if off == DMA_CH1 && v & DMA_EN != 0 && old & DMA_EN == 0 {
@@ -1765,6 +1900,7 @@ impl Ch32 {
             }
             return;
         }
+        self.note_held(a, Some(v));
         self.regs.insert(a, v);
     }
 }
@@ -1818,6 +1954,58 @@ mod tests {
         c.write(I2C1_BASE + 0x10, 4, (ssd1306::ADDR as u64) << 1, t);
         let done = t + 9 * c.i2c_bit_ns();
         (c, done)
+    }
+
+    #[test]
+    fn ch32fun_debug_printf_reaches_the_console() {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let o = out.clone();
+        let mut c = Ch32::new(Chip::V003, Box::new(move |b| o.lock().unwrap().push(b)), 0);
+        // A debugger is attached, and nothing is waiting
+        assert_eq!(c.read(DM_BASE + 8, 4, 0), Some(0));
+        // _write's 7 bytes: 3 in DMDATA0, 4 in DMDATA1
+        c.write(DM_BASE + 4, 4, u32::from_le_bytes(*b"lo, ") as u64, 0);
+        c.write(DM_BASE, 4, u32::from_le_bytes([0x80 | 11, b'H', b'e', b'l']) as u64, 0);
+        assert_eq!(c.read(DM_BASE, 4, 0).unwrap() & 0x80, 0);
+        // putchar's 1
+        c.write(DM_BASE, 4, (0x85 | (b'!' as u32) << 8) as u64, 0);
+        assert_eq!(out.lock().unwrap().as_slice(), b"Hello, !");
+    }
+
+    #[test]
+    fn unmodelled_peripherals_are_noted() {
+        let mut c = Ch32::new(Chip::V003, Box::new(|_| {}), 0);
+        // Set up, but modelled or harmless: GPIO, AFIO, PWR's voltage
+        // detector, 16-bit writes to the data registers, TIM2's PWM
+        c.write(GPIO_BASE, 4, 0x4444_4444, 0);
+        c.write(0x4001_0004, 4, 1, 0);
+        c.write(PWR_BASE, 4, 1 << 4, 0);
+        c.write(I2C1_BASE + 0x10, 2, 0x78, 0);
+        c.write(SPI1_BASE + 0x0c, 2, 0x12, 0);
+        c.write(TIM2_BASE + 0x2c, 4, 999, 0);
+        c.read(TIM2_BASE + 0x2c, 4, 0);
+        assert!(c.unmodelled.is_empty(), "{:?}", c.unmodelled);
+        // Not modelled
+        c.write(0x4001_2c00, 4, 1, 0);
+        c.write(0x4001_0400, 4, 1, 0);
+        c.read(TIM2_BASE + 0x24, 4, 0);
+        c.write(DMA1_BASE + 0x08 + 0x14 * 4, 4, DMA_EN as u64, 0);
+        c.read(SPI1_BASE + 0x0c, 4, 0);
+        c.write(PWR_BASE, 4, 1 << 1, 0);
+        c.read(0x4002_3400, 4, 0);
+        let got: Vec<_> = c.unmodelled.iter().map(String::as_str).collect();
+        assert_eq!(
+            got,
+            [
+                "DMA1 channel 5",
+                "EXTI (external interrupts)",
+                "SPI1 reception",
+                "TIM1",
+                "TIM2's counter and interrupts",
+                "standby (PWR)",
+                "the peripheral at 0x40023400",
+            ]
+        );
     }
 
     #[test]
