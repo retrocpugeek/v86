@@ -8,7 +8,7 @@
 #    without running its makefiles (Ubuntu: gcc-riscv64-unknown-elf,
 #    picolibc-riscv64-unknown-elf, for the C headers);
 #  - the site's other CH32V003 firmware, as their own build scripts built it
-#    (tools/ch32v003, tools/ch32v003-minigameconsole,
+#    (tools/ch32v003, tools/ch32v003-basic, tools/ch32v003-minigameconsole,
 #    tools/ch32v003-osillyscope), with their licences.
 #
 #   tools/ch32v003-examples/build.sh
@@ -64,6 +64,7 @@ copy() {
     echo "$2: $(stat -c %s "$OUT/$2.elf") bytes"
 }
 copy ch32v003 tetris
+copy ch32v003-basic basic
 copy ch32v003-minigameconsole minigameconsole
 copy ch32v003-osillyscope osillyscope
 [ -f "$ROOT/build/ch32v003-minigameconsole/src/LICENSE" ] && cp "$ROOT/build/ch32v003-minigameconsole/src/LICENSE" "$OUT/LICENSE-minigameconsole"

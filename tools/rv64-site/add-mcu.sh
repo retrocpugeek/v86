@@ -5,6 +5,11 @@
 #   CROSS=riscv32-buildroot-linux-gnu- tools/ch32v003/build.sh
 #   DEBUG=tetris tools/rv64-site/add-mcu.sh ch32v003-tetris "CH32V003 (bare metal): Tetris" build/ch32v003/tetris.bin
 #
+#   tools/ch32v003-basic/build.sh
+#   BOARD=basic CONTROLS=shell COMMANDS="LIST,RUN,NEW,SAVE,LOAD,MON" COLS=64 ROWS=24 \
+#     LEDS=LED0:2:0,LED1:2:1,LED2:2:2,LED3:2:3 DEBUG=basic \
+#     tools/rv64-site/add-mcu.sh ch32v003-basic "CH32V003 (bare metal): Tiny BASIC" build/ch32v003-basic/basic.bin
+#
 #   tools/ch32v307/build.sh
 #   ARCH=ch32v307 CONTROLS=shell COLS=80 ROWS=28 LEDS=LED1:1:5 \
 #     COMMANDS="help,ps,free,date,aclock,snake,lua,core_mark,clear" \

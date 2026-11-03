@@ -16,6 +16,7 @@
 # The microcontroller firmware the site's pages debug with it (?debug) goes
 # in /root/mcu/<name>/: each one's ELF and sources, where their debug info
 # names them. Built first: tools/ch32v003/build.sh (Tetris),
+# tools/ch32v003-basic/build.sh (Tiny BASIC),
 # tools/ch32v003-gameconsole/build.sh (the game console's games),
 # tools/ch32v003-minigameconsole/build.sh (the mini game console's firmware)
 # and tools/ch32v003-osillyscope/build.sh (the oscilloscope's).
@@ -56,6 +57,12 @@ OVERLAY=$OUT/overlay
 MCU=$OVERLAY/root/mcu
 mkdir -p "$MCU/tetris"
 cp build/ch32v003/tetris.elf tools/ch32v003/tetris.c tools/ch32v003/start.S tools/ch32v003/libgcc.c tools/ch32v003/link.ld "$MCU/tetris/"
+# Tiny BASIC: its sources and tools/ch32v003's, as the ELF names them
+[ -f build/ch32v003-basic/basic.elf ] || { echo "no Tiny BASIC ELF: run tools/ch32v003-basic/build.sh" >&2; exit 1; }
+mkdir -p "$MCU/basic/ch32v003" "$MCU/basic/ch32v003-basic"
+cp build/ch32v003-basic/basic.elf "$MCU/basic/"
+cp tools/ch32v003-basic/basic.c "$MCU/basic/ch32v003-basic/"
+cp tools/ch32v003/start.S tools/ch32v003/libgcc.c tools/ch32v003/ch32v003.h tools/ch32v003/link.ld "$MCU/basic/ch32v003/"
 for dir in build/ch32v003-gameconsole/src/software/*/; do
     game=$(basename "$dir")
     # (the games the script builds; not the calibrator)

@@ -39,6 +39,8 @@ DMA1 channels 1, 3 and 6, TIM2's PWM tone and the flash interface. See
 the other DMA channels).
 
 Its other firmware, each built from source by a script here:
+[`tools/ch32v003-basic`](../ch32v003-basic) (a Tiny BASIC with a machine
+monitor, on this directory's startup code),
 `tools/ch32v003-gameconsole` (Stefan Wagner's game console),
 `tools/ch32v003-minigameconsole` (Maksym Curul's mini game console) and
 `tools/ch32v003-osillyscope` (Vlad Tomoiagă's oscilloscope).

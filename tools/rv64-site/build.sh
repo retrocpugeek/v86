@@ -26,6 +26,9 @@ sed -e "s|src=\"libv86.js\"|src=\"libv86.js?v=$V\"|" -e "s|src=\"guest-web.js\"|
 rm -rf "${OUT:?}/examples"
 mkdir -p "$OUT/examples"
 cp tools/ch32v003-examples/firmware/* "$OUT/examples/"
+# and Tiny BASIC's example programs, for its page's buttons
+mkdir -p "$OUT/examples/basic"
+cp tools/ch32v003-basic/examples/*.bas "$OUT/examples/basic/"
 [ -f "$OUT/images/manifest.json" ] || echo '{ "builds": [] }' > "$OUT/images/manifest.json"
 # Each image in a directory named after its contents (see the script)
 python3 tools/version-images.py "$OUT"

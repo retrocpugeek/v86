@@ -12,6 +12,7 @@ of them: tools/rv64-site/build.sh). Built by `build.sh`:
   which uses TIM1, not modelled yet) and the game console's OLED
   (`i2c_oled`);
 - the site's other CH32V003 firmware: `tetris.elf` (tools/ch32v003),
+  `basic.elf` (Tiny BASIC, tools/ch32v003-basic),
   Maksym Curul's [Mini Game Console](https://github.com/max7d3/CH32V003-MiniGameConsole)
   (Apache-2.0, `LICENSE-minigameconsole`) and Vlad Tomoiagă's
   [osillyscope](https://github.com/tvlad1234/osillyscope) (MIT,
