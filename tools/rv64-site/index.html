@@ -139,6 +139,11 @@ button { background: #222; color: var(--fg); border: 1px solid #444; padding: 1p
 #upload p { margin: 0; }
 #upload .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
 #upload select { max-width: 100%; }
+#upload-url-form input { flex: 1 1 280px; min-width: 0; }
+#upload-examples summary { color: var(--muted); cursor: pointer; }
+#upload-examples ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 16px; }
+#upload-examples li { font-size: 13px; }
+#upload-examples .m { color: var(--muted); }
 #upload-status { color: var(--muted); }
 #upload-unmodelled { padding: 6px 10px; border: 1px solid #a8812f; background: #2a2210; }
 footer { margin-top: 12px; color: var(--muted); font-size: 12px; }
@@ -188,8 +193,17 @@ code { color: var(--fg); }
       <label>Board <select id="upload-board"></select></label>
       <label>Firmware <input type="file" id="upload-file" accept=".bin,.hex,.ihx,.elf"></label>
     </div>
+    <form class="row" id="upload-url-form">
+      <label for="upload-url">or its URL</label>
+      <input type="url" id="upload-url" placeholder="https://raw.githubusercontent.com/…/firmware.hex" required>
+      <button type="submit">Run</button>
+    </form>
     <p id="upload-status" role="status"></p>
     <p id="upload-unmodelled" role="status" hidden></p>
+    <details id="upload-examples" hidden>
+      <summary>Examples for this board</summary>
+      <ul></ul>
+    </details>
   </section>
   <div id="terminal"></div>
   <section id="pad" hidden aria-label="Game controls">
@@ -793,7 +807,8 @@ async function start_game_console(build, base, status, mcu, gdb_build, manifest)
             draw_lcd(emulator);
             setup_console_buttons(emulator, mcu.buttons);
             setup_tone(emulator);
-            keep_flash(emulator, build, mcu.keep_flash, kept);
+            // (not for your own firmware, which has none to keep)
+            if(mcu.keep_flash) keep_flash(emulator, build, mcu.keep_flash, kept);
         }
         else
         {
@@ -932,6 +947,32 @@ const UPLOAD_BOARDS = {
     osillyscope: "osillyscope: SSD1306 OLED bit-banged on PA1 and PA2, input on PD5 (ADC channel 5), three buttons",
 };
 const UPLOAD_FLASH = 16384;
+// Firmware to try on each board, as [name, URL, what it is]: Stefan Wagner's
+// own builds of his games, from his repository, and ours of ch32fun's
+// examples and the other boards' firmware (tools/ch32v003-examples, built
+// by its build.sh), which this site serves
+const WAGIMINATOR = "https://raw.githubusercontent.com/wagiminator/CH32V003-GameConsole/main/software/";
+const OUR_EXAMPLES = "examples/";
+const UPLOAD_EXAMPLES = {
+    ch32v003: [
+        ["Tetris", OUR_EXAMPLES + "tetris.elf", "this site's, no SDK"],
+        ...[["debugprintfdemo", "printf through the debug interface"], ["uartdemo", "printf through USART1"],
+            ["systick_irq", "SysTick interrupts"], ["template", "ch32fun's project template"],
+            ["random_numbers", "a random number generator"], ["flashtest", "erases and writes its flash"],
+            ["hsitrim", "the internal oscillator's trim"], ["optiondata", "a boot count in the option bytes"],
+            ["tim1_pwm", "TIM1's PWM, not modelled yet"]]
+            .map(([name, about]) => [name, `${OUR_EXAMPLES}${name}.elf`, "ch32fun's example: " + about]),
+    ],
+    gameconsole: [
+        ...[["Tiny Arkanoid", "arkanoid"], ["Tiny Boulder", "boulder"], ["Tiny Bubble", "bubble"], ["Tiny Conway", "conway"],
+            ["Tiny Doom", "doom"], ["Tiny Invaders", "invaders"], ["Tiny Karate", "karate"], ["Tiny Lander", "lander"],
+            ["Tiny Pacman", "pacman"], ["Tiny Run", "run"], ["Tiny Shooter", "shooter"], ["Tiny Tris", "tris"]]
+            .map(([name, id]) => [name, `${WAGIMINATOR}tiny_${id}/bin/tiny_${id}.hex`, "Stefan Wagner's .hex"]),
+        ["i2c_oled", OUR_EXAMPLES + "i2c_oled.elf", "ch32fun's example: the OLED's test patterns"],
+    ],
+    minigameconsole: [["Mini Game Console", OUR_EXAMPLES + "minigameconsole.elf", "Maksym Curul's firmware, built here"]],
+    osillyscope: [["osillyscope", OUR_EXAMPLES + "osillyscope.elf", "Vlad Tomoiagă's firmware, built here"]],
+};
 
 async function start_upload(params, manifest, status)
 {
@@ -962,6 +1003,16 @@ async function start_upload(params, manifest, status)
         params.set("board", board_select.value);
         reload();
     };
+    const url_input = document.getElementById("upload-url");
+    if(url) url_input.value = url;
+    document.getElementById("upload-url-form").onsubmit = e =>
+    {
+        e.preventDefault();
+        params.set("firmware", url_input.value.trim());
+        params.set("board", board_select.value);
+        reload();
+    };
+    show_examples(board, url);
     const take = async file =>
     {
         let fw;
@@ -1033,6 +1084,7 @@ async function start_upload(params, manifest, status)
         note.textContent = "No firmware yet. Pick one, or drop it here.";
         return;
     }
+    document.getElementById("upload-examples").open = false;
     note.textContent = `Running ${fw.name} (${fw.flash.length.toLocaleString("en")} bytes)` +
         (fw.from ? ", from " + fw.from : "") + ". Pick another file to replace it.";
     const build = {
@@ -1052,6 +1104,39 @@ async function start_upload(params, manifest, status)
     const gdb_build = params.has("debug") && manifest.builds.find(b => b.web_app === "gdb-wui");
     start_mcu(build, "", status, gdb_build || null, manifest);
     watch_unmodelled();
+}
+
+// The examples for a board: each runs from its link, or with the debugger
+function show_examples(board, current)
+{
+    const box = document.getElementById("upload-examples");
+    const list = box.querySelector("ul");
+    const examples = UPLOAD_EXAMPLES[board] || [];
+    box.hidden = !examples.length;
+    box.querySelector("summary").textContent = `Examples for this board (${examples.length})`;
+    // (open until there's firmware running, which start_upload closes it for)
+    box.open = true;
+    list.replaceChildren(...examples.map(([name, url, about]) =>
+    {
+        const li = document.createElement("li");
+        const link = debug =>
+        {
+            const p = new URLSearchParams({ build: "upload", board, firmware: url });
+            const a = document.createElement("a");
+            a.href = "?" + p + (debug ? "&debug" : "");
+            return a;
+        };
+        const run = link(false);
+        run.textContent = name;
+        if(url === current) run.style.fontWeight = "600";
+        const debug = link(true);
+        debug.textContent = "debug";
+        const note = document.createElement("span");
+        note.className = "m";
+        note.textContent = about ? ` ${about}, ` : " ";
+        li.append(run, note, debug);
+        return li;
+    }));
 }
 
 // A board's description for your own firmware: its hardware, but the clock

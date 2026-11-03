@@ -48,7 +48,10 @@ Your own firmware runs there too:
 a `.bin`, Intel `.hex` or `.elf` (kept in your browser, not uploaded), or
 `&firmware=<url>` fetches one (from a server that allows it, such as
 raw.githubusercontent.com), on a board like one of the above (`&board=`
-`ch32v003`, `gameconsole`, `minigameconsole` or `osillyscope`). ch32fun's
+`ch32v003`, `gameconsole`, `minigameconsole` or `osillyscope`), or a URL
+pasted into the page. Each board has examples to try: Stefan Wagner's own
+builds of his games, and ours of ch32fun's examples and the other boards'
+firmware ([tools/ch32v003-examples](../ch32v003-examples)). ch32fun's
 printf goes to the serial console. The page lists what the firmware uses
 that isn't modelled (e.g. TIM1, EXTI). With `&debug`, gdb-wui gets the
 firmware as an ELF: yours, with its symbols, or a `.bin` or `.hex` wrapped
