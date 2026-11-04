@@ -74,6 +74,8 @@ else
 fi
 
 cp "$HERE/S95gdb-wui" "$OVERLAY/etc/init.d/"
+mkdir -p "$OVERLAY/usr/libexec/gdb-wui"
+cp "$HERE/gdb-shell" "$HERE/mcu-files" "$OVERLAY/usr/libexec/gdb-wui/"
 cat > "$OVERLAY/etc/motd" <<'EOF'
 gdb-wui is running on this machine: its window is next to this console.
 Its project is /root/demo: gdb-wui's example programs, with their sources,

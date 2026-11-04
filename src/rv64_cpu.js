@@ -658,6 +658,13 @@ RV64CPU.prototype.gdb_input = function(data)
         new Uint8Array(this.wasm_memory.buffer, ptr, chunk.length).set(chunk);
         this.wasm["rv64_gdb_input"](chunk.length);
     }
+    if(this.wasm["rv64_gdb_reset_pending"]())
+    {
+        // `monitor reset`: done before gdb has the reply, so that what it
+        // asks next (the registers, after `monitor reset halt`) is the new
+        // machine's
+        this.reboot_internal();
+    }
     this.gdb_flush();
     // It may have resumed the hart
     this.stop_idling();

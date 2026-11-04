@@ -1,0 +1,17 @@
+#!/bin/sh
+# gdb-shell GDB_SCRIPT COMMAND...: runs COMMAND and writes its output (stdout
+# and stderr) to GDB_SCRIPT as gdb "echo" commands, then exits with its
+# status. For gdb under gdb-wui, whose "shell" output goes to gdb's own
+# stdout, the MI channel, which shows only MI records: S95gdb-wui's
+# "rebuild" runs the build with it, then sources GDB_SCRIPT, whose echoes
+# reach gdb's console.
+out=$1
+shift
+log=$out.log
+"$@" > "$log" 2>&1
+status=$?
+# (echo takes C escapes and drops leading blanks: backslashes doubled,
+# leading blanks octal)
+sed -e 's/\\/\\\\/g' -e ':a' -e 's/^\(\(\\040\)*\) /\1\\040/' -e 'ta' -e 's/^/echo /' -e 's/$/\\n/' "$log" > "$out"
+rm -f "$log"
+exit $status

@@ -35,6 +35,8 @@ main { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
 #debug-console { flex-basis: 100%; }
 #debug-console[hidden] { display: none; }
 #debug-console summary { color: var(--muted); cursor: pointer; }
+#debug-save button { padding: 3px 10px; margin: 2px 0; }
+#debug-save-status { color: var(--muted); }
 #debug-terminal { padding: 4px; background: #000; margin-top: 6px; overflow-x: auto; }
 #mcu-debug { margin: 0 0 12px; }
 #debug-arch { flex-basis: 100%; max-width: 900px; }
@@ -347,8 +349,8 @@ code { color: var(--fg); }
       <text class="h" x="474" y="128">gdb</text>
       <text x="474" y="148">firmware ELF</text>
       <text x="474" y="166">and sources</text>
-      <text class="m" x="474" y="190">riscv:rv32,</text>
-      <text class="m" x="474" y="208">DWARF</text>
+      <text class="m" x="474" y="190">rv32, DWARF;</text>
+      <text class="m" x="474" y="208">rebuild: GCC</text>
       <text class="l" x="432" y="152" text-anchor="middle">GDB/MI</text>
       <line class="link" x1="404" y1="166" x2="460" y2="166" marker-start="url(#arr)" marker-end="url(#arr)"/>
 
@@ -403,6 +405,14 @@ code { color: var(--fg); }
   </details>
   <details id="debug-console" hidden>
     <summary>gdb-wui's Linux machine: its console</summary>
+    <p id="debug-rebuild" hidden></p>
+    <p id="debug-save" hidden>Save your changes to your computer:
+      <button data-save="sources">Sources (.zip)</button>
+      &nbsp;the firmware as last built:
+      <button data-save="elf">.elf</button> <button data-save="bin">.bin</button> <button data-save="hex">.hex</button>
+      <br>Continue from sources you saved: <button id="debug-load">Load sources (.zip)</button>
+      <input type="file" id="debug-load-file" accept=".zip,application/zip" hidden>
+      <span id="debug-save-status"></span></p>
     <div id="debug-terminal"></div>
   </details>
 </main>
@@ -1514,6 +1524,299 @@ function from_base64(text)
     return Uint8Array.from(atob(text), c => c.charCodeAt(0));
 }
 
+// The firmware gdb-wui's machine can rebuild (build.debug: its file to edit,
+// under /root/mcu/<debug>; tools/rv64-gdb/build.sh puts a build script there)
+const REBUILDABLE = { tetris: "tetris.c", basic: "ch32v003-basic/basic.c" };
+
+// The debug page's "Save your changes" buttons, for firmware the gdb-wui
+// machine rebuilds: its port MCU_FILES_PORT (S95gdb-wui, mcu-files) sends
+// the firmware's directory as a tar, saved as a .zip, or its last build
+const MCU_FILES_PORT = 84;
+function offer_saving(vm, name)
+{
+    const status = document.getElementById("debug-save-status");
+    const save = (bytes, file, type) =>
+    {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([bytes], { type }));
+        a.download = file;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    };
+    for(const button of document.querySelectorAll("#debug-save button[data-save]"))
+    {
+        button.onclick = async () =>
+        {
+            const what = button.dataset.save;
+            if(!vm.network_adapter)
+            {
+                status.textContent = "The Linux machine is still starting";
+                return;
+            }
+            status.textContent = "Fetching from the Linux machine …";
+            try
+            {
+                const bytes = await guest_request(vm.network_adapter, MCU_FILES_PORT, what);
+                if(!bytes.length) throw new Error("nothing came back (has it booted?)");
+                if(what === "sources")
+                {
+                    const files = untar(bytes);
+                    save(zip(files), name + ".zip", "application/zip");
+                    status.textContent = `Saved ${name}.zip (${files.filter(f => !f.dir).length} files)`;
+                }
+                else
+                {
+                    save(bytes, name + "." + what, "application/octet-stream");
+                    status.textContent = `Saved ${name}.${what} (${bytes.length} bytes)`;
+                }
+            }
+            catch(e)
+            {
+                status.textContent = "Couldn't save: " + e.message;
+            }
+        };
+    }
+    // Loading them back: the .zip's files go into /root/mcu/NAME (as a tar,
+    // over what is there), for gdb's "rebuild"
+    const input = document.getElementById("debug-load-file");
+    document.getElementById("debug-load").onclick = () => input.click();
+    input.onchange = async () =>
+    {
+        const file = input.files[0];
+        input.value = "";
+        if(!file) return;
+        if(!vm.network_adapter)
+        {
+            status.textContent = "The Linux machine is still starting";
+            return;
+        }
+        status.textContent = `Loading ${file.name} …`;
+        try
+        {
+            if(file.size > 16 << 20) throw new Error("it is over 16 MB");
+            const files = sources_from_zip(await unzip(new Uint8Array(await file.arrayBuffer())));
+            if(!files.some(f => !f.dir)) throw new Error("it has no files");
+            const archive = tar(files);
+            const answer = new TextDecoder().decode(
+                await guest_request(vm.network_adapter, MCU_FILES_PORT, "put " + archive.length, 60000, archive));
+            if(!/(^|\n)ok\n$/.test(answer))
+                throw new Error(answer.trim().split("\n").pop() || "no answer (has it booted?)");
+            const n = files.filter(f => !f.dir).length;
+            status.textContent = `Loaded ${n} file${n === 1 ? "" : "s"} into /root/mcu/${name}: ` +
+                `type rebuild in gdb-wui's console to build and run them`;
+        }
+        catch(e)
+        {
+            status.textContent = `Couldn't load ${file.name}: ` + e.message;
+        }
+    };
+    document.getElementById("debug-save").hidden = false;
+}
+
+// A .zip's entries: [{ name, data, mtime (s), mode, dir }], stored or
+// deflated (DecompressionStream), from its central directory
+async function unzip(bytes)
+{
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let end = -1;
+    for(let at = bytes.length - 22; at >= Math.max(0, bytes.length - 22 - 0xffff); at--)
+    {
+        if(view.getUint32(at, true) === 0x06054b50) { end = at; break; }
+    }
+    if(end < 0) throw new Error("it isn't a .zip");
+    const count = view.getUint16(end + 10, true);
+    let at = view.getUint32(end + 16, true);
+    const files = [];
+    for(let i = 0; i < count; i++)
+    {
+        if(at + 46 > bytes.length || view.getUint32(at, true) !== 0x02014b50) throw new Error("its directory is damaged");
+        const made_by = view.getUint8(at + 5);
+        const method = view.getUint16(at + 10, true);
+        const time = view.getUint16(at + 12, true), date = view.getUint16(at + 14, true);
+        const csize = view.getUint32(at + 20, true);
+        const name_len = view.getUint16(at + 28, true);
+        const extra_len = view.getUint16(at + 30, true), comment_len = view.getUint16(at + 32, true);
+        const attrs = view.getUint32(at + 38, true);
+        const local = view.getUint32(at + 42, true);
+        const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + name_len));
+        at += 46 + name_len + extra_len + comment_len;
+        const dir = name.endsWith("/");
+        const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+        const raw = bytes.subarray(start, start + csize);
+        let data;
+        if(dir) data = new Uint8Array(0);
+        else if(method === 0) data = raw.slice();
+        else if(method === 8)
+        {
+            const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+            data = new Uint8Array(await new Response(stream).arrayBuffer());
+        }
+        else throw new Error(`${name} is compressed in a way the page can't read (method ${method})`);
+        const mtime = new Date(1980 + (date >> 9), ((date >> 5) & 15) - 1, date & 31,
+            time >> 11, (time >> 5) & 63, (time & 31) * 2).getTime() / 1000;
+        // (Unix permissions, if a Unix program made it)
+        const mode = made_by === 3 && attrs >>> 16 ? (attrs >>> 16) & 0o777 : 0;
+        files.push({ name: name.replace(/\/$/, ""), data, mtime, mode, dir });
+    }
+    return files;
+}
+
+// The files of a saved .zip, as they go into the firmware's directory:
+// without the folder they were saved in (if they all are in one), and only
+// names inside it
+function sources_from_zip(files)
+{
+    files = files.filter(f => !/(^|\/)(__MACOSX|\.DS_Store)(\/|$)/.test(f.name));
+    for(const f of files)
+    {
+        if(f.name.startsWith("/") || f.name.split("/").some(part => part === ".." || part === ""))
+            throw new Error(`it names ${f.name}, outside its folder`);
+    }
+    const top = files.length && files[0].name.split("/")[0];
+    if(top && files.every(f => f.name === top ? f.dir : f.name.startsWith(top + "/")))
+    {
+        files = files.filter(f => f.name !== top).map(f => ({ ...f, name: f.name.slice(top.length + 1) }));
+    }
+    // (the build script stays a program, whatever made the .zip)
+    return files.map(f => ({ ...f, mode: f.mode || (f.dir || f.name === "build" ? 0o755 : 0o644) }));
+}
+
+// A tar (ustar) of those files
+function tar(files)
+{
+    const blocks = [];
+    for(const f of files)
+    {
+        const header = new Uint8Array(512);
+        const put = (at, len, text) => header.set(new TextEncoder().encode(text).subarray(0, len), at);
+        const octal = (at, len, n) => put(at, len, n.toString(8).padStart(len - 1, "0"));
+        let name = f.name + (f.dir ? "/" : ""), prefix = "";
+        if(new TextEncoder().encode(name).length > 100)
+        {
+            const cut = name.lastIndexOf("/", name.length - 2);
+            prefix = name.slice(0, cut);
+            name = name.slice(cut + 1);
+            if(cut < 0 || new TextEncoder().encode(name).length > 100 || new TextEncoder().encode(prefix).length > 155)
+                throw new Error(`the name ${f.name} is too long`);
+        }
+        const data = f.dir ? new Uint8Array(0) : f.data;
+        put(0, 100, name);
+        octal(100, 8, f.mode);
+        octal(108, 8, 0);
+        octal(116, 8, 0);
+        octal(124, 12, data.length);
+        octal(136, 12, Math.max(0, Math.floor(f.mtime || 0)));
+        put(148, 8, "        ");
+        header[156] = f.dir ? 0x35 : 0x30;
+        put(257, 8, "ustar\x0000");
+        put(345, 155, prefix);
+        octal(148, 7, header.reduce((n, b) => n + b, 0));
+        blocks.push(header, data, new Uint8Array((512 - data.length % 512) % 512));
+    }
+    blocks.push(new Uint8Array(1024));
+    const out = new Uint8Array(blocks.reduce((n, b) => n + b.length, 0));
+    let at = 0;
+    for(const b of blocks) { out.set(b, at); at += b.length; }
+    return out;
+}
+
+// A tar's files: [{ name, data, mtime (s), dir }] (ustar, as busybox writes)
+function untar(bytes)
+{
+    const text = (at, len) =>
+    {
+        let end = at;
+        while(end < at + len && bytes[end]) end++;
+        return new TextDecoder().decode(bytes.subarray(at, end));
+    };
+    const files = [];
+    for(let at = 0; at + 512 <= bytes.length;)
+    {
+        const name = text(at, 100);
+        if(!name) break;
+        const prefix = text(at + 345, 155);
+        const size = parseInt(text(at + 124, 12).trim() || "0", 8);
+        const mtime = parseInt(text(at + 136, 12).trim() || "0", 8);
+        const type = String.fromCharCode(bytes[at + 156] || 48);
+        const full = (prefix ? prefix + "/" : "") + name;
+        at += 512;
+        if(type === "0" || type === "5")
+        {
+            files.push({ name: full, data: bytes.slice(at, at + size), mtime, dir: type === "5" });
+        }
+        at += Math.ceil(size / 512) * 512;
+    }
+    return files;
+}
+
+// A .zip of those files, stored (uncompressed)
+function zip(files)
+{
+    const crc_table = new Uint32Array(256).map((_, n) =>
+    {
+        for(let k = 0; k < 8; k++) n = n & 1 ? 0xedb88320 ^ (n >>> 1) : n >>> 1;
+        return n;
+    });
+    const crc32 = data =>
+    {
+        let c = 0xffffffff;
+        for(const b of data) c = crc_table[(c ^ b) & 0xff] ^ (c >>> 8);
+        return (c ^ 0xffffffff) >>> 0;
+    };
+    const dos_time = secs =>
+    {
+        const d = new Date(Math.max(secs, 315532800) * 1000);
+        return [(d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+            ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()];
+    };
+    const parts = [], central = [];
+    let offset = 0;
+    for(const f of files)
+    {
+        const name = new TextEncoder().encode(f.dir ? f.name.replace(/\/?$/, "/") : f.name);
+        const data = f.dir ? new Uint8Array(0) : f.data;
+        const crc = crc32(data);
+        const [time, date] = dos_time(f.mtime);
+        const local = new DataView(new ArrayBuffer(30));
+        local.setUint32(0, 0x04034b50, true);
+        local.setUint16(4, 10, true);
+        local.setUint16(10, time, true);
+        local.setUint16(12, date, true);
+        local.setUint32(14, crc, true);
+        local.setUint32(18, data.length, true);
+        local.setUint32(22, data.length, true);
+        local.setUint16(26, name.length, true);
+        const entry = new DataView(new ArrayBuffer(46));
+        entry.setUint32(0, 0x02014b50, true);
+        entry.setUint16(4, 0x031e, true);
+        entry.setUint16(6, 10, true);
+        entry.setUint16(12, time, true);
+        entry.setUint16(14, date, true);
+        entry.setUint32(16, crc, true);
+        entry.setUint32(20, data.length, true);
+        entry.setUint32(24, data.length, true);
+        entry.setUint16(28, name.length, true);
+        // (Unix permissions: rwx for directories and the build script)
+        entry.setUint32(38, ((f.dir ? 0o40755 : /(^|\/)build$/.test(f.name) ? 0o100755 : 0o100644) << 16) | (f.dir ? 0x10 : 0), true);
+        entry.setUint32(42, offset, true);
+        parts.push(new Uint8Array(local.buffer), name, data);
+        central.push(new Uint8Array(entry.buffer), name);
+        offset += 30 + name.length + data.length;
+    }
+    const size = central.reduce((n, p) => n + p.length, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, files.length, true);
+    end.setUint16(10, files.length, true);
+    end.setUint32(12, size, true);
+    end.setUint32(16, offset, true);
+    const all = [...parts, ...central, new Uint8Array(end.buffer)];
+    const out = new Uint8Array(all.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for(const p of all) { out.set(p, at); at += p.length; }
+    return out;
+}
+
 // Debugging the firmware with gdb-wui (?debug, for builds with "debug": the
 // name of its project in the gdb-wui image, /root/mcu/<debug>, with its ELF
 // and sources; tools/rv64-gdb/build.sh). gdb-wui's Linux machine, the gdb-wui
@@ -1560,6 +1863,25 @@ function setup_debugging(emulator, build, status, gdb_build, manifest)
     status.textContent = "Held at reset until gdb-wui connects: its machine is starting";
     let started = false;
     document.getElementById("debug-console").hidden = false;
+    // Firmware whose sources the gdb-wui machine can rebuild, with its own
+    // GCC (S95gdb-wui's "rebuild"): the file to edit
+    const source = REBUILDABLE[build.debug];
+    if(source)
+    {
+        const dir = "/root/mcu/" + build.debug;
+        const p = document.getElementById("debug-rebuild");
+        p.innerHTML = `Change the firmware: log in as <code>root</code> here, edit its source, e.g. ` +
+            `<code>nano ${dir}/${source}</code> (or <code>vi</code>), save, then type <code>rebuild</code> in ` +
+            `gdb-wui's console. That compiles it here with GCC (<code>${dir}/build</code>; ` +
+            `the first build takes longer, as the compiler downloads), flashes it into the CH32V003 ` +
+            `and resets it, halted: continue to run it. The changes last until you leave the page, ` +
+            `so save them below: the sources (with their build script; load them back here another time ` +
+            `to continue), and the firmware, ` +
+            `which <a href="?build=upload">Run your own CH32V003 firmware</a> runs, or for a real CH32V003 ` +
+            `(e.g. minichlink flashes the .bin).`;
+        p.hidden = false;
+        document.getElementById("debug-console").open = true;
+    }
     const web_status = document.getElementById("web-status");
     (async () =>
     {
@@ -1571,6 +1893,7 @@ function setup_debugging(emulator, build, status, gdb_build, manifest)
         const vm = window.debugger_emulator =
             start_linux(gdb_build, kernel, document.getElementById("debug-terminal"),
                 "gdb_wui.mcu=" + build.debug + (build.program ? " gdb_wui.exe=" + build.program.name : ""));
+        if(source) offer_saving(vm, build.debug);
         await start_guest_web(vm, gdb_build, {
             files: build.program ? [{ port: UPLOAD_FILE_PORT, bytes: build.program.bytes }] : [],
             gdb_stub: {

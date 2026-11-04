@@ -607,6 +607,37 @@ function guest_read_port(adapter, port)
     });
 }
 
+// Asks the guest's server on a port for something with a line (and body,
+// bytes after it, if given), and resolves
+// to all it sends back (bytes) before it closes the connection
+function guest_request(adapter, port, line, timeout = 60000, body = null)
+{
+    return new Promise((resolve, reject) =>
+    {
+        const chunks = [];
+        let done = false;
+        const conn = adapter.connect(port);
+        const timer = setTimeout(() => finish(new Error(`no answer on the guest's port ${port}`)), timeout);
+        function finish(error)
+        {
+            if(done) return;
+            done = true;
+            clearTimeout(timer);
+            conn.close();
+            if(error) reject(error);
+            else resolve(concat(chunks));
+        }
+        conn.on("connect", () =>
+        {
+            conn.write(new TextEncoder().encode(line + "\n"));
+            if(body) conn.write(body);
+        });
+        conn.on("data", d => chunks.push(d.slice()));
+        conn.on("shutdown", () => finish());
+        conn.on("close", () => chunks.length ? finish() : finish(new Error(`nothing from the guest's port ${port}`)));
+    });
+}
+
 // kuna, the decompiler gdb-wui in the guest uses when told to (gdb-wui -kuna
 // tcp:HOST:PORT; its internal/ghidra/kuna.go has the protocol): the guest
 // connects to this page on the port, and the page runs kuna as WebAssembly in

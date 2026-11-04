@@ -19,7 +19,9 @@
 # tools/ch32v003-basic/build.sh (Tiny BASIC),
 # tools/ch32v003-gameconsole/build.sh (the game console's games),
 # tools/ch32v003-minigameconsole/build.sh (the mini game console's firmware)
-# and tools/ch32v003-osillyscope/build.sh (the oscilloscope's).
+# and tools/ch32v003-osillyscope/build.sh (the oscilloscope's). Tetris and
+# Tiny BASIC also get a build script there, for gdb's "rebuild", with GCC
+# and binutils that run in the guest: tools/rv64-gcc/build.sh first.
 #
 # Output: build/rv64-gdb/rootfs.squashfs, for
 #   tools/rv64-site/add-image.sh with WEB=/gdb-wui/ (see that script).
@@ -56,13 +58,17 @@ OVERLAY=$OUT/overlay
 # The firmware for the microcontroller pages' debugger (S95gdb-wui, gdb_wui.mcu)
 MCU=$OVERLAY/root/mcu
 mkdir -p "$MCU/tetris"
-cp build/ch32v003/tetris.elf tools/ch32v003/tetris.c tools/ch32v003/start.S tools/ch32v003/libgcc.c tools/ch32v003/link.ld "$MCU/tetris/"
+cp build/ch32v003/tetris.elf tools/ch32v003/tetris.c tools/ch32v003/start.S tools/ch32v003/libgcc.c tools/ch32v003/link.ld \
+    tools/ch32v003/ch32v003.h "$MCU/tetris/"
+# (and how to rebuild it there: gdb's "rebuild", S95gdb-wui)
+cp tools/ch32v003/guest-build "$MCU/tetris/build"
 # Tiny BASIC: its sources and tools/ch32v003's, as the ELF names them
 [ -f build/ch32v003-basic/basic.elf ] || { echo "no Tiny BASIC ELF: run tools/ch32v003-basic/build.sh" >&2; exit 1; }
 mkdir -p "$MCU/basic/ch32v003" "$MCU/basic/ch32v003-basic"
 cp build/ch32v003-basic/basic.elf "$MCU/basic/"
 cp tools/ch32v003-basic/basic.c "$MCU/basic/ch32v003-basic/"
 cp tools/ch32v003/start.S tools/ch32v003/libgcc.c tools/ch32v003/ch32v003.h tools/ch32v003/link.ld "$MCU/basic/ch32v003/"
+cp tools/ch32v003-basic/guest-build "$MCU/basic/build"
 for dir in build/ch32v003-gameconsole/src/software/*/; do
     game=$(basename "$dir")
     # (the games the script builds; not the calibrator)
@@ -97,13 +103,18 @@ if grep -rlI /home/ "$MCU" || grep -rl --binary-files=binary "$HOME" "$MCU"; the
     exit 1
 fi
 
+# GCC and binutils that run here (tools/rv64-gcc/build.sh), to rebuild the
+# firmware with
+[ -x build/rv64-gcc/root/usr/bin/gcc ] || { echo "no native GCC: run tools/rv64-gcc/build.sh" >&2; exit 1; }
+cp -a build/rv64-gcc/root/. "$OVERLAY/"
+
 CONFIG=$TREE/out/.config
 cp "$PWD/tools/gdb-wui-guest/post-build.sh" "$OUT/post-build.sh"
 POST_BUILD="$TREE/brss-post-build.sh $OUT/post-build.sh"
 # expat: gdb's XML support, for the target descriptions stubs send (the
 # microcontrollers' says which registers RV32E has)
-sed -i -e '/BR2_PACKAGE_GDB_DEBUGGER[ =]/d' -e '/BR2_PACKAGE_EXPAT[ =]/d' -e '/^BR2_ROOTFS_OVERLAY=/d' -e '/^BR2_ROOTFS_POST_BUILD_SCRIPT=/d' "$CONFIG"
-printf 'BR2_PACKAGE_GDB_DEBUGGER=y\nBR2_PACKAGE_EXPAT=y\nBR2_ROOTFS_OVERLAY="%s"\nBR2_ROOTFS_POST_BUILD_SCRIPT="%s"\n' "$OVERLAY" "$POST_BUILD" >> "$CONFIG"
+sed -i -e '/BR2_PACKAGE_GDB_DEBUGGER[ =]/d' -e '/BR2_PACKAGE_EXPAT[ =]/d' -e '/BR2_PACKAGE_NANO[ =]/d' -e '/^BR2_ROOTFS_OVERLAY=/d' -e '/^BR2_ROOTFS_POST_BUILD_SCRIPT=/d' "$CONFIG"
+printf 'BR2_PACKAGE_GDB_DEBUGGER=y\nBR2_PACKAGE_EXPAT=y\nBR2_PACKAGE_NANO=y\nBR2_ROOTFS_OVERLAY="%s"\nBR2_ROOTFS_POST_BUILD_SCRIPT="%s"\n' "$OVERLAY" "$POST_BUILD" >> "$CONFIG"
 
 # gdb was built for gdbserver alone, and a config change doesn't rebuild it:
 # gdb-dirclean while the target has no gdb, or one without XML support

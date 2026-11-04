@@ -9,6 +9,8 @@
 # but that page can reach.
 # Port 81: a fresh single-use login link (gdb-wui -print-url) per connection,
 # which the page reads before loading the UI.
+# Port 84, for firmware gdb's "rebuild" can rebuild (below): its sources
+# and its last build, for the page to save (mcu-files).
 
 export HOME=/root XDG_RUNTIME_DIR=/run/gdb-wui
 # The programs' decompilations, written where the image was built
@@ -60,7 +62,45 @@ if [ -n "$MCU" ]; then
 		fi
 	fi
 fi
-export PROJECT MCU TARGET EXE
+# Firmware with a build script here (/root/mcu/NAME/build, which compiles
+# its sources with this machine's GCC): gdb's "rebuild" command runs it,
+# then loads the new ELF's symbols, writes it into the microcontroller's
+# flash through the stub (load) and resets it, halted at its reset vector
+# (the stub's reset keeps the flash as it is). gdb-shell relays the build's
+# output to gdb's console.
+REBUILD=
+if [ -n "$TARGET" ] && [ -n "$EXE" ] && [ -x "$PROJECT/build" ]; then
+	# (the root file system is read-only: a copy in memory, at the same
+	# path, which the debug info names, to edit and build in)
+	if [ "$1" = start ] && ! grep -q " $PROJECT " /proc/mounts; then
+		mkdir -p /run/mcu
+		cp -a "$PROJECT" /run/mcu/ && mount --bind "/run/mcu/$MCU" "$PROJECT"
+	fi
+	REBUILD=$XDG_RUNTIME_DIR/rebuild.gdb
+	mkdir -p -m 0700 "$XDG_RUNTIME_DIR"
+	cat > "$REBUILD" <<-EOF
+	define rebuild
+	  shell /usr/libexec/gdb-wui/gdb-shell $XDG_RUNTIME_DIR/build.gdb $PROJECT/build
+	  source $XDG_RUNTIME_DIR/build.gdb
+	  if \$_shell_exitcode == 0
+	    set confirm off
+	    file $PROJECT/$EXE
+	    load
+	    monitor reset halt
+	    flushregs
+	    set confirm on
+	    echo Rebuilt, flashed and reset: continue to run it.\\n
+	  else
+	    echo The build failed: the microcontroller still has the old firmware.\\n
+	  end
+	end
+	document rebuild
+	Rebuilds $EXE from the sources in $PROJECT ($PROJECT/build),
+	writes it into the microcontroller's flash and resets it, halted.
+	end
+	EOF
+fi
+export PROJECT MCU TARGET EXE REBUILD
 # gdb_wui.card10 on the kernel command line: the card10 badge's two cores,
 # each with its own debugger (tools/a64-site/index.html, ?build=card10&debug):
 # a gdb-wui for core 0 (Epicardium) on port 80 and one for core 1
@@ -97,14 +137,19 @@ start)
 	fi
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui.pid -x /bin/sh -- -c \
 		'exec /usr/bin/gdb-wui -addr 0.0.0.0:80 -listen-anywhere -open=false -no-config $START -project "$PROJECT" $SIDECARS $KUNA \
-			${EXE:+-exe "$EXE"} ${TARGET:+-gdb-command "$TARGET"} >/tmp/gdb-wui.log 2>&1'
+			${EXE:+-exe "$EXE"} ${TARGET:+-gdb-command "$TARGET"} ${REBUILD:+-gdb-command "source $REBUILD"} >/tmp/gdb-wui.log 2>&1'
 	start-stop-daemon -S -q -b -m -p /run/gdb-wui-url.pid -x /usr/bin/socat -- \
 		TCP-LISTEN:81,reuseaddr,fork SYSTEM:"/usr/bin/gdb-wui -print-url 2>/dev/null"
+	# (port 84: see above)
+	if [ -n "$REBUILD" ]; then
+		start-stop-daemon -S -q -b -m -p /run/mcu-files.pid -x /usr/bin/socat -- \
+			TCP-LISTEN:84,reuseaddr,fork EXEC:"/usr/libexec/gdb-wui/mcu-files $PROJECT $EXE"
+	fi
 	echo "OK"
 	;;
 stop)
 	printf "Stopping gdb-wui: "
-	for p in /run/gdb-wui-url.pid /run/gdb-wui.pid /run/gdb-wui-url-80.pid /run/gdb-wui-80.pid \
+	for p in /run/mcu-files.pid /run/gdb-wui-url.pid /run/gdb-wui.pid /run/gdb-wui-url-80.pid /run/gdb-wui-80.pid \
 		/run/gdb-wui-url-82.pid /run/gdb-wui-82.pid; do
 		[ -f "$p" ] && start-stop-daemon -K -q -p "$p"
 	done

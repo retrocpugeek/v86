@@ -1,0 +1,11 @@
+#!/bin/sh
+# Rebuilds basic.elf from the sources next to it, in the v86-riscv site's
+# gdb-wui image (/root/mcu/basic/build; tools/rv64-gdb/build.sh puts it
+# there), with the image's own GCC: as tools/ch32v003-basic/build.sh builds
+# it. gdb's "rebuild" runs it, then flashes the result into the CH32V003.
+set -e
+cd "$(dirname "$0")"
+"${CROSS:-}gcc" -march=rv32ec_zicsr -mabi=ilp32e -Os -g -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pie -no-pie -static \
+  -ffunction-sections -fdata-sections -Wall -Wextra -I ch32v003 \
+  -T ch32v003/link.ld -Wl,--gc-sections -o basic.elf ch32v003/start.S ch32v003-basic/basic.c ch32v003/libgcc.c
+"${CROSS:-}size" basic.elf
