@@ -17,6 +17,25 @@ redraws what changed.
 gdb-wui stopped at a breakpoint in `draw()`, next to the game
 ([screenshot](media/tetris-debug.png)).
 
+You can change it there too. The debugger's Linux machine has GCC
+(`tools/rv64-gcc`) and the sources in `/root/mcu/tetris`: log in to its
+console as `root`, edit `tetris.c` (`nano` or `vi`), then type `rebuild`
+in gdb-wui's console. It compiles the game there (`guest-build`, installed
+as `/root/mcu/tetris/build`), flashes it into the CH32V003 with gdb's
+`load` and resets it, halted, with the new symbols. Tiny BASIC
+(`/root/mcu/basic`) works the same way.
+
+The page's "Save your changes" buttons download the sources as a `.zip`
+(with the build script: `CROSS=riscv64-unknown-elf- ./build` builds them
+on your computer) and the firmware as last built, as `.elf`, `.bin` or
+`.hex`, which the site's
+[Run your own CH32V003 firmware](https://v86-riscv.turret13.workers.dev/?build=upload)
+page runs, or minichlink flashes to a real CH32V003. Without saving,
+changes are lost when you leave the page. "Load sources" takes such a
+`.zip` back (or any `.zip` of sources for that firmware, stored or
+deflated): its files go into `/root/mcu/NAME`, over what is there, and
+`rebuild` builds them.
+
 No SDK: `start.S` (reset entry), `link.ld`, `ch32v003.h` (the registers
 used) and `libgcc.c` (multiply, divide, memset, memcpy for RV32EC). The
 same image should run on a real CH32V003 with a USB-serial adapter on

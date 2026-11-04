@@ -1,0 +1,39 @@
+#!/bin/sh
+# mcu-files PROJECT EXE: the firmware being debugged, for the page to save
+# (tools/rv64-site/index.html, "Save your changes"): S95gdb-wui runs it for
+# each connection to port 84, and it answers one line,
+#   sources   a tar of PROJECT (/root/mcu/NAME: the sources, as edited, the
+#             build script and the last build), which the page saves as a .zip
+#   elf       the last build, EXE
+#   bin, hex  it as a flash image (objcopy), raw or Intel HEX
+#   put SIZE  followed by SIZE bytes, a tar (the page makes it from a .zip
+#             saved earlier, "Load sources"), extracted into PROJECT over
+#             what is there; it answers with the files' names and "ok", or
+#             "error: ..."
+project=$1
+exe=$project/$2
+read -r what
+case $what in
+put\ *)
+    size=${what#put }
+    case $size in '' | *[!0-9]*) echo "error: bad size"; exit 1 ;; esac
+    tmp=$(mktemp)
+    head -c "$size" > "$tmp"
+    if [ "$(wc -c < "$tmp")" -ne "$size" ]; then
+        echo "error: the upload was cut short"
+    # (the page made the tar with names inside PROJECT only, but check)
+    elif tar -tf "$tmp" | grep -q -e '^/' -e '\(^\|/\)\.\.\(/\|$\)'; then
+        echo "error: a name outside the project"
+    else
+        tar -C "$project" -xvf "$tmp" 2>&1 && echo ok || echo "error: tar couldn't extract it"
+    fi
+    rm -f "$tmp"
+    ;;
+sources) exec tar -C "$(dirname "$project")" -cf - "$(basename "$project")" ;;
+elf) exec cat "$exe" ;;
+bin | hex)
+    out=$(mktemp)
+    objcopy -O "$([ "$what" = bin ] && echo binary || echo ihex)" "$exe" "$out" && cat "$out"
+    rm -f "$out"
+    ;;
+esac

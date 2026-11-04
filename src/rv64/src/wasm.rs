@@ -128,14 +128,14 @@ pub extern "C" fn rv64_init_ch32(chip: u32, ptr: u32, len: u32, epoch_secs: f64)
     // A reset with a debugger attached keeps it, and its breakpoints
     #[allow(static_mut_refs)]
     let breakpoints = unsafe { CPU.as_deref_mut() }.map(|c| std::mem::take(&mut c.breakpoints)).unwrap_or_default();
+    // (and, as a reset does, the flash's contents: what the firmware saved
+    // there, e.g. high scores, or what gdb loaded, stays)
+    #[allow(static_mut_refs)]
+    let old_flash = unsafe { CPU.as_deref_mut() }.filter(|c| c.bus.ch32.is_some()).map(|c| std::mem::take(&mut c.bus.rom));
     unsafe {
         *addr_of_mut!(CPU) = None;
         *addr_of_mut!(IRQ_LINES) = [0; NUM_IRQ_LINES + 1];
     }
-    // (and, as a reset does, the flash's contents: what the firmware saved
-    // there, e.g. high scores, stays)
-    #[allow(static_mut_refs)]
-    let old_flash = unsafe { CPU.as_deref_mut() }.filter(|c| c.bus.ch32.is_some()).map(|c| std::mem::take(&mut c.bus.rom));
     let fw = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let out = Box::new(|b: u8| unsafe { rv64_serial_out(b as u32) });
     let chip = if chip == 1 { crate::dev::ch32::Chip::V307 } else { crate::dev::ch32::Chip::V003 };
@@ -196,6 +196,11 @@ pub extern "C" fn rv64_gdb_detach() {
 /// stands still.
 #[no_mangle]
 pub extern "C" fn rv64_gdb_halted() -> u32 { gdb().is_some_and(|g| g.mode == crate::gdb::Mode::Halted && g.reset.is_none()) as u32 }
+
+/// gdb asked for a reset (`monitor reset`), which JS does by rebuilding the
+/// machine (rv64_init_ch32), before gdb hears back.
+#[no_mangle]
+pub extern "C" fn rv64_gdb_reset_pending() -> u32 { gdb().is_some_and(|g| g.reset.is_some()) as u32 }
 
 /// Where JS puts gdb's bytes for rv64_gdb_input (4096 of them).
 #[no_mangle]
