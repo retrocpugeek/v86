@@ -232,7 +232,7 @@ code { color: var(--fg); }
     <h2 id="cores-title">Inside: Pycardium calling Epicardium</h2>
     <canvas id="cores-timeline" aria-label="A timeline of the two cores: how busy each is, the API calls from core 1 to core 0 and the interrupts back"></canvas>
     <div id="cores-stats">
-      <span>Core 1 (Pycardium) busy <b id="cores-load1">-</b></span>
+      <span><span id="cores-name1">Core 1 (Pycardium)</span> busy <b id="cores-load1">-</b></span>
       <span>Core 0 (Epicardium) busy <b id="cores-load0">-</b></span>
       <span>API calls <b id="cores-calls">-</b>/s</span>
       <span>Interrupts <b id="cores-ints">-</b>/s</span>
@@ -241,7 +241,7 @@ code { color: var(--fg); }
       <thead><tr><th>Busiest calls (last second)</th><th>Calls/s</th><th>Round trip</th></tr></thead>
       <tbody></tbody>
     </table>
-    <p id="cores-note">Every API call Pycardium (MicroPython, core 1) makes, Epicardium (FreeRTOS, core 0) runs for it:
+    <p id="cores-note">Every API call <span id="cores-note-name">Pycardium (MicroPython, core 1)</span> makes, Epicardium (FreeRTOS, core 0) runs for it:
       core 1 takes the hardware semaphore, writes the call's number and arguments into the memory both cores share,
       sets its flag and wakes core 0 with an event (SEV), then waits (WFE). Core 0's dispatcher task runs the call,
       writes the result, and wakes core 1 again. Between the cores, each call is a bar from when core 1 made it to
@@ -618,6 +618,8 @@ async function start_card10(build, base, status, manifest, params)
         document.getElementById("debug-core1-name").textContent = `Core 1 · ${CORE1.name} (${CORE1.os})`;
         document.getElementById("guest-web-core1").title = `gdb-wui for core 1 (${CORE1.name})`;
         document.getElementById("cores-title").textContent = `Inside: ${CORE1.name} calling Epicardium`;
+        document.getElementById("cores-name1").textContent = `Core 1 (${CORE1.name})`;
+        document.getElementById("cores-note-name").textContent = `${CORE1.name} (${CORE1.os}, core 1)`;
     }
     document.getElementById("linux-about").hidden = true;
     document.getElementById("card10").hidden = false;
