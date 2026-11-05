@@ -1642,10 +1642,14 @@ impl Card10 {
                     }
                     self.watch(t1);
                 }
-                // SEV wakes the other core's WFE
+                // SEV wakes the other core's WFE (which may have gone idle
+                // earlier in this round: it runs again before the machine
+                // counts as idle, or the host would skip time with an
+                // API call waiting)
                 if std::mem::take(&mut self.cores[c].sev) && self.gcr().tx_event(c) {
                     let o = &mut self.cores[1 - c];
                     o.event = true;
+                    idle[1 - c] = (1 - c == 1 && !self.core1_on) || self.halted(1 - c);
                 }
                 if stop == Stop::Breakpoint && mode == Some(Mode::Running) {
                     // the debugger's breakpoint: this core stops, the other runs on

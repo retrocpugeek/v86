@@ -253,8 +253,29 @@ fn main() {
         }
         let secs = m.now_ns() as f64 / 1e9;
         eprintln!("trace: core 0 awake {:.1} s, core 1 {:.1} s of {secs:.1} s", t.awake_ns[0] as f64 / 1e9, t.awake_ns[1] as f64 / 1e9);
+        // each call's round trip (from the call to its return): mean and most
+        let mut trips: std::collections::BTreeMap<u32, (u64, u64, u64)> = Default::default();
+        let mut start = None;
+        for &(at, kind, id) in &t.events {
+            match kind {
+                0 => start = Some((at, id)),
+                1 => {
+                    if let Some((t0, i)) = start.take().filter(|s| s.1 == id) {
+                        let e = trips.entry(i).or_default();
+                        e.0 += 1;
+                        e.1 += at - t0;
+                        e.2 = e.2.max(at - t0);
+                    }
+                }
+                _ => {}
+            }
+        }
         for ((kind, id), n) in counts {
-            eprintln!("trace: {} {id:#x}: {n}", ["call", "return", "interrupt"][kind as usize]);
+            let trip = match trips.get(&id) {
+                Some(&(k, sum, max)) if kind == 0 && k > 0 => format!(" (round trip mean {} us, most {} us)", sum / k / 1000, max / 1000),
+                _ => String::new(),
+            };
+            eprintln!("trace: {} {id:#x}: {n}{trip}", ["call", "return", "interrupt"][kind as usize]);
         }
     }
     if let Ok(a) = std::env::var("CARD10_PEEK") {
