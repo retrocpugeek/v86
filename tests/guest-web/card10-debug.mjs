@@ -13,6 +13,10 @@
 //
 //   SITE=http://localhost:8788 node tests/guest-web/card10-debug.mjs [screenshot-prefix]
 //
+// BUILD=card10-ctk CALL=epic_buttons_read CALLER=poll_buttons: the same
+// with Contiki's desktop on core 1 (a native app, whose symbols core 1's gdb
+// also has: S95gdb-wui), stopping in its call from CALLER.
+//
 // Needs google-chrome and the site (npx wrangler dev --config
 // tools/a64-site/wrangler.jsonc --port 8788) with the card10 and the gdb-wui
 // image built with its firmware (tools/a64-site/gdb-wui/build.sh).
@@ -22,6 +26,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const SITE = process.env.SITE || "http://localhost:8788";
+const BUILD = process.env.BUILD || "card10";
+const CALL = process.env.CALL || "epic_disp_update";
+const CALLER = process.env.CALLER || "";
 const OUT = process.argv[2];
 const PORT = +(process.env.PORT || 9367);
 const t0 = Date.now();
@@ -127,7 +134,7 @@ async function main()
 
     await send("Runtime.enable");
     await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 2400, deviceScaleFactor: 1, mobile: false });
-    await send("Page.navigate", { url: SITE + "/?build=card10&debug" });
+    await send("Page.navigate", { url: SITE + `/?build=${BUILD}&debug` });
 
     for(const n of [0, 1])
     {
@@ -144,15 +151,17 @@ async function main()
     await shot("attached");
 
     // The breakpoints, and both run
-    await type(1, "break epic_disp_update", "/Breakpoint 1 at/");
-    await type(0, "break epic_disp_update", "/Breakpoint 1 at/");
+    await type(1, `break ${CALL}`, "/Breakpoint 1 at/");
+    await type(0, `break ${CALL}`, "/Breakpoint 1 at/");
     await click(0, "btn-continue");
     await click(1, "btn-continue");
-    await until("stopped in Pycardium's epic_disp_update (the caller)", 1, `${stopped} && d.getElementById('stack').innerText.includes('epic_disp_update')`, 120);
-    console.log(`  core 1: ${await stack(1)}`);
+    await until(`stopped in core 1's ${CALL} (the caller)`, 1, `${stopped} && d.getElementById('stack').innerText.includes('${CALL}')`, 120);
+    const caller = await stack(1);
+    console.log(`  core 1: ${caller}`);
+    if(CALLER && !caller.includes(CALLER)) throw new Error(`core 1's stack hasn't ${CALLER}`);
     // core 1 makes the call: core 0 runs it
     await click(1, "btn-continue");
-    await until("stopped in Epicardium's epic_disp_update (the call)", 0, `${stopped} && /epic_disp_update/.test(d.getElementById('stack').innerText) && /dispatch/.test(d.getElementById('stack').innerText)`, 120);
+    await until(`stopped in Epicardium's ${CALL} (the call)`, 0, `${stopped} && /${CALL}/.test(d.getElementById('stack').innerText) && /dispatch/.test(d.getElementById('stack').innerText)`, 120);
     console.log(`  core 0: ${await stack(0)}`);
     // core 1, meanwhile, waits for the call to return
     await sleep(1500);

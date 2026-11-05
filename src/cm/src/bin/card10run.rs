@@ -13,7 +13,11 @@
 //!
 //! --keys presses buttons for 200 ms at the times (s) given: lb, rb, rt
 //! (left bottom, right bottom, right top) or lt (left top, the power
-//! button).
+//! button); NAME@S:HELD holds one for HELD seconds instead.
+//!
+//! --touch 'X,Y@S[:HELD],...' touches the touch panel (dev/max32665.rs,
+//! Ft6x36) at (X, Y), in its units (TOUCH_SCALE per pixel), for HELD
+//! seconds (default 0.2).
 //!
 //! CARD10_REGS=1 reports each peripheral register the firmware touches that
 //! nothing models (its first access); CARD10_DUMP=1 prints both cores'
@@ -35,7 +39,8 @@ fn usage() -> ! {
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut epi, mut py, mut flash, mut seconds, mut shot) = (None, None, None, 10.0f64, None::<String>);
-    let mut keys: Vec<(f64, u8)> = Vec::new();
+    let mut keys: Vec<(f64, u8, f64)> = Vec::new();
+    let mut touches: Vec<(f64, u32, u32, f64)> = Vec::new();
     let mut typed: Vec<(f64, Vec<u8>)> = Vec::new();
     let mut gdb_addr: [Option<String>; 2] = [None, None];
     while let Some(a) = args.next() {
@@ -81,7 +86,18 @@ fn main() {
                         "lt" => 8,
                         _ => usage(),
                     };
-                    keys.push((at.parse().unwrap_or_else(|_| usage()), b));
+                    let (at, held) = at.split_once(':').unwrap_or((at, "0.2"));
+                    keys.push((at.parse().unwrap_or_else(|_| usage()), b, held.parse().unwrap_or_else(|_| usage())));
+                }
+            }
+            "--touch" => {
+                for t in val().split(',').collect::<Vec<_>>().chunks(2) {
+                    // X,Y@S[:HELD]
+                    let [x, rest] = t else { usage() };
+                    let (y, at) = rest.split_once('@').unwrap_or_else(|| usage());
+                    let (at, held) = at.split_once(':').unwrap_or((at, "0.2"));
+                    let p = |v: &str| v.parse::<f64>().unwrap_or_else(|_| usage());
+                    touches.push((p(at), p(x) as u32, p(y) as u32, p(held)));
                 }
             }
             "--seconds" => seconds = val().parse().unwrap_or_else(|_| usage()),
@@ -119,17 +135,31 @@ fn main() {
     let mut conns: [Option<std::net::TcpStream>; 2] = [None, None];
     let debugging = listeners.iter().any(|l| l.is_some());
     let mut release: Option<f64> = None;
+    let mut lift: Option<(f64, u32, u32)> = None;
     while m.now_ns() < end_ns {
         let now_s = m.now_ns() as f64 / 1e9;
         if release.is_some_and(|t| now_s >= t) {
             m.set_buttons(0);
             release = None;
         }
-        if let Some(&(at, b)) = keys.first() {
+        if let Some(&(at, b, held)) = keys.first() {
             if now_s >= at {
                 keys.remove(0);
                 m.set_buttons(b);
-                release = Some(now_s + 0.2);
+                release = Some(now_s + held);
+            }
+        }
+        if let Some((t, x, y)) = lift {
+            if now_s >= t {
+                m.set_touch(false, x, y);
+                lift = None;
+            }
+        }
+        if let Some(&(at, x, y, held)) = touches.first() {
+            if now_s >= at {
+                touches.remove(0);
+                m.set_touch(true, x, y);
+                lift = Some((now_s + held, x, y));
             }
         }
         if let Some((at, _)) = typed.first() {

@@ -1,0 +1,109 @@
+diff --git a/epicardium/drivers/meson.build b/epicardium/drivers/meson.build
+index 3ad23678..90189bb9 100644
+--- a/epicardium/drivers/meson.build
++++ b/epicardium/drivers/meson.build
+@@ -11,6 +11,7 @@ driver_sources = files(
+   'pmic.c',
+   'rtc.c',
+   'serial.c',
++  'touch.c',
+   'sleep.c',
+   'rng.c',
+   'usb.c',
+diff --git a/epicardium/drivers/touch.c b/epicardium/drivers/touch.c
+new file mode 100644
+index 00000000..5bdf4d2e
+--- /dev/null
++++ b/epicardium/drivers/touch.c
+@@ -0,0 +1,39 @@
++/*
++ * A touch panel over the display (epic_touch_read, epicardium.h): an FT6x36
++ * controller on the badge's I2C bus. The v86 emulator's card10 has one; a
++ * real card10 hasn't, unless one is wired to the bus.
++ */
++#include "epicardium.h"
++#include "modules/modules.h"
++#include "drivers/drivers.h"
++
++#include "bosch.h"
++
++#include <errno.h>
++#include <stdint.h>
++
++#define FT6X36_ADDR 0x38
++
++static uint16_t last_x, last_y;
++
++int epic_touch_read(struct touch_state *state)
++{
++	/* TD_STATUS, P1_XH, P1_XL, P1_YH, P1_YL */
++	uint8_t r[5];
++	int8_t ret;
++
++	hwlock_acquire(HWLOCK_I2C);
++	ret = card10_bosch_i2c_read(FT6X36_ADDR, 0x02, r, sizeof(r));
++	hwlock_release(HWLOCK_I2C);
++	if (ret != 0) {
++		return -ENODEV;
++	}
++	state->down = (r[0] & 0x0f) != 0;
++	if (state->down) {
++		last_x = ((r[1] & 0x0f) << 8) | r[2];
++		last_y = ((r[3] & 0x0f) << 8) | r[4];
++	}
++	state->x = last_x;
++	state->y = last_y;
++	return 0;
++}
+diff --git a/epicardium/epicardium.h b/epicardium/epicardium.h
+index bc32e5ca..8ebc293c 100644
+--- a/epicardium/epicardium.h
++++ b/epicardium/epicardium.h
+@@ -116,6 +116,8 @@ typedef _Bool bool;
+ 
+ #define API_BUTTONS_READ           0x90
+ 
++#define API_TOUCH_READ             0x98
++
+ #define API_GPIO_SET_PIN_MODE      0xA0
+ #define API_GPIO_GET_PIN_MODE      0xA1
+ #define API_GPIO_WRITE_PIN         0xA2
+@@ -540,6 +542,38 @@ enum epic_button {
+  */
+ API(API_BUTTONS_READ, uint8_t epic_buttons_read(uint8_t mask));
+ 
++/**
++ * Touch panel
++ * ===========
++ * A touch panel over the display: an FT6x36 controller on the badge's I2C
++ * bus (address ``0x38``). A real card10 hasn't one; the v86 emulator's card10
++ * has, with :c:macro:`TOUCH_WIDTH` x :c:macro:`TOUCH_HEIGHT` points over the
++ * display, from its top left corner as it is seen.
++ */
++
++/** Width of the touch panel, in its points. */
++#define TOUCH_WIDTH 640
++/** Height of the touch panel, in its points. */
++#define TOUCH_HEIGHT 320
++
++/** The finger on the touch panel. */
++struct touch_state {
++	/** Where it is (or was last), in the panel's points. */
++	uint16_t x, y;
++	/** Whether it is down. */
++	uint8_t down;
++};
++
++/**
++ * Read the touch panel.
++ *
++ * :param state: where the finger's state is written.
++ * :return: ``0`` on success or a negative value:
++ *
++ *    - ``-ENODEV``: There is no touch panel.
++ */
++API(API_TOUCH_READ, int epic_touch_read(struct touch_state *state));
++
+ /**
+  * Wristband GPIO
+  * ==============

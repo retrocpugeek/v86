@@ -1367,6 +1367,48 @@ pub const PMIC_ADDR: u8 = 0x48;
 /// The PCAL6408A port expander (the buttons but one; the display's reset)
 pub const PE_ADDR: u8 = 0x21;
 
+/// A touch panel over the display, which the real badge doesn't have: a
+/// FocalTech FT6x36 controller (as on many small TFT modules) on the
+/// badge's I2C bus, I2C1, at its usual address. Its coordinates are finer
+/// than the display's pixels: TOUCH_SCALE per pixel, from the display's top
+/// left as it's seen. Epicardium reads it with epic_touch_read() (the patch
+/// in tools/a64-site/card10).
+pub const TOUCH_ADDR: u8 = 0x38;
+pub const TOUCH_SCALE: u32 = 4;
+
+pub struct Ft6x36 {
+    pub regs: I2cRegs,
+}
+
+impl Ft6x36 {
+    fn new() -> Ft6x36 {
+        // (mode, chip id 0x36, FocalTech's id, firmware version)
+        Ft6x36 { regs: I2cRegs::new("FT6x36", &[(0x00, 0), (0xa3, 0x36), (0xa8, 0x11), (0xa6, 0x10)]) }
+    }
+
+    /// One finger: down (or moving) at (x, y), or lifted.
+    pub fn set(&mut self, down: bool, x: u32, y: u32) {
+        let r = &mut self.regs.regs;
+        let (x, y) = (x.min(0xfff), y.min(0xfff));
+        // TD_STATUS: touches; P1_XH: event (0 down, 1 up, 2 contact) and
+        // x's high bits; P1_XL; P1_YH: the touch's id and y's high bits; P1_YL
+        let was_down = r[0x02] != 0;
+        r[0x02] = down as u8;
+        let event = if !down { 1 } else if was_down { 2 } else { 0 };
+        r[0x03] = (event << 6) | (x >> 8) as u8;
+        r[0x04] = x as u8;
+        r[0x05] = (y >> 8) as u8;
+        r[0x06] = y as u8;
+    }
+}
+
+impl I2cDevice for Ft6x36 {
+    fn start(&mut self, read: bool) { self.regs.start(read); }
+    fn write(&mut self, b: u8) { self.regs.write(b); }
+    fn read(&mut self) -> u8 { self.regs.read() }
+    fn as_any(&mut self) -> &mut dyn Any { self }
+}
+
 /// The MAX77650 PMIC: its registers (from its datasheet's reset values),
 /// and its analog multiplexer's selection (CNFG_CHG_I's MUX_SEL), which
 /// is what the MAX32665's ADC channel 0 measures.
@@ -1736,6 +1778,13 @@ impl Card10 {
         self.wake_running();
     }
 
+    /// The finger on the touch panel (Ft6x36), in its units (TOUCH_SCALE
+    /// per display pixel). Polled: nothing is woken.
+    pub fn set_touch(&mut self, down: bool, x: u32, y: u32) {
+        let i2c = self.bus().device::<I2c>(I2C_BASE[1]).expect("I2C1");
+        i2c.device::<Ft6x36>(TOUCH_ADDR).expect("touch panel").set(down, x, y);
+    }
+
     /// Cores not stopped by a debugger wake for what's pending.
     fn wake_running(&mut self) {
         for c in 0..2 {
@@ -1826,6 +1875,7 @@ pub fn machine(epicardium: &[u8], pycardium: &[u8], ext_flash: &[u8], epoch: i64
             regs[0x03] = 0xff;
             regs[0x45] = 0xff;
             i2c.attach(PE_ADDR, Box::new(Pcal6408a { regs, ptr: 0, first: false, pins: 0xff, lines: lines.clone() }));
+            i2c.attach(TOUCH_ADDR, Box::new(Ft6x36::new()));
         }
         bus.map(b, 0x1000, Some(I2C_IRQ[i]), Box::new(i2c));
     }

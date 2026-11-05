@@ -1,0 +1,24 @@
+--- a/core/ctk/ctk-conio.c
++++ b/core/ctk/ctk-conio.c
+@@ -201,6 +201,9 @@
+ #if CTK_CONF_ICONS
+   case CTK_WIDGET_ICON:
+     if(ypos >= clipy1 && ypos < clipy2) {
++#ifdef ICONCOLOR
++      (void)textcolor(ICONCOLOR);
++#endif /* ICONCOLOR */
+       revers(wfocus != 0);
+ #if CTK_CONF_ICON_TEXTMAPS
+       if(w->widget.icon.textmap != NULL) {
+@@ -442,6 +445,11 @@
+ {
+   unsigned char i;
+  
++#ifdef ICONCOLOR
++  /* (the desktop, in its colour: the screen's, not what was last drawn) */
++  (void)textcolor(SCREENCOLOR);
++  revers(0);
++#endif /* ICONCOLOR */
+   for(i = y1; i < y2; ++i) {
+     cclearxy(0, i, sizex);
+   }
