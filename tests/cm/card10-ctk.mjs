@@ -3,7 +3,10 @@
 // touch panel the emulator adds (the mouse on the badge's screen): the
 // desktop must come up with the RetroCPUGeek window; tapping its Close button
 // closes it, tapping the Calc icon opens the calculator, and tapping 7 and 8
-// shows 78; holding the top right button (Enter) opens the menus. No page
+// shows 78; tapping the Term icon opens the serial terminal, where what's
+// typed in the page's console shows (core 0's UART interrupt to core 1) and
+// comes back in the console (the echo), and its Hello button writes to the
+// console; holding the top right button (Enter) opens the menus. No page
 // exceptions.
 //
 //   SITE=http://localhost:8788 node tests/cm/card10-ctk.mjs [screenshot-prefix]
@@ -93,7 +96,9 @@ async function main()
     // A tap on the badge's screen at (x, y) in display pixels
     const tap = async (x, y) =>
     {
-        const [cx, cy] = await ev(`(() => { const r = document.getElementById("card10-screen").getBoundingClientRect();
+        const [cx, cy] = await ev(`(() => { const s = document.getElementById("card10-screen");
+            s.scrollIntoView({ block: "center" });
+            const r = s.getBoundingClientRect();
             return [r.x + (${x} + 0.5) / 160 * r.width, r.y + (${y} + 0.5) / 80 * r.height]; })()`);
         await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: cx, y: cy });
         await send("Input.dispatchMouseEvent", { type: "mousePressed", x: cx, y: cy, button: "left", buttons: 1, clickCount: 1 });
@@ -126,6 +131,19 @@ async function main()
     await tap(70, 40);
     await until("78 on its display", async () => (await count(90, 18, 104, 24)).dark > empty.dark + 8);
     await shot("calc");
+    // The serial terminal: the Term icon, then text typed in the console
+    const log = () => ev("document.querySelector('#terminal .xterm-rows')?.innerText || ''");
+    await tap(145, 55);
+    await until("the terminal", async () => (await count(8, 18, 150, 53)).cream > 3000);
+    const blank = await count(8, 18, 150, 53);
+    await ev("document.querySelector('#terminal .xterm-helper-textarea').focus()");
+    await send("Input.insertText", { text: "hi from the page" });
+    await until("the typing in the terminal", async () => (await count(8, 18, 150, 53)).dark > blank.dark + 40);
+    await until("the echo in the console", async () => (await log()).includes("hi from the page"));
+    await ev("document.activeElement.blur()");
+    await tap(20, 62);
+    await until("Hello in the console", async () => (await log()).includes("Hello from core 1"));
+    await shot("serial");
     // The menus: Enter held (the top right button)
     await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
     await sleep(900);

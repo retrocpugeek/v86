@@ -4,7 +4,8 @@
 app (an l0dable) on the card10 badge's core 1, on Epicardium's API, with a
 RetroCPUGeek theme: the RetroCPUGeek avatar's chip on a circuit board as the
 backdrop, an RCG menu, and a window naming the chip it really runs on, the
-card10's MAX32666.
+card10's MAX32666. Its serial terminal talks to core 0 both ways: API calls
+out, and interrupts in.
 
 ![The desktop, with the calculator (card10run, 4x)](desktop.png)
 
@@ -13,8 +14,16 @@ in the badge's menu as "Contiki desktop (RCG)".
 
 - `main.c`: Contiki's platform (clock, main loop), keys from the buttons, the
   touch panel as CTK's mouse, and the desktop: icons and the RCG menu for
-  Contiki's calculator, process list and about box, and the RetroCPUGeek
-  window.
+  Contiki's calculator, process list and about box, the RetroCPUGeek
+  window and the serial terminal.
+- `serial.c`: the serial terminal (the Term icon, or "Serial terminal" in
+  the RCG menu) on the badge's console, the page's console in the emulator.
+  A character arriving there makes Epicardium raise `EPIC_INT_UART_RX` on
+  core 1; its handler, `epic_isr_uart_rx()`, takes the input with
+  `epic_uart_read_str()` and polls the terminal's process, which shows it and
+  echoes it back with `epic_uart_write_str()`. Hello and Time write to the
+  console; the window counts the interrupts and the bytes each way. (Ctrl-C
+  in the console still stops the app, as Epicardium does with any app.)
 - `conio-card10.c`: the character screen CTK draws on (through its
   `ctk-conio.c`): 40 x 13 cells of 4 x 6 pixels on the 160 x 80 display,
   with line characters for the window frames, icon tiles and the backdrop.
@@ -43,7 +52,8 @@ debug info and sources (`../build.sh`'s debug bundle), and core 1's gdb loads
 its symbols where Epicardium's loader always puts it, 0x20040000
 (`add-symbol-file ctk.elf -o 0x20040000`, `tools/gdb-wui-guest/S95gdb-wui`),
 next to Pycardium's (in flash, so the pc tells them apart). Break on
-`poll_buttons`, `conio_flush`, `calc_process`'s thread function and so on.
+`poll_buttons`, `conio_flush`, `calc_process`'s thread function,
+`epic_isr_uart_rx` (then type in the console) and so on.
 Contiki's processes are protothreads: their locals don't live across a wait,
 so watch their `static`s instead.
 
