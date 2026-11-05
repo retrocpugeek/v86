@@ -94,13 +94,15 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
             <li>JIT: hot code compiled to WebAssembly</li>
             <li><a href="#gdb-wui">gdb-wui</a>: debug programs in the guest from a web UI next to the console</li>
             <li>Pebble watches running <a href="https://github.com/coredevices/PebbleOS">PebbleOS</a> on a new Cortex-M core (Cortex-M4 and Cortex-M33, Thumb-2): the Pebble 2 Duo with its buttons, and the round Pebble Round 2 with its touch screen</li>
-            <li>The card10 badge (CCC camp 2019) on the same core: two Cortex-M4F cores, FreeRTOS on one and MicroPython on the other, with its display, buttons and a MicroPython REPL</li>
+            <li>The card10 badge (CCC camp 2019) on the same core: two Cortex-M4F cores, FreeRTOS on one and MicroPython on the other, with its display, buttons and a MicroPython REPL, a live view of the API calls between the cores, and <a href="#card10-debug">a debugger per core</a></li>
+            <li>Contiki's desktop, CTK, as a native app on the card10's second core, bare metal: windows, menus and icons on its 160 x 80 display, driven by its buttons or by tapping the screen, through a touch panel the emulator adds</li>
           </ul>
           <a class="go" href="https://v86-arm.turret13.workers.dev/">Boot ARM64 Linux</a>
           <a class="alt" href="https://v86-arm.turret13.workers.dev/?build=gdb-wui">Debug with gdb-wui on ARM64</a>
           <a class="alt" href="https://v86-arm.turret13.workers.dev/?build=pebble-flint">Wear a Pebble: PebbleOS in your browser</a>
           <a class="alt" href="https://v86-arm.turret13.workers.dev/?build=pebble-round2">Try the round Pebble Round 2</a>
           <a class="alt" href="https://v86-arm.turret13.workers.dev/?build=card10">Boot a card10 badge: two cores, FreeRTOS and MicroPython</a>
+          <a class="alt" href="https://v86-arm.turret13.workers.dev/?build=card10-ctk">Tap through Contiki's desktop on the card10</a>
         </article>
 
         <article class="card riscv">
@@ -117,14 +119,18 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
             <li>Stefan Wagner's CH32V003 Mini Game Console: its OLED display, buttons and buzzer, with twelve games (Tris, Invaders, Arkanoid, Pacman, Lander, Life, Doom, Boulder, Bubble, Karate, Run, Shooter)</li>
             <li>Maksym Curul's CH32V003 Mini Game Console: its colour LCD, buttons and buzzer, with Snake, Pong, Jump Bird and Dino Run, and high scores saved in its flash</li>
             <li>Vlad Tomoiagă's osillyscope, a CH32V003 pocket oscilloscope: feed it a test signal or your microphone and watch the waveform on its OLED</li>
+            <li>Tiny BASIC on the CH32V003, with a machine monitor and example programs, saved in its flash</li>
             <li>A WCH CH32V307 microcontroller (RV32IMAFC, 64 KB of RAM) running the RT-Thread shell, with snake, an analog clock, CoreMark and Lua</li>
-            <li><a href="#mcu-debug">Debug the CH32V003's firmware</a> with gdb-wui, through a GDB stub in the emulated core</li>
+            <li><a href="#mcu-own">Your own CH32V003 firmware</a>: a <code>.bin</code>, <code>.hex</code> or <code>.elf</code>, on the chip alone or on one of the boards above, with examples to try</li>
+            <li><a href="#mcu-debug">Debug the CH32V003's firmware</a> with gdb-wui, through a GDB stub in the emulated core, and <a href="#mcu-rebuild">change it and rebuild it</a> with GCC in the browser</li>
           </ul>
           <a class="go" href="https://v86-riscv.turret13.workers.dev/">Boot RISC-V Linux</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris">Play Tetris on an emulated CH32V003</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=gameconsole-tris">Play the CH32V003 game console</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=minigameconsole">Play the colour CH32V003 mini game console</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=osillyscope">Watch your voice on the CH32V003 oscilloscope</a>
+          <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-basic">Program Tiny BASIC on a CH32V003</a>
+          <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=upload">Run your own CH32V003 firmware</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v307-rtthread">Try the RT-Thread shell on an emulated CH32V307</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=gdb-wui">Debug with gdb-wui on RISC-V</a>
           <a class="alt" href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&amp;debug">Debug Tetris on the CH32V003 with gdb-wui</a>
@@ -168,18 +174,61 @@ footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
       </p>
       <p id="mcu-debug">
         It debugs the microcontrollers' firmware too. Add <code>&amp;debug</code> to a CH32V003 page
-        (Tetris or a game console game): the microcontroller is held at reset, and the page boots the
+        (Tetris, Tiny BASIC, a game console game, the oscilloscope, or <a href="#mcu-own">your own
+        firmware</a>): the microcontroller is held at reset, and the page boots the
         riscv64 gdb-wui image beside it with the firmware's ELF and sources. The emulated core has a GDB
         stub, which the page offers on the guest's network as a debug probe would, so gdb in the guest
         connects with <code>target remote</code>: breakpoints in flash, stepping through the C source,
         registers, memory and <code>monitor reset halt</code>, while the display keeps drawing.
+      </p>
+      <p id="card10-debug">
+        On the ARM64 site the card10 badge gets two: add <code>&amp;debug</code> and the page boots the
+        aarch64 gdb-wui image with a gdb and a gdb-wui per core, side by side. Break in Epicardium
+        (FreeRTOS) on one core and in the MicroPython interpreter or Contiki's desktop on the other, and
+        watch one core wait in an API call while the other is held in its implementation.
       </p>
       <ul class="links">
         <li><a href="https://v86-arm.turret13.workers.dev/?build=gdb-wui">gdb-wui on ARM64</a><span>Buildroot, aarch64</span></li>
         <li><a href="https://v86-riscv.turret13.workers.dev/?build=gdb-wui">gdb-wui on RISC-V</a><span>Buildroot, riscv64</span></li>
         <li><a href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&amp;debug">Debug Tetris on the CH32V003</a><span>Bare-metal firmware, through the core's GDB stub</span></li>
         <li><a href="https://v86-riscv.turret13.workers.dev/?build=gameconsole-tris&amp;debug">Debug Tiny Tris on the game console</a><span>CH32V003 firmware, in gdb-wui</span></li>
+        <li><a href="https://v86-arm.turret13.workers.dev/?build=card10&amp;debug">Debug the card10's two cores</a><span>A gdb-wui per core: FreeRTOS and MicroPython</span></li>
+        <li><a href="https://v86-arm.turret13.workers.dev/?build=card10-ctk&amp;debug">Debug Contiki's desktop on the card10</a><span>A bare-metal app on core 1, its calls into core 0</span></li>
         <li><a href="https://retrocpugeek.github.io/gdb-wui/">gdb-wui documentation</a><span>With screenshots and a guided first session</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="mcu-own">
+    <div class="wrap">
+      <h2>Your own CH32V003 firmware</h2>
+      <p>
+        <a href="https://v86-riscv.turret13.workers.dev/?build=upload">Run your own CH32V003 firmware</a>
+        takes a <code>.bin</code>, an Intel <code>.hex</code> or an <code>.elf</code> (kept in your
+        browser, not uploaded), or <code>&amp;firmware=</code> a URL, and runs it on the chip alone or on
+        one of the boards above: the game console, the colour mini console or the oscilloscope, with their
+        displays and buttons. Each board has examples to try, from Stefan Wagner's own builds of his games
+        to <a href="https://github.com/cnlohr/ch32fun">ch32fun</a>'s examples. ch32fun's
+        <code>printf</code> goes to the serial console, and the page lists what the firmware uses that the
+        emulator doesn't model yet. Add <code>&amp;debug</code> to debug it: an ELF keeps its symbols, and
+        a <code>.bin</code> or <code>.hex</code> is wrapped in one, with symbols where the page finds
+        functions start, for gdb and for kuna to decompile.
+      </p>
+      <p id="mcu-rebuild">
+        Change it in the browser: the riscv64 gdb-wui image has GCC 14 and binutils that run in the
+        guest, and the sources of Tetris and Tiny BASIC. With <code>&amp;debug</code>, log in to its
+        console, edit the C with <code>nano</code> or <code>vi</code>, and type <code>rebuild</code> in
+        gdb-wui's console: it compiles the firmware there, writes it into the emulated chip's flash
+        through the GDB stub and resets it, halted, with the new symbols. Then save your work: the sources
+        as a <code>.zip</code>, which loads back another time to carry on, and the firmware as
+        <code>.elf</code>, <code>.bin</code> or <code>.hex</code>, to run on the upload page or to flash to
+        a real CH32V003.
+      </p>
+      <ul class="links">
+        <li><a href="https://v86-riscv.turret13.workers.dev/?build=upload">Run your own firmware</a><span>A .bin, .hex or .elf, on the chip or a board</span></li>
+        <li><a href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-tetris&amp;debug">Change and rebuild Tetris</a><span>Edit, then <code>rebuild</code> in gdb-wui</span></li>
+        <li><a href="https://v86-riscv.turret13.workers.dev/?build=ch32v003-basic&amp;debug">Change and rebuild Tiny BASIC</a><span>The same, for the BASIC interpreter</span></li>
+        <li><a href="https://github.com/retrocpugeek/v86/tree/ports/tools/ch32v003">The CH32V003 firmware's sources</a><span>No SDK: startup code, linker script, registers</span></li>
       </ul>
     </div>
   </section>
