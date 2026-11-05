@@ -337,7 +337,9 @@ pub extern "C" fn cm_set_buttons(state: u32) {
 /// in display pixels.
 #[no_mangle]
 pub extern "C" fn cm_touch(down: u32, x: u32, y: u32) {
-    if card10().is_some() {
+    if let Some(m) = card10() {
+        // (its touch panel's units: finer than pixels; the page scales)
+        m.set_touch(down != 0, x, y);
         return;
     }
     let c = cpu();
@@ -353,7 +355,7 @@ pub extern "C" fn cm_touch(down: u32, x: u32, y: u32) {
 #[no_mangle]
 pub extern "C" fn cm_has_touch() -> u32 {
     match card10() {
-        Some(_) => 0,
+        Some(_) => 1,
         None => cpu().bus.device::<Touch>(TOUCH_BASE).is_some() as u32,
     }
 }

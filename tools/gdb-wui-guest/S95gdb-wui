@@ -112,11 +112,19 @@ CARD10=
 grep -q 'gdb_wui\.card10' /proc/cmdline && [ -f /root/mcu/card10/epicardium.elf ] && CARD10=/root/mcu/card10
 export CARD10
 
-# card10_wui PORT ELF STUB_PORT: one core's gdb-wui
+# Core 1 also runs the badge's native apps (l0dables), which Epicardium
+# loads at core 1's RAM, 0x20040000: Contiki's desktop's symbols too, there
+# (Pycardium's code is in flash, so gdb tells them apart by the pc)
+CARD10_APPS=
+if [ -n "$CARD10" ] && [ -f "$CARD10/ctk.elf" ]; then
+	CARD10_APPS="-gdb-command 'set confirm off' -gdb-command 'add-symbol-file $CARD10/ctk.elf -o 0x20040000' -gdb-command 'set confirm on'"
+fi
+
+# card10_wui PORT ELF STUB_PORT [GDB_COMMANDS]: one core's gdb-wui
 card10_wui() {
 	start-stop-daemon -S -q -b -m -p "/run/gdb-wui-$1.pid" -x /bin/sh -- -c \
 		"exec /usr/bin/gdb-wui -addr 0.0.0.0:$1 -listen-anywhere -open=false -no-config $START -project $CARD10 \$KUNA \
-			-exe $2 -gdb-command 'set substitute-path /firmware $CARD10/firmware' \
+			-exe $2 -gdb-command 'set substitute-path /firmware $CARD10/firmware' ${4:-} \
 			-gdb-command 'set remotetimeout 30' \
 			-gdb-command 'target remote ${GATEWAY:-192.168.86.1}:$3' >/tmp/gdb-wui-$1.log 2>&1"
 	# (the address through the environment: socat would take a ':' in its
@@ -131,7 +139,7 @@ start)
 	mkdir -p -m 0700 "$XDG_RUNTIME_DIR"
 	if [ -n "$CARD10" ]; then
 		card10_wui 80 epicardium.elf 3333
-		card10_wui 82 pycardium.elf 3334
+		card10_wui 82 pycardium.elf 3334 "$CARD10_APPS"
 		echo "OK (the card10's two cores)"
 		exit 0
 	fi
