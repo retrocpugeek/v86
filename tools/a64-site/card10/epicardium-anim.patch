@@ -1,0 +1,321 @@
+--- a/epicardium/epicardium.h
++++ b/epicardium/epicardium.h
+@@ -118,6 +118,10 @@
+ 
+ #define API_TOUCH_READ             0x98
+ 
++#define API_ANIM_OPEN              0x99
++#define API_ANIM_DECODE            0x9A
++#define API_ANIM_CLOSE             0x9B
++
+ #define API_GPIO_SET_PIN_MODE      0xA0
+ #define API_GPIO_GET_PIN_MODE      0xA1
+ #define API_GPIO_WRITE_PIN         0xA2
+@@ -275,8 +279,10 @@
+ /** Bluetooth Low Energy event.  See :c:func:`epic_isr_ble`. */
+ #define EPIC_INT_BLE                    10
+ #define EPIC_INT_MAX86150_PROX          11
++/** Animation frame decoded.  See :c:func:`epic_isr_anim_frame`. */
++#define EPIC_INT_ANIM_FRAME             12
+ /* Number of defined interrupts. */
+-#define EPIC_INT_NUM                    12
++#define EPIC_INT_NUM                    13
+ /* clang-format on */
+ 
+ /*
+@@ -575,6 +581,55 @@
+ API(API_TOUCH_READ, int epic_touch_read(struct touch_state *state));
+ 
+ /**
++ * Animation decoder
++ * =================
++ * Core 0 decodes an animation file's frames for core 1, in a task of its
++ * own, while core 1 shows the last one: :c:func:`epic_anim_decode` asks for
++ * the next frame and returns at once; when the frame is in core 1's buffer,
++ * core 0 raises :c:data:`EPIC_INT_ANIM_FRAME`.
++ *
++ * The file (``.rla``): ``"RLA1"``, then little-endian ``u16`` width, height,
++ * frame count and frames per second, 4 reserved bytes, a palette of 256
++ * RGB565 ``u16`` colours, then each frame: a ``u16`` length and that many
++ * bytes of PackBits (a byte ``n`` < 128: ``n + 1`` palette indexes follow;
++ * otherwise the next index, ``n - 126`` times). After the last frame, the
++ * first comes again.
++ */
++
++/** An open animation, as :c:func:`epic_anim_open` finds it */
++struct anim_info {
++	uint16_t width, height, frames, fps;
++};
++
++/**
++ * Open an animation for decoding (closing any other).
++ *
++ * :param path: The file.
++ * :param info: Its size, frame count and rate.
++ * :return: 0, or a negative error (``-EINVAL``: not an animation).
++ */
++API(API_ANIM_OPEN, int epic_anim_open(const char *path, struct anim_info *info));
++
++/**
++ * Decode the next frame into ``dest`` (``width * height`` RGB565 pixels),
++ * in the background on core 0: returns at once, and core 0 raises
++ * :c:data:`EPIC_INT_ANIM_FRAME` when the frame is there.
++ *
++ * :return: 0, ``-EBUSY`` if a frame is still being decoded, ``-EBADF`` if no
++ *    animation is open.
++ */
++API(API_ANIM_DECODE, int epic_anim_decode(uint16_t *dest));
++
++/** Close the animation (any frame being decoded is finished first). */
++API(API_ANIM_CLOSE, void epic_anim_close(void));
++
++/**
++ * **Interrupt Service Routine** for :c:data:`EPIC_INT_ANIM_FRAME`: a frame
++ * :c:func:`epic_anim_decode` asked for is ready.
++ */
++API_ISR(EPIC_INT_ANIM_FRAME, epic_isr_anim_frame);
++
++/**
+  * Wristband GPIO
+  * ==============
+  */
+--- a/epicardium/modules/meson.build
++++ b/epicardium/modules/meson.build
+@@ -1,4 +1,5 @@
+ module_sources = files(
++  'anim.c',
+   'hardware.c',
+   'hw-lock.c',
+   'personal_state.c',
+--- a/epicardium/modules/hardware.c
++++ b/epicardium/modules/hardware.c
+@@ -247,6 +247,11 @@
+ 	 */
+ 	fatfs_close_all(EPICARDIUM_COREMASK_1);
+ 
++	/*
++	 * Animation decoder: stop it writing into core 1's memory
++	 */
++	anim_reset();
++
+ 	/* Personal State */
+ 	const int personal_state_is_persistent =
+ 		epic_personal_state_is_persistent();
+--- a/epicardium/modules/modules.h
++++ b/epicardium/modules/modules.h
+@@ -14,6 +14,9 @@
+ int hardware_init(void);
+ int hardware_reset(void);
+ 
++/* ---------- Animation decoder (anim.c) ----------------------------------- */
++void anim_reset(void);
++
+ /* ---------- LED Animation / Personal States ------------------------------ */
+ #define PERSONAL_STATE_LED 14
+ void vLedTask(void *pvParameters);
+--- /dev/null
++++ b/epicardium/modules/anim.c
+@@ -0,0 +1,203 @@
++/*
++ * An animation decoder for core 1 (epic_anim_open/decode/close,
++ * epicardium.h): a task on core 0 reads an animation file's frames and
++ * decodes them (PackBits, a palette) into core 1's buffer, then raises
++ * EPIC_INT_ANIM_FRAME, so core 1 only shows them. Added for the v86
++ * emulator's card10 (Contiki's desktop's player, l0dables/ctk).
++ */
++#include "epicardium.h"
++#include "modules/modules.h"
++#include "user_core/interrupts.h"
++#include "os/core.h"
++#include "os/mutex.h"
++
++#include "FreeRTOS.h"
++#include "task.h"
++
++#include <errno.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#define HEADER_SIZE (16 + 256 * 2)
++/* (the largest frame: the display's size, PackBits' worst case) */
++#define MAX_PIXELS (160 * 80)
++#define MAX_ENCODED (MAX_PIXELS + MAX_PIXELS / 128 + 1)
++
++static struct mutex anim_mutex;
++static TaskHandle_t anim_task;
++static int fd = -1;
++static struct anim_info info;
++static uint16_t palette[256];
++static uint16_t frame_no;
++/* the buffer the next frame goes to (NULL: none asked for) */
++static uint16_t *dest;
++static uint8_t encoded[MAX_ENCODED];
++
++static uint16_t le16(const uint8_t *p)
++{
++	return p[0] | (p[1] << 8);
++}
++
++/* The next frame into out (with anim_mutex held) */
++static int decode_next(uint16_t *out)
++{
++	uint8_t len_bytes[2];
++	unsigned len, i = 0, n = 0, pixels = info.width * info.height;
++
++	if (epic_file_read(fd, len_bytes, 2) != 2 || frame_no >= info.frames) {
++		/* the end: the first frame again */
++		epic_file_seek(fd, HEADER_SIZE, SEEK_SET);
++		frame_no = 0;
++		if (epic_file_read(fd, len_bytes, 2) != 2) {
++			return -EIO;
++		}
++	}
++	len = le16(len_bytes);
++	if (len > sizeof(encoded) || epic_file_read(fd, encoded, len) != (int)len) {
++		return -EIO;
++	}
++	while (i < len && n < pixels) {
++		uint8_t c = encoded[i++];
++		if (c < 128) {
++			unsigned count = c + 1;
++			while (count-- && i < len && n < pixels) {
++				out[n++] = palette[encoded[i++]];
++			}
++		} else if (i < len) {
++			unsigned count = c - 126;
++			uint16_t colour = palette[encoded[i++]];
++			while (count-- && n < pixels) {
++				out[n++] = colour;
++			}
++		}
++	}
++	++frame_no;
++	return 0;
++}
++
++static void vAnimTask(void *pvParameters)
++{
++	(void)pvParameters;
++	for (;;) {
++		int done = 0;
++		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
++		mutex_lock(&anim_mutex);
++		if (fd >= 0 && dest != NULL) {
++			decode_next(dest);
++			dest = NULL;
++			done = 1;
++		}
++		mutex_unlock(&anim_mutex);
++		if (done) {
++			interrupt_trigger(EPIC_INT_ANIM_FRAME);
++		}
++	}
++}
++
++static void close_locked(void)
++{
++	if (fd >= 0) {
++		epic_file_close(fd);
++	}
++	fd   = -1;
++	dest = NULL;
++}
++
++int epic_anim_open(const char *path, struct anim_info *out)
++{
++	uint8_t header[16];
++	int f, i;
++
++	if (anim_task == NULL) {
++		mutex_create(&anim_mutex);
++		if (xTaskCreate(
++			    vAnimTask,
++			    (const char *)"Anim decoder",
++			    configMINIMAL_STACK_SIZE * 2,
++			    NULL,
++			    tskIDLE_PRIORITY + 1,
++			    &anim_task) != pdPASS) {
++			anim_task = NULL;
++			return -ENOMEM;
++		}
++	}
++	mutex_lock(&anim_mutex);
++	close_locked();
++	f = epic_file_open(path, "r");
++	if (f < 0) {
++		mutex_unlock(&anim_mutex);
++		return f;
++	}
++	if (epic_file_read(f, header, sizeof(header)) != sizeof(header) ||
++	    memcmp(header, "RLA1", 4) != 0 ||
++	    epic_file_read(f, encoded, 512) != 512) {
++		epic_file_close(f);
++		mutex_unlock(&anim_mutex);
++		return -EINVAL;
++	}
++	info.width  = le16(header + 4);
++	info.height = le16(header + 6);
++	info.frames = le16(header + 8);
++	info.fps    = le16(header + 10);
++	if (info.width * info.height > MAX_PIXELS || info.frames == 0) {
++		epic_file_close(f);
++		mutex_unlock(&anim_mutex);
++		return -EINVAL;
++	}
++	for (i = 0; i < 256; i++) {
++		palette[i] = le16(encoded + 2 * i);
++	}
++	fd       = f;
++	frame_no = 0;
++	*out     = info;
++	mutex_unlock(&anim_mutex);
++	LOG_INFO(
++		"anim",
++		"%s: %ux%u, %u frames at %u/s",
++		path,
++		info.width,
++		info.height,
++		info.frames,
++		info.fps
++	);
++	return 0;
++}
++
++int epic_anim_decode(uint16_t *buf)
++{
++	int ret = 0;
++
++	if (anim_task == NULL) {
++		return -EBADF;
++	}
++	mutex_lock(&anim_mutex);
++	if (fd < 0) {
++		ret = -EBADF;
++	} else if (dest != NULL) {
++		ret = -EBUSY;
++	} else {
++		dest = buf;
++	}
++	mutex_unlock(&anim_mutex);
++	if (ret == 0) {
++		xTaskNotifyGive(anim_task);
++	}
++	return ret;
++}
++
++void epic_anim_close(void)
++{
++	if (anim_task == NULL) {
++		return;
++	}
++	mutex_lock(&anim_mutex);
++	close_locked();
++	mutex_unlock(&anim_mutex);
++}
++
++/* A new app on core 1 (hardware_reset): no more frames for the old one */
++void anim_reset(void)
++{
++	epic_anim_close();
++}

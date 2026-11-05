@@ -13,9 +13,10 @@
 # card10-build (Containerfile here: podman build -t card10-build
 # tools/a64-site/card10), with only the checkout mounted (as /firmware).
 #
-# With two additions of ours: Contiki's desktop, CTK, an l0dable in the
-# badge's apps (ctk/), and a touch panel driver for Epicardium
-# (epicardium-touch.patch), for the emulator's card10.
+# With additions of ours: Contiki's desktop, CTK, an l0dable in the
+# badge's apps (ctk/), a touch panel driver for Epicardium
+# (epicardium-touch.patch), for the emulator's card10, and an animation
+# decoder in Epicardium for the desktop's player (epicardium-anim.patch).
 #
 # Writes epicardium.elf, pycardium.elf, fat.img.gz (and fat-ctk.img.gz,
 # which starts the desktop), api.json (api-names.py)
@@ -55,11 +56,15 @@ CONTIKI_COMMIT=32b5b17f674232867c22916bb2e2534c8e9a92ff
 git -C "$CONTIKI" fetch -q origin "$CONTIKI_COMMIT" 2>/dev/null || true
 CTK=$SRC/l0dables/ctk
 # (the firmware's tree as it was, afterwards)
-trap 'git -C "$SRC" checkout -q -- l0dables/meson.build epicardium/epicardium.h epicardium/drivers/meson.build
-      rm -rf "${CTK:?}" "$SRC/epicardium/drivers/touch.c" "$SRC/build-card10-ctk.cfg"' EXIT
+trap 'git -C "$SRC" checkout -q -- l0dables/meson.build epicardium/epicardium.h epicardium/drivers/meson.build \
+          epicardium/modules/meson.build epicardium/modules/hardware.c epicardium/modules/modules.h
+      rm -rf "${CTK:?}" "$SRC/epicardium/drivers/touch.c" "$SRC/epicardium/modules/anim.c" "$SRC/build-card10-ctk.cfg"' EXIT
 # Epicardium gets a touch panel driver, epic_touch_read() (the emulator's
-# card10 has one, dev/max32665.rs Ft6x36), which the desktop uses
+# card10 has one, dev/max32665.rs Ft6x36), and an animation decoder that
+# runs on core 0 for core 1 (epic_anim_*, EPIC_INT_ANIM_FRAME), which the
+# desktop uses
 patch -s -p1 -d "$SRC" < "$(dirname "$0")/epicardium-touch.patch"
+patch -s -p1 -d "$SRC" < "$(dirname "$0")/epicardium-anim.patch"
 rm -rf "${CTK:?}"
 mkdir -p "$CTK/contiki/core" "$CTK/contiki/apps"
 cp "$(dirname "$0")"/ctk/*.c "$(dirname "$0")"/ctk/*.h "$(dirname "$0")"/ctk/meson.build "$(dirname "$0")"/ctk/metadata.json "$CTK/"
@@ -67,6 +72,8 @@ git -C "$CONTIKI" archive "$CONTIKI_COMMIT" LICENSE core/contiki.h core/contiki-
     core/contiki-default-conf.h core/sys core/lib core/ctk apps/calc apps/about apps/process-list |
     tar -x -C "$CTK/contiki"
 patch -s -p1 -d "$CTK/contiki" < "$(dirname "$0")/ctk/contiki-ctk-conio.patch"
+# the player's animations (ctk/gen-anims.py; Pillow)
+python3 -I "$(dirname "$0")/ctk/gen-anims.py" "$CTK/anims" >/dev/null
 grep -q "subdir('ctk/')" "$SRC/l0dables/meson.build" || printf "subdir('ctk/')\n" >> "$SRC/l0dables/meson.build"
 podman run --rm --userns=keep-id -v "$SRC:/firmware:z" -e HOME=/tmp card10-build sh -c '
 set -e
@@ -83,6 +90,8 @@ mmd -i build/fat.img ::/apps/ctk
 mcopy -i build/fat.img l0dables/ctk/metadata.json ::/apps/ctk/metadata.json
 mcopy -i build/fat.img build/l0dables/ctk/ctk.elf ::/apps/ctk/ctk.elf
 mcopy -i build/fat.img l0dables/ctk/contiki/LICENSE ::/apps/ctk/LICENSE.contiki
+mmd -i build/fat.img ::/apps/ctk/anims
+mcopy -i build/fat.img l0dables/ctk/anims/*.rla ::/apps/ctk/anims/
 cp build/fat.img build/fat-ctk.img
 mcopy -o -i build/fat-ctk.img build-card10-ctk.cfg ::/card10.cfg'
 rm "$SRC/build-card10.cfg"

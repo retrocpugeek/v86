@@ -112,13 +112,14 @@ for row in range(3):
         d.rectangle((3 + col * 2 + (col > 0) * 0, 8 + row * 3, 3 + col * 2, 9 + row * 3), fill=(60, 60, 70))
 d.rectangle((9 - 1, 8, 9 - 1, 15), fill=GOLD)
 icons["calc"] = im
-# processes: a window with a list
+# the player: a film frame with a play triangle
 im, d = icon()
-d.rectangle((0, 2, 11, 15), fill=CREAM, outline=(40, 40, 40))
-d.rectangle((0, 2, 11, 4), fill=PURPLE)
-for i, y in enumerate((6, 8, 10, 12)):
-    d.line((2, y, 9 - (i % 2) * 3, y), fill=(40, 40, 40))
-icons["procs"] = im
+d.rectangle((0, 2, 11, 15), fill=(30, 30, 36), outline=(160, 160, 170))
+for y in (3, 13):
+    for x in (1, 4, 7, 10):
+        d.point((x, y), (160, 160, 170))
+d.polygon([(4, 5), (4, 11), (9, 8)], fill=GOLD)
+icons["play"] = im
 # the serial terminal: a screen with a prompt
 im, d = icon()
 d.rectangle((0, 2, 11, 13), fill=(30, 30, 36), outline=(160, 160, 170))

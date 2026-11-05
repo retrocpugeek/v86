@@ -6,7 +6,8 @@
  * from the buttons) and the desktop: icons and an "RCG" menu for the
  * applications (Contiki's calculator, process list and about box, the
  * RetroCPUGeek window here, which names the chip it runs on: the card10's
- * Maxim MAX32666, and a serial terminal on core 0's UART, serial.c), over
+ * Maxim MAX32666, a serial terminal on core 0's UART, serial.c, and an
+ * animation player whose frames core 0 decodes, player.c), over
  * a backdrop of the RetroCPUGeek avatar's chip (conio-card10.c, assets.h).
  *
  * The buttons (the top left one stays the badge's own):
@@ -28,6 +29,7 @@
 #include "ctk/ctk.h"
 #include "assets.h"
 #include "serial.h"
+#include "player.h"
 
 /* Contiki's applications used here */
 PROCESS_NAME(calc_process);
@@ -187,15 +189,15 @@ PROCESS_THREAD(rcg_process, ev, data)
                    0x86 + 9 * (i), 0x87 + 9 * (i), 0x88 + 9 * (i) }
 static char rcg_map[9] = TILES(ICON_RCG);
 static char calc_map[9] = TILES(ICON_CALC);
-static char procs_map[9] = TILES(ICON_PROCS);
+static char play_map[9] = TILES(ICON_PLAY);
 static char term_map[9] = TILES(ICON_TERM);
 static struct ctk_icon rcg_icon = {CTK_ICON("RCG", NULL, rcg_map)};
 static struct ctk_icon calc_icon = {CTK_ICON("Calc", NULL, calc_map)};
-static struct ctk_icon procs_icon = {CTK_ICON("Procs", NULL, procs_map)};
+static struct ctk_icon play_icon = {CTK_ICON("Play", NULL, play_map)};
 static struct ctk_icon term_icon = {CTK_ICON("Term", NULL, term_map)};
 
 static struct ctk_menu rcg_menu;
-enum { ITEM_RCG, ITEM_CALC, ITEM_PROCS, ITEM_SERIAL, ITEM_ABOUT, ITEM_LINE, ITEM_QUIT };
+enum { ITEM_RCG, ITEM_CALC, ITEM_PLAYER, ITEM_PROCS, ITEM_SERIAL, ITEM_ABOUT, ITEM_LINE, ITEM_QUIT };
 static int quit;
 
 PROCESS(desktop_process, "Desktop");
@@ -214,11 +216,12 @@ PROCESS_THREAD(desktop_process, ev, data)
   /* (the first one goes to the bottom right) */
   CTK_ICON_ADD(&rcg_icon, &desktop_process);
   CTK_ICON_ADD(&calc_icon, &desktop_process);
-  CTK_ICON_ADD(&procs_icon, &desktop_process);
+  CTK_ICON_ADD(&play_icon, &desktop_process);
   CTK_ICON_ADD(&term_icon, &desktop_process);
   ctk_menu_new(&rcg_menu, "RCG");
   ctk_menuitem_add(&rcg_menu, "RetroCPUGeek");
   ctk_menuitem_add(&rcg_menu, "Calculator");
+  ctk_menuitem_add(&rcg_menu, "Player");
   ctk_menuitem_add(&rcg_menu, "Processes");
   ctk_menuitem_add(&rcg_menu, "Serial terminal");
   ctk_menuitem_add(&rcg_menu, "About Contiki");
@@ -233,12 +236,13 @@ PROCESS_THREAD(desktop_process, ev, data)
     if(ev == ctk_signal_widget_activate) {
       if(data == (process_data_t)&rcg_icon) launch(&rcg_process);
       else if(data == (process_data_t)&calc_icon) launch(&calc_process);
-      else if(data == (process_data_t)&procs_icon) launch(&processes_process);
+      else if(data == (process_data_t)&play_icon) player_open();
       else if(data == (process_data_t)&term_icon) serial_open();
     } else if(ev == ctk_signal_menu_activate && data == (process_data_t)&rcg_menu) {
       switch(rcg_menu.active) {
       case ITEM_RCG: launch(&rcg_process); break;
       case ITEM_CALC: launch(&calc_process); break;
+      case ITEM_PLAYER: player_open(); break;
       case ITEM_PROCS: launch(&processes_process); break;
       case ITEM_SERIAL: serial_open(); break;
       case ITEM_ABOUT: launch(&about_process); break;
@@ -260,6 +264,7 @@ main(void)
   process_start(&etimer_process, NULL);
   process_start(&ctk_process, NULL);
   process_start(&serial_process, NULL);
+  process_start(&player_process, NULL);
   process_start(&desktop_process, NULL);
 
   while(!quit) {

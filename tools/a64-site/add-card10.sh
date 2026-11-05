@@ -39,7 +39,8 @@ const entry = {
         `<a href="https://github.com/contiki-os/contiki">Contiki</a>'s desktop, CTK (BSD), as a native app on ` +
         `core 1 (<a href="https://github.com/retrocpugeek/v86/tree/ports/tools/a64-site/card10/ctk">its port</a>): ` +
         `tap it, or use the buttons (bottom ones: previous and next; top right: select, held: the menus). Its Term ` +
-        `icon opens a serial terminal: what you type in the console below reaches core 1 as an interrupt from core 0.`,
+        `icon opens a serial terminal: what you type in the console below reaches core 1 as an interrupt from core 0; ` +
+        `its Play icon, an animation player whose frames core 0 decodes (in a task added to Epicardium) while core 1 shows them.`,
 };
 if(core1_app) entry.core1_app = JSON.parse(core1_app);
 const i = m.builds.findIndex(b => b.id === id);

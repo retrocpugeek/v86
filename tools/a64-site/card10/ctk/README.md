@@ -5,7 +5,8 @@ app (an l0dable) on the card10 badge's core 1, on Epicardium's API, with a
 RetroCPUGeek theme: the RetroCPUGeek avatar's chip on a circuit board as the
 backdrop, an RCG menu, and a window naming the chip it really runs on, the
 card10's MAX32666. Its serial terminal talks to core 0 both ways: API calls
-out, and interrupts in.
+out, and interrupts in; its animation player shares the work between the
+cores: core 0 decodes the frames, core 1 shows them.
 
 ![The desktop, with the calculator (card10run, 4x)](desktop.png)
 
@@ -15,7 +16,7 @@ in the badge's menu as "Contiki desktop (RCG)".
 - `main.c`: Contiki's platform (clock, main loop), keys from the buttons, the
   touch panel as CTK's mouse, and the desktop: icons and the RCG menu for
   Contiki's calculator, process list and about box, the RetroCPUGeek
-  window and the serial terminal.
+  window, the serial terminal and the player.
 - `serial.c`: the serial terminal (the Term icon, or "Serial terminal" in
   the RCG menu) on the badge's console, the page's console in the emulator.
   A character arriving there makes Epicardium raise `EPIC_INT_UART_RX` on
@@ -24,9 +25,25 @@ in the badge's menu as "Contiki desktop (RCG)".
   echoes it back with `epic_uart_write_str()`. Hello and Time write to the
   console; the window counts the interrupts and the bytes each way. (Ctrl-C
   in the console still stops the app, as Epicardium does with any app.)
+- `player.c`: the animation player (the Play icon, or "Player" in the RCG
+  menu). Core 0 reads and decodes each frame (Epicardium's animation
+  decoder, `../epicardium-anim.patch`: a FreeRTOS task of its own, and
+  `epic_anim_open()`, `epic_anim_decode()`, `epic_anim_close()`); core 1
+  asks for the next frame into one buffer and shows the other.
+  `epic_anim_decode()` returns at once; when the frame is there, core 0
+  raises `EPIC_INT_ANIM_FRAME`, whose handler, `epic_isr_anim_frame()`,
+  polls the player's process. At each tick the player shows the frame
+  that's ready (in the window's `CH_VIDEO` cells, `conio_video()`), and
+  counts as late a tick with none ready. Next goes to the next animation in
+  `/apps/ctk/anims`; Pause and Close.
+- `gen-anims.py` makes the animations (`../build.sh` runs it): `.rla` files
+  of 96 x 42 pixels, a 256-colour palette and PackBits (the format is in
+  the patch's `epicardium.h`): a plasma, a turning cube and the
+  RetroCPUGeek chip on a circuit board.
 - `conio-card10.c`: the character screen CTK draws on (through its
   `ctk-conio.c`): 40 x 13 cells of 4 x 6 pixels on the 160 x 80 display,
-  with line characters for the window frames, icon tiles and the backdrop.
+  with line characters for the window frames, icon tiles, the backdrop and
+  the player's picture.
 - `contiki-conf.h`: Contiki's configuration (keys, colours, sizes).
 - `contiki-ctk-conio.patch`: icons and the desktop in their own colours.
 - `gen-assets.py` makes `assets.h`: the X11 misc-fixed 4x6 font (public
@@ -53,7 +70,9 @@ its symbols where Epicardium's loader always puts it, 0x20040000
 (`add-symbol-file ctk.elf -o 0x20040000`, `tools/gdb-wui-guest/S95gdb-wui`),
 next to Pycardium's (in flash, so the pc tells them apart). Break on
 `poll_buttons`, `conio_flush`, `calc_process`'s thread function,
-`epic_isr_uart_rx` (then type in the console) and so on.
+`epic_isr_uart_rx` (then type in the console), `epic_isr_anim_frame` (with
+the player open) and so on; on core 0, `vAnimTask` and `decode_next`
+(`epicardium/modules/anim.c`).
 Contiki's processes are protothreads: their locals don't live across a wait,
 so watch their `static`s instead.
 

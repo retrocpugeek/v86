@@ -3,7 +3,9 @@
 // touch panel the emulator adds (the mouse on the badge's screen): the
 // desktop must come up with the RetroCPUGeek window; tapping its Close button
 // closes it, tapping the Calc icon opens the calculator, and tapping 7 and 8
-// shows 78; tapping the Term icon opens the serial terminal, where what's
+// shows 78; tapping the Play icon opens the player, whose frames core 0
+// decodes (they change; the cores' view shows epic_anim_decode), and its
+// Close button closes it; tapping the Term icon opens the serial terminal, where what's
 // typed in the page's console shows (core 0's UART interrupt to core 1) and
 // comes back in the console (the echo), and its Hello button writes to the
 // console; holding the top right button (Enter) opens the menus. No page
@@ -131,6 +133,24 @@ async function main()
     await tap(70, 40);
     await until("78 on its display", async () => (await count(90, 18, 104, 24)).dark > empty.dark + 8);
     await shot("calc");
+    // The player (the Play icon): its picture changes, frame by frame, as
+    // core 0 decodes them (the cores' view counts the decoder's calls and
+    // interrupts); its Close button
+    const picture = () => ev(`(() => {
+        const p = document.getElementById("card10-screen").getContext("2d").getImageData(36, 14, 88, 38).data;
+        let h = 0;
+        for(let i = 0; i < p.length; i++) h = (h * 31 + p[i]) >>> 0;
+        return h;
+    })()`);
+    await tap(145, 28);
+    await until("the player", async () => (await count(110, 56, 126, 66)).cream > 60);
+    const seen = new Set();
+    await until("frames changing", async () => { seen.add(await picture()); return seen.size >= 5; }, 20);
+    await until("the decoder's calls in the cores' view", async () =>
+        (await ev("document.querySelector('#cores-top tbody')?.innerText || ''")).includes("epic_anim_decode"), 20);
+    await shot("player");
+    await tap(108, 62);
+    await until("the player closed", async () => (await count(110, 56, 126, 66)).cream < 10);
     // The serial terminal: the Term icon, then text typed in the console
     const log = () => ev("document.querySelector('#terminal .xterm-rows')?.innerText || ''");
     await tap(145, 55);

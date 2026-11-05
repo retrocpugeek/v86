@@ -63,6 +63,8 @@ char ctk_arch_getkey(void);
 #define CH_LRCORNER  0x04
 #define CH_HLINE     0x05
 #define CH_VLINE     0x06
+/* A cell of the video picture (conio_video) */
+#define CH_VIDEO     0x07
 
 /* Colours: indexes into conio-card10.c's palette */
 #define SCREENCOLOR          0

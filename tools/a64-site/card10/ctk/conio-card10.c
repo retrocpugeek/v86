@@ -7,6 +7,7 @@
  * into the framebuffer and hands it to Epicardium. Besides the font's
  * characters, a cell can be
  *   - a line (CH_ULCORNER ... CH_VLINE, contiki-conf.h): window frames;
+ *   - a piece of a picture (CH_VIDEO): the player's video (conio_video());
  *   - an icon tile (0x80 + n): a 4 x 6 piece of an icon (assets.h), as CTK
  *     draws an icon as 3 x 3 characters;
  *   - a space in the screen's colour, or text in ICONCOLOR, over the
@@ -46,6 +47,22 @@ static struct cell shown[CONIO_HEIGHT][CONIO_WIDTH];
 static uint8_t cursx, cursy, colour, reversed;
 static int first = 1;
 static union disp_framebuffer fb;
+/* The video: its picture, where it starts (cells), its size (cells), and
+   whether its cells need drawing */
+static const uint16_t *video;
+static uint8_t video_x, video_y, video_w, video_h, video_changed;
+
+void
+conio_video(const unsigned short *picture, unsigned char cx, unsigned char cy,
+            unsigned char wcells, unsigned char hcells)
+{
+  video = picture;
+  video_x = cx;
+  video_y = cy;
+  video_w = wcells;
+  video_h = hcells;
+  video_changed = 1;
+}
 
 static void
 put(char c)
@@ -164,6 +181,19 @@ draw_cell(int cx, int cy, const struct cell *cell)
     fg = bg == T ? RGB(24, 16, 32) : bg;
     bg = t;
   }
+  if(c == CH_VIDEO) {
+    /* a piece of the video's picture (black outside it) */
+    int vx = (cx - video_x) * 4, vy = (cy - video_y) * 6;
+    int inside = video != NULL && cx >= video_x && cy >= video_y &&
+                 cx < video_x + video_w && cy < video_y + video_h;
+    for(y = 0; y < 6; ++y) {
+      for(x = 0; x < 4; ++x) {
+        pixel(x0 + x, y0 + y,
+              inside ? video[(vy + y) * video_w * 4 + vx + x] : 0);
+      }
+    }
+    return;
+  }
   for(y = 0; y < 6; ++y) {
     for(x = 0; x < 4; ++x) {
       uint16_t p;
@@ -205,7 +235,8 @@ conio_flush(void)
   }
   for(cy = 0; cy < CONIO_HEIGHT; ++cy) {
     for(cx = 0; cx < CONIO_WIDTH; ++cx) {
-      if(first || memcmp(&screen[cy][cx], &shown[cy][cx], sizeof(struct cell))) {
+      if(first || memcmp(&screen[cy][cx], &shown[cy][cx], sizeof(struct cell)) ||
+         (video_changed && screen[cy][cx].c == CH_VIDEO)) {
         draw_cell(cx, cy, &screen[cy][cx]);
         shown[cy][cx] = screen[cy][cx];
         changed = 1;
@@ -213,6 +244,7 @@ conio_flush(void)
     }
   }
   first = 0;
+  video_changed = 0;
   if(changed) {
     epic_disp_framebuffer(&fb);
   }

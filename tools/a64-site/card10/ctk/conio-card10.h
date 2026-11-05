@@ -26,6 +26,12 @@ void cvlinexy(unsigned char x, unsigned char y, unsigned char length);
 void cputsxy(unsigned char x, unsigned char y, const char *str);
 void cputcxy(unsigned char x, unsigned char y, char c);
 
+/* Shows a picture (RGB565, wcells * 4 by hcells * 6 pixels) in the cells
+   holding CH_VIDEO, its top left corner at cell (cx, cy): the player's video;
+   NULL: none. Each call redraws those cells. */
+void conio_video(const unsigned short *picture, unsigned char cx,
+                 unsigned char cy, unsigned char wcells, unsigned char hcells);
+
 /* Draws what changed into the display; returns whether anything did */
 int conio_flush(void);
 

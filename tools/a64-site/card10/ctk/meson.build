@@ -19,6 +19,7 @@ elf = executable(
   'main.c',
   'conio-card10.c',
   'serial.c',
+  'player.c',
   ctk_contiki,
   build_by_default: true,
   include_directories: include_directories('.', 'contiki/core', 'contiki/core/ctk'),
